@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SwiftLib Citation</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      color-scheme: light;
+      --font-sans: "Segoe UI Variable", "Segoe UI", "SF Pro Text", system-ui, sans-serif;
+      --color-page: #f3f2f1;
+      --color-surface: #ffffff;
+      --color-surface-subtle: #faf9f8;
+      --color-surface-hover: #f8f8f8;
+      --color-surface-selected: #edebe9;
+      --color-text: #323130;
+      --color-text-secondary: #605e5c;
+      --color-text-tertiary: #8a8886;
+      --color-border: #edebe9;
+      --color-border-strong: #d2d0ce;
+      --color-accent: #0f6cbd;
+      --color-accent-soft: rgba(15, 108, 189, 0.12);
+      --color-warning: #b85832;
+      --radius-lg: 14px;
+      --radius-md: 10px;
+      --radius-sm: 8px;
+      --shadow-menu: 0 8px 24px rgba(0, 0, 0, 0.12);
+    }
+
+    html, body {
+      height: 100%;
+    }
+
+    body {
+      padding: 14px;
+      font-family: var(--font-sans);
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--color-text);
+      background: var(--color-page);
+    }
+
+    .dialog-shell {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: calc(100vh - 28px);
+      width: 100%;
+      padding: 16px;
+      border-radius: var(--radius-lg);
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+    }
+
+    .dialog-header {
+      padding: 2px 0 0;
+    }
+
+    .eyebrow {
+      display: block;
+      margin-bottom: 2px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--color-text-tertiary);
+    }
+
+    h1 {
+      font-size: 18px;
+      line-height: 1.2;
+      font-weight: 700;
+      color: var(--color-text);
+      margin-bottom: 6px;
+    }
+
+    .intro {
+      max-width: 320px;
+      font-size: 12px;
+      color: var(--color-text-secondary);
+      line-height: 1.5;
+    }
+
+    .row {
+      display: grid;
+      gap: 6px;
+    }
+
+    label {
+      display: block;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--color-text-tertiary);
+    }
+
+    input,
+    select {
+      width: 100%;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      background: var(--color-surface);
+      color: var(--color-text);
+      font-size: 13px;
+      font-weight: 400;
+      padding: 10px 12px;
+      outline: none;
+      transition: border-color 0.12s ease, box-shadow 0.12s ease;
+    }
+
+    input:focus,
+    select:focus {
+      border-color: var(--color-accent);
+      box-shadow: 0 0 0 3px var(--color-accent-soft);
+    }
+
+    .search-input-wrap {
+      border: 1px solid var(--color-border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--color-surface);
+      padding: 2px;
+    }
+
+    .search-input-wrap input {
+      border: none;
+      background: transparent;
+      box-shadow: none;
+      padding: 10px 10px;
+    }
+
+    .selected-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .selected-wrap:empty {
+      display: none;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      border: 1px solid var(--color-border);
+      border-radius: 999px;
+      background: var(--color-surface-subtle);
+      padding: 4px 10px;
+      font-size: 11px;
+      color: var(--color-text);
+    }
+
+    .chip-text {
+      min-width: 0;
+      max-width: 220px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .chip-remove {
+      border: none;
+      background: transparent;
+      color: var(--color-text-tertiary);
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1;
+      padding: 0;
+    }
+
+    .chip-remove:hover {
+      color: var(--color-text);
+    }
+
+    .results {
+      flex: 1;
+      min-height: 240px;
+      max-height: 280px;
+      overflow-y: auto;
+      padding: 8px;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-md);
+      background: var(--color-surface);
+    }
+
+    .results::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    .results::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .results::-webkit-scrollbar-thumb {
+      border: 2px solid transparent;
+      border-radius: 999px;
+      background: rgba(96, 94, 92, 0.28);
+      background-clip: padding-box;
+    }
+
+    .results::-webkit-scrollbar-thumb:hover {
+      background: rgba(96, 94, 92, 0.38);
+      background-clip: padding-box;
+    }
+
+    .ref-item {
+      margin-bottom: 8px;
+      padding: 12px 14px;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-md);
+      background: var(--color-surface);
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+
+    .ref-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .ref-item:hover {
+      background: var(--color-surface-hover);
+      border-color: var(--color-border-strong);
+    }
+
+    .ref-item.sel {
+      background: var(--color-surface-selected);
+      border-color: var(--color-border-strong);
+    }
+
+    .ref-title {
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1.42;
+      color: var(--color-text);
+      margin-bottom: 4px;
+    }
+
+    .ref-meta {
+      font-size: 11px;
+      color: var(--color-text-secondary);
+      line-height: 1.5;
+    }
+
+    .empty {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 220px;
+      padding: 26px 16px;
+      color: var(--color-text-secondary);
+    }
+
+    .empty-title {
+      margin-bottom: 6px;
+      font-size: 16px;
+      line-height: 1.3;
+      font-weight: 600;
+      color: var(--color-text);
+    }
+
+    .empty-copy {
+      max-width: 260px;
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--color-text-secondary);
+    }
+
+    .empty.is-danger .empty-title,
+    .empty.is-danger .empty-copy {
+      color: var(--color-warning);
+    }
+
+    .hint {
+      font-size: 11px;
+      color: var(--color-text-tertiary);
+      line-height: 1.45;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      margin-top: auto;
+      padding-top: 4px;
+    }
+
+    button {
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      background: var(--color-surface);
+      color: var(--color-text);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 10px 12px;
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+
+    button:hover:not(:disabled) {
+      background: var(--color-surface-subtle);
+      border-color: var(--color-border-strong);
+    }
+
+    button:disabled {
+      opacity: 0.42;
+      cursor: not-allowed;
+    }
+
+    .toolbar button {
+      flex: 1;
+      min-height: 40px;
+    }
+
+    .btn-primary {
+      border-color: var(--color-accent);
+      background: var(--color-accent);
+      color: #fff;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: #115ea3;
+      border-color: #115ea3;
+    }
+  </style>
+</head>
+<body>
+  <div class="dialog-shell">
+    <div class="dialog-header">
+      <span class="eyebrow">Word Citation Picker</span>
+      <h1 id="dlgTitle">插入引文</h1>
+      <p class="intro" id="dlgIntro">挑选需要的来源，并发送回主面板插入到当前光标位置。</p>
+    </div>
+
+    <div class="row">
+      <label for="styleSel">引文样式</label>
+      <select id="styleSel"></select>
+    </div>
+
+    <div class="selected-wrap" id="selectedChips"></div>
+
+    <!-- Citation item options (v4): shown when at least one ref is selected -->
+    <details id="citationOptions" style="display:none;">
+      <summary style="cursor:pointer;font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--color-text-tertiary);padding:4px 0;user-select:none;">引用选项</summary>
+      <div style="display:grid;gap:8px;margin-top:8px;padding:12px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface-subtle);">
+        <div style="display:grid;grid-template-columns:1fr 120px;gap:8px;">
+          <div class="row">
+            <label for="optLocator">页码 / 定位符</label>
+            <input id="optLocator" type="text" placeholder="如：12–15" autocomplete="off" />
+          </div>
+          <div class="row">
+            <label for="optLabel">类型</label>
+            <select id="optLabel">
+              <option value="page">页 page</option>
+              <option value="chapter">章 chapter</option>
+              <option value="figure">图 figure</option>
+              <option value="table">表 table</option>
+              <option value="section">节 section</option>
+              <option value="paragraph">段 paragraph</option>
+              <option value="verse">节 verse</option>
+              <option value="line">行 line</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <label for="optPrefix">前缀</label>
+          <input id="optPrefix" type="text" placeholder="如：see" autocomplete="off" />
+        </div>
+        <div class="row">
+          <label for="optSuffix">后缀</label>
+          <input id="optSuffix" type="text" placeholder="如：table 2" autocomplete="off" />
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding-top:2px;">
+          <input id="optSuppressAuthor" type="checkbox" style="width:auto;margin:0;" />
+          <label for="optSuppressAuthor" style="font-size:12px;font-weight:400;letter-spacing:normal;text-transform:none;color:var(--color-text);cursor:pointer;">省略作者（仅显示年份/编号）</label>
+        </div>
+        <p id="optMultiHint" style="display:none;font-size:11px;color:var(--color-text-tertiary);">多文献引用时，以上选项应用于第一篇文献。如需为每篇单独设置，请分别插入后合并。</p>
+      </div>
+    </details>
+
+    <div class="row">
+      <label for="search">搜索文库</label>
+      <div class="search-input-wrap">
+        <input id="search" type="text" placeholder="输入标题、作者或年份关键词…" autocomplete="off" spellcheck="false" />
+      </div>
+    </div>
+
+    <div class="results" id="results">
+      <div class="empty">
+        <div class="empty-title">开始搜索</div>
+        <div class="empty-copy">输入标题、作者或年份关键词，快速挑选要插入的文献。</div>
+      </div>
+    </div>
+
+    <p class="hint" id="dlgHint">单击选择 · 再次单击取消 · 点击“插入”添加所有已选文献</p>
+
+    <div class="toolbar">
+      <button type="button" id="btnCancel">取消</button>
+      <button type="button" class="btn-primary" id="btnInsert" disabled>插入</button>
+      <!-- Button text is updated dynamically by dialog.js based on mode -->
+    </div>
+  </div>
+
+  <script src="/dist/citeproc-bundle.js"></script>
+  <script src="/dialog.js"></script>
+</body>
+</html>

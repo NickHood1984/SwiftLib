@@ -1,0 +1,10 @@
+{
+  "translationServer": {
+    "repository": "https://github.com/zotero/translation-server",
+    "revision": "2fce0493723f3523094dead78e7e897e14a070c6"
+  },
+  "translatorsCN": {
+    "repository": "https://github.com/l0o0/translators_CN",
+    "revision": "023ebe1b8995044634d3230fd32133b56746eef7"
+  }
+}

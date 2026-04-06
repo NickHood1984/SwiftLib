@@ -1,0 +1,45 @@
+# === macOS ===
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# === Xcode / Swift ===
+DerivedData/
+*.xcuserdata
+*.xcworkspace
+xcuserdata/
+.swiftpm/
+.xcodebuild/
+
+# === Swift Package Manager ===
+.build/
+Package.resolved
+
+# === Build outputs ===
+build/
+
+# === Node.js ===
+node_modules/
+scripts/note-editor/node_modules/
+WordAddinNpm/node_modules/
+
+# === Cached binaries ===
+.cache/
+
+# === Translation backend vendor (large third-party repos) ===
+swiftlib-translation-backend/vendor/
+swiftlib-translation-backend/runtime/translators/
+
+# === Logs ===
+run.log
+*.log
+
+# === Temporary test files ===
+test_parse.swift
+test_parse2.swift
+test_pdfview
+test_pdfview.swift
+test_pdfview_margins
+
+# === Claude / AI ===
+.claude/

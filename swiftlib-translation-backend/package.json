@@ -1,0 +1,16 @@
+{
+  "name": "swiftlib-translation-backend",
+  "version": "0.2.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "SwiftLib 中文元数据后端，封装 translation-server 与 translators_CN。",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "update-translators": "node scripts/update-translators.mjs",
+    "build-overlay": "node scripts/build-overlay.mjs"
+  }
+}

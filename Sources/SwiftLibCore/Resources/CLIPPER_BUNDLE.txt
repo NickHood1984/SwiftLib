@@ -1,0 +1,26 @@
+SwiftLib 内置的 Obsidian Web Clipper 同源阅读资源
+================================================
+
+文件:
+- ClipperDefuddle.js  — 由仓库内 obsidian-clipper 的 webpack 打出（Defuddle full + SwiftLibDefuddleExtract）
+- ClipperReader.css    — 自 obsidian-clipper/dist/reader.css 复制
+- ClipperHighlighter.css — 自 obsidian-clipper/dist/highlighter.css 复制
+
+重要（与 obsidian-clipper 原仓库对照）:
+- SwiftLib **不会** 加载 dist/reader-script.js，也 **不会** 执行 reader.ts 里的 `Reader.apply()`。
+- YouTube 等在 reader.ts 中依赖 `browser.runtime.sendMessage(enableYouTubeEmbedRule)` 的逻辑 **仅存在于浏览器扩展**，WKWebView 内无对应「后端」。
+- 在线阅读在 Swift 侧会对含 `youtube.com` / `youtu.be` / `youtube-nocookie` 的 iframe、embed、object 做剥离：Readability 的 `allowedVideoRegex` 会保留 YouTube iframe，若不删除会在 WKWebView 内触发 **错误 152-4**；正文仅保留外链缩略图卡片（`swiftlib-yt-player-wrap`）。
+- 在线阅读 YouTube 条目的头部摘要 **不会** 再回退到书目 `abstract`，避免与正文 `og:description` 段落重复；元信息区若 `siteName`/`journal` 与 `url` 为同一 http(s) 链接则只显示一项。
+- 调试在线阅读流水线：打开 macOS「控制台」应用 → 过滤子系统 `SwiftLib`、类别 `OnlineReadable`；注入脚本会通过 `SwiftLibClipperDebug` 回传阶段名（如 swiftlib_defuddle_extract_start）。
+- `readerResult`：`WKScriptMessageHandler` 名称，由 `ClipperDefuddle.js` 内 `SwiftLibDefuddleExtract` 在返回 JSON 的同时 `postMessage`（与 `evaluateJavaScript` 双通道）；由 `ReaderExtractionManager` 接收，`deinit` 时 `removeScriptMessageHandler`。
+- `ReaderExtractionManager`（SwiftLib/ReaderExtraction）：负责注入 Defuddle → Readability → YouTube 降级、1.5s 延迟重试一轮、Safari 类 `customUserAgent`。
+- YouTube 字幕：`YouTubeTranscriptFetcher` 使用 **独立 ephemeral `URLSession`** 先请求 watch 再请求 caption（Cookie 罐与首次 `CONSENT` 头配合）；caption 请求带 **Referer / Origin**（指向 `watch?v=`），并对 `baseUrl` 尝试 **fmt=xml3 / json3** 等变体。解析路径：`ytInitialPlayerResponse` → `captionTracks` → `baseUrl` → timedtext（XML 或 JSON3）。调试可过滤子系统 `SwiftLib`、类别 `YouTubeTranscript`。在线阅读 YouTube 页加载后异步插入 `<details>` 字幕块。菜单「SwiftLib → 剪藏 YouTube 时在笔记中追加字幕」对应 `UserDefaults` 键 `SwiftLib.appendYouTubeTranscriptOnClip`（默认关）。
+
+升级 Defuddle 或更新阅读样式后，请在 obsidian-clipper 目录执行:
+
+  npm install
+  npm run build:swiftlib-defuddle
+
+然后复制 dist 下 reader.css / highlighter.css 覆盖本目录同名文件（若样式有变）。
+
+许可: Defuddle 以 npm 包为准；Readability.js（若仍存在）为 Apache-2.0；Clipper 样式版权归 Obsidian/相应作者。
