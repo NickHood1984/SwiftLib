@@ -5,22 +5,22 @@ import SwiftLibCore
 struct TagDOCX: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tag-docx",
-        abstract: "Wrap existing superscript numeric citations in a .docx with SwiftLib citation tags"
+        abstract: "将 .docx 中已有的上标数字引用替换为 SwiftLib 引用标签"
     )
 
-    @Argument(help: "Path to the .docx file")
+    @Argument(help: ".docx 文件路径")
     var file: String
 
-    @Option(name: .long, help: "Output path for the tagged .docx copy")
+    @Option(name: .long, help: "标记后输出的 .docx 路径")
     var output: String?
 
-    @Option(name: .shortAndLong, help: "Citation style stored in the tag metadata")
+    @Option(name: .shortAndLong, help: "存储在标签元数据中的引用样式")
     var style: String = "nature"
 
-    @Option(name: .long, help: "Restrict citation matching to references in the given collection ID")
+    @Option(name: .long, help: "仅匹配指定分组 ID 内的文献")
     var collection: Int64?
 
-    @Flag(name: .long, help: "Overwrite the input .docx in place")
+    @Flag(name: .long, help: "直接覆盖原文件")
     var inPlace = false
 
     func run() throws {

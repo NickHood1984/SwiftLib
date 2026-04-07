@@ -6,7 +6,7 @@ import SwiftLibCore
 struct SwiftLibCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "swiftlib-cli",
-        abstract: "swiftlib-cli — manage references from the command line",
+        abstract: "swiftlib-cli — 在命令行管理文献库",
         version: "1.0.0",
         subcommands: [
             Search.self,
@@ -186,12 +186,12 @@ struct CNKIDebugOutput: Encodable {
 // MARK: - Subcommands
 
 struct Search: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Full-text search references")
+    static let configuration = CommandConfiguration(abstract: "全文搜索文献")
 
-    @Argument(help: "Search query")
+    @Argument(help: "搜索关键词")
     var query: String
 
-    @Option(name: .shortAndLong, help: "Max results")
+    @Option(name: .shortAndLong, help: "最多返回条数")
     var limit: Int = 20
 
     func run() throws {
@@ -201,39 +201,39 @@ struct Search: ParsableCommand {
 }
 
 struct List: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "List all references")
+    static let configuration = CommandConfiguration(abstract: "列出所有文献")
 
-    @Option(name: .shortAndLong, help: "Max results (0 = all)")
+    @Option(name: .shortAndLong, help: "最多返回条数（0 = 全部）")
     var limit: Int = 0
 
-    @Option(name: .long, help: "Number of results to skip (for pagination)")
+    @Option(name: .long, help: "跳过前 N 条（用于分页）")
     var offset: Int = 0
 
-    @Option(name: .long, help: "Filter by collection ID")
+    @Option(name: .long, help: "按分组 ID 筛选")
     var collection: Int64?
 
-    @Option(name: .long, help: "Filter by tag ID")
+    @Option(name: .long, help: "按标签 ID 筛选")
     var tag: Int64?
 
-    @Option(name: .long, help: "Filter by author name (partial match)")
+    @Option(name: .long, help: "按作者姓名筛选（模糊匹配）")
     var author: String?
 
-    @Option(name: .long, help: "Filter by year (earliest)")
+    @Option(name: .long, help: "按年份筛选（起始年）")
     var yearFrom: Int?
 
-    @Option(name: .long, help: "Filter by year (latest)")
+    @Option(name: .long, help: "按年份筛选（截止年）")
     var yearTo: Int?
 
-    @Option(name: .long, help: "Filter by journal name (partial match)")
+    @Option(name: .long, help: "按期刊名称筛选（模糊匹配）")
     var journal: String?
 
-    @Option(name: .customLong("type"), help: "Filter by reference type (e.g. 'Journal Article')")
+    @Option(name: .customLong("type"), help: "按文献类型筛选（如 'Journal Article'）")
     var referenceType: String?
 
-    @Flag(name: .customLong("has-pdf"), help: "Only references with an attached PDF")
+    @Flag(name: .customLong("has-pdf"), help: "只显示有 PDF 附件的文献")
     var hasPdf = false
 
-    @Option(name: .long, help: "Keyword search across title, abstract, notes")
+    @Option(name: .long, help: "在标题、摘要、备注中关键词搜索")
     var keyword: String?
 
     func run() throws {
@@ -274,9 +274,9 @@ struct List: ParsableCommand {
 }
 
 struct Get: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Get reference by ID")
+    static let configuration = CommandConfiguration(abstract: "按 ID 获取文献详情")
 
-    @Argument(help: "Reference ID")
+    @Argument(help: "文献 ID")
     var id: Int64
 
     func run() throws {
@@ -290,18 +290,18 @@ struct Get: ParsableCommand {
 }
 
 struct Add: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Add a reference by DOI, PMID, arXiv ID, or BibTeX")
+    static let configuration = CommandConfiguration(abstract: "通过 DOI、PMID、arXiv 编号或 BibTeX 添加文献")
 
-    @Option(name: .long, help: "DOI, PMID, or arXiv identifier")
+    @Option(name: .long, help: "DOI、PMID 或 arXiv 编号")
     var identifier: String?
 
-    @Option(name: .long, help: "BibTeX string")
+    @Option(name: .long, help: "BibTeX 字符串")
     var bibtex: String?
 
-    @Option(name: .long, help: "Title (for manual entry)")
+    @Option(name: .long, help: "标题（手动录入时使用）")
     var title: String?
 
-    @Option(name: .long, help: "Collection ID to add to")
+    @Option(name: .long, help: "添加到指定分组 ID")
     var collection: Int64?
 
     func run() async throws {
@@ -337,33 +337,33 @@ struct Add: AsyncParsableCommand {
 }
 
 struct Update: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Update fields of an existing reference")
+    static let configuration = CommandConfiguration(abstract: "修改已有文献的字段")
 
-    @Argument(help: "Reference ID")
+    @Argument(help: "文献 ID")
     var id: Int64
 
-    @Option(name: .long, help: "Title")
+    @Option(name: .long, help: "标题")
     var title: String?
 
-    @Option(name: .long, help: "Publication year")
+    @Option(name: .long, help: "出版年份")
     var year: Int?
 
-    @Option(name: .long, help: "Authors (semicolon-separated, 'Family, Given; Family2, Given2')")
+    @Option(name: .long, help: "作者（分号分隔，格式：姓, 名; 姓, 名）")
     var authors: String?
 
-    @Option(name: .customLong("type"), help: "Reference type (e.g. 'Journal Article', 'Book')")
+    @Option(name: .customLong("type"), help: "文献类型（如 'Journal Article'、'Book'）")
     var referenceType: String?
 
-    @Option(name: .long, help: "Journal name")
+    @Option(name: .long, help: "期刊名称")
     var journal: String?
 
-    @Option(name: .long, help: "Volume")
+    @Option(name: .long, help: "卷号")
     var volume: String?
 
-    @Option(name: .long, help: "Issue")
+    @Option(name: .long, help: "期号")
     var issue: String?
 
-    @Option(name: .long, help: "Pages (e.g. '100-110')")
+    @Option(name: .long, help: "页码（如 '100-110'）")
     var pages: String?
 
     @Option(name: .long, help: "DOI")
@@ -372,13 +372,13 @@ struct Update: ParsableCommand {
     @Option(name: .long, help: "URL")
     var url: String?
 
-    @Option(name: .long, help: "Abstract")
+    @Option(name: .long, help: "摘要")
     var abstract: String?
 
-    @Option(name: .long, help: "Notes")
+    @Option(name: .long, help: "备注")
     var notes: String?
 
-    @Option(name: .long, help: "Publisher")
+    @Option(name: .long, help: "出版社")
     var publisher: String?
 
     @Option(name: .long, help: "ISBN")
@@ -387,16 +387,16 @@ struct Update: ParsableCommand {
     @Option(name: .long, help: "ISSN")
     var issn: String?
 
-    @Option(name: .long, help: "Language")
+    @Option(name: .long, help: "语言")
     var language: String?
 
-    @Option(name: .long, help: "Edition")
+    @Option(name: .long, help: "版次")
     var edition: String?
 
-    @Option(name: .long, help: "Move to collection ID")
+    @Option(name: .long, help: "移动到指定分组 ID")
     var collection: Int64?
 
-    @Option(name: .customLong("clear-field"), help: "Set a field to nil (repeatable, e.g. --clear-field doi)")
+    @Option(name: .customLong("clear-field"), help: "将某个字段设为空（可重复使用，如 --clear-field doi）")
     var clearFields: [String] = []
 
     func run() throws {
@@ -458,18 +458,18 @@ struct Update: ParsableCommand {
 }
 
 struct Delete: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Delete references by ID, or all references in a collection")
+    static let configuration = CommandConfiguration(abstract: "按 ID 删除文献，或批量删除某分组内所有文献")
 
-    @Argument(help: "Reference IDs to delete (omit when using --collection for bulk delete)")
+    @Argument(help: "要删除的文献 ID（使用 --collection 批量删除时可省略）")
     var ids: [Int64] = []
 
-    @Flag(name: .shortAndLong, help: "Skip confirmation prompt")
+    @Flag(name: .shortAndLong, help: "跳过确认提示")
     var force = false
 
-    @Option(name: .long, help: "Delete all references belonging to this collection ID")
+    @Option(name: .long, help: "删除指定分组 ID 内的所有文献")
     var collection: Int64?
 
-    @Flag(name: .customLong("delete-collection"), help: "Also delete the collection record itself (use with --collection)")
+    @Flag(name: .customLong("delete-collection"), help: "同时删除分组记录本身（配合 --collection 使用）")
     var deleteCollection = false
 
     func run() throws {
@@ -515,15 +515,15 @@ struct Delete: ParsableCommand {
 }
 
 struct Move: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Move references to a collection")
+    static let configuration = CommandConfiguration(abstract: "将文献移动到某个分组")
 
-    @Argument(help: "Reference IDs to move")
+    @Argument(help: "要移动的文献 ID")
     var ids: [Int64]
 
-    @Option(name: .long, help: "Target collection ID")
+    @Option(name: .long, help: "目标分组 ID")
     var collection: Int64?
 
-    @Flag(name: .long, help: "Remove from any collection (move to uncategorised)")
+    @Flag(name: .long, help: "从所有分组中移除（移至未分组）")
     var remove = false
 
     func run() throws {
@@ -545,15 +545,15 @@ struct Move: ParsableCommand {
 }
 
 struct Cite: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Generate citation for references")
+    static let configuration = CommandConfiguration(abstract: "生成文献引用格式")
 
-    @Argument(help: "Reference IDs")
+    @Argument(help: "文献 ID")
     var ids: [Int64]
 
-    @Option(name: .shortAndLong, help: "Citation style (apa, mla, chicago, ieee, harvard, vancouver, nature)")
+    @Option(name: .shortAndLong, help: "引用样式（apa、mla、chicago、ieee、harvard、vancouver、nature）")
     var style: String = "apa"
 
-    @Option(name: .long, help: "Output format: text, bibliography, docx-cc")
+    @Option(name: .long, help: "输出格式：text、bibliography、docx-cc")
     var format: String = "text"
 
     func run() throws {
@@ -608,16 +608,16 @@ struct Cite: ParsableCommand {
 struct Import: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "import",
-        abstract: "Import references from BibTeX or RIS file (use '-' for stdin)"
+        abstract: "从 BibTeX 或 RIS 文件导入文献（用 '-' 表示标准输入）"
     )
 
-    @Argument(help: "Path to .bib or .ris file, or '-' to read from stdin")
+    @Argument(help: ".bib 或 .ris 文件路径，或 '-' 从标准输入读取")
     var file: String
 
-    @Option(name: .long, help: "Collection ID to import into")
+    @Option(name: .long, help: "导入到指定分组 ID")
     var collection: Int64?
 
-    @Option(name: .long, help: "Format when reading from stdin: bib, ris")
+    @Option(name: .long, help: "从标准输入读取时指定格式：bib、ris")
     var format: String?
 
     func run() throws {
@@ -672,34 +672,34 @@ struct Import: ParsableCommand {
 struct CNKIDebug: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "cnki-debug",
-        abstract: "Inspect CNKI title matching and candidate parsing without launching the app"
+        abstract: "调试 CNKI 标题匹配与候选条目解析（不启动主程序）"
     )
 
-    @Option(name: .long, help: "Seed title from the local item/PDF")
+    @Option(name: .long, help: "本地条目/PDF 的原始标题")
     var seedTitle: String
 
-    @Option(name: .long, help: "Seed first author")
+    @Option(name: .long, help: "本地条目的第一作者")
     var seedAuthor: String?
 
-    @Option(name: .long, help: "Seed year")
+    @Option(name: .long, help: "本地条目的出版年份")
     var seedYear: Int?
 
-    @Option(name: .long, help: "Seed journal")
+    @Option(name: .long, help: "本地条目的期刊名")
     var seedJournal: String?
 
-    @Option(name: .long, help: "Candidate title returned from CNKI")
+    @Option(name: .long, help: "CNKI 返回的候选标题")
     var candidateTitle: String
 
-    @Option(name: .long, help: "Candidate metadata line, usually author/source/date text")
+    @Option(name: .long, help: "候选条目的元数据（作者/来源/日期等，通常为一行文本）")
     var metaText: String = ""
 
-    @Option(name: .long, help: "Candidate snippet")
+    @Option(name: .long, help: "候选条目的摘要片段")
     var snippet: String?
 
-    @Option(name: .long, help: "Dummy detail URL for debugging")
+    @Option(name: .long, help: "调试用虚拟详情页 URL")
     var detailURL: String = "https://kns.cnki.net/debug"
 
-    @Option(name: .long, help: "Seed file name used when title is incomplete")
+    @Option(name: .long, help: "标题不完整时使用的文件名")
     var fileName: String?
 
     func run() throws {
@@ -762,27 +762,27 @@ struct CNKIDebug: ParsableCommand {
 }
 
 struct Collections: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "List or manage collections")
+    static let configuration = CommandConfiguration(abstract: "列出或管理分组")
 
-    @Flag(name: .long, help: "Create a new collection")
+    @Flag(name: .long, help: "新建分组")
     var create = false
 
-    @Option(name: .long, help: "Collection name (for --create or --rename)")
+    @Option(name: .long, help: "分组名称（用于 --create 或 --rename）")
     var name: String?
 
-    @Option(name: .long, help: "Delete collection by ID (does not delete its references)")
+    @Option(name: .long, help: "按 ID 删除分组（不会删除其中的文献）")
     var delete: Int64?
 
-    @Flag(name: .customLong("with-references"), help: "When deleting a collection, also delete all references and PDFs in that collection")
+    @Flag(name: .customLong("with-references"), help: "删除分组时同时删除该分组内所有文献及 PDF")
     var withReferences = false
 
-    @Flag(name: .shortAndLong, help: "Skip confirmation prompt for destructive operations")
+    @Flag(name: .shortAndLong, help: "跳过危险操作的确认提示")
     var force = false
 
-    @Flag(name: .long, help: "Rename a collection")
+    @Flag(name: .long, help: "重命名分组")
     var rename = false
 
-    @Option(name: .long, help: "Collection ID (for --rename)")
+    @Option(name: .long, help: "分组 ID（用于 --rename）")
     var id: Int64?
 
     func run() throws {
@@ -832,36 +832,36 @@ struct Collections: ParsableCommand {
 }
 
 struct Tags: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "List or manage tags, or associate tags with references")
+    static let configuration = CommandConfiguration(abstract: "列出或管理标签，或为文献关联/取消标签")
 
-    @Flag(name: .long, help: "Create a new tag")
+    @Flag(name: .long, help: "新建标签")
     var create = false
 
-    @Option(name: .long, help: "Tag name (for --create or --rename)")
+    @Option(name: .long, help: "标签名称（用于 --create 或 --rename）")
     var name: String?
 
-    @Option(name: .long, help: "Tag color hex (for --create, default #007AFF)")
+    @Option(name: .long, help: "标签颜色十六进制（用于 --create，默认 #007AFF）")
     var color: String = "#007AFF"
 
-    @Option(name: .long, help: "Delete tag by ID")
+    @Option(name: .long, help: "按 ID 删除标签")
     var delete: Int64?
 
-    @Flag(name: .long, help: "Assign tags to a reference (adds, does not replace)")
+    @Flag(name: .long, help: "为文献添加标签（追加，不替换）")
     var assign = false
 
-    @Flag(name: .customLong("remove-tags"), help: "Remove tags from a reference")
+    @Flag(name: .customLong("remove-tags"), help: "从文献移除指定标签")
     var removeTags = false
 
-    @Option(name: .long, help: "Reference ID (for --assign, --remove-tags, or listing a reference's tags)")
+    @Option(name: .long, help: "文献 ID（用于 --assign、--remove-tags 或查看文献标签）")
     var reference: Int64?
 
-    @Option(name: .long, help: "Comma-separated tag IDs (for --assign or --remove-tags)")
+    @Option(name: .long, help: "逗号分隔的标签 ID（用于 --assign 或 --remove-tags）")
     var tags: String?
 
-    @Flag(name: .long, help: "Rename a tag")
+    @Flag(name: .long, help: "重命名标签")
     var rename = false
 
-    @Option(name: .long, help: "Tag ID (for --rename)")
+    @Option(name: .long, help: "标签 ID（用于 --rename）")
     var id: Int64?
 
     func run() throws {
@@ -924,9 +924,9 @@ struct Tags: ParsableCommand {
 }
 
 struct Annotations: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "List PDF annotations for a reference")
+    static let configuration = CommandConfiguration(abstract: "列出某文献的 PDF 批注")
 
-    @Argument(help: "Reference ID")
+    @Argument(help: "文献 ID")
     var referenceId: Int64
 
     func run() throws {
@@ -954,7 +954,7 @@ struct Annotations: ParsableCommand {
 }
 
 struct Styles: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "List available citation styles")
+    static let configuration = CommandConfiguration(abstract: "列出可用的引用样式")
 
     func run() throws {
         struct StyleDTO: Encodable {
@@ -971,12 +971,12 @@ struct Styles: ParsableCommand {
 }
 
 struct Export: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Export references as BibTeX, RIS, or JSON")
+    static let configuration = CommandConfiguration(abstract: "将文献导出为 BibTeX、RIS 或 JSON 格式")
 
-    @Option(name: .shortAndLong, help: "Format: json, bibtex, ris")
+    @Option(name: .shortAndLong, help: "格式：json、bibtex、ris")
     var format: String = "json"
 
-    @Option(name: .long, help: "Filter by collection ID")
+    @Option(name: .long, help: "按分组 ID 筛选")
     var collection: Int64?
 
     func run() throws {

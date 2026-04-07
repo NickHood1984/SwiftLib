@@ -61,61 +61,28 @@ struct AnnotationSidebarView: View {
     // MARK: - Header
 
     private var sidebarHeader: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 10) {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.14))
-                    .frame(width: 30, height: 30)
-                    .overlay {
-                        Image(systemName: "bookmark.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(Color.accentColor)
-                    }
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center) {
+                Text("标注")
+                    .font(.headline)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("标注")
-                        .font(.headline)
-                    Text("筛选并跳转到文档中的高亮、下划线与笔记")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 12)
-
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("\(filteredAnnotations.count)")
-                        .font(.system(size: 18, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    Text("条")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .background(panelBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(panelStroke, lineWidth: 0.5)
-                )
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("筛选")
-                    .font(.system(size: 11, weight: .semibold))
+                Text("\(filteredAnnotations.count)")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
-                DraggableSegmentedControl(selection: $filterType, items: [
-                    ("全部", nil),
-                    ("高亮", .highlight),
-                    ("下划线", .underline),
-                    ("笔记", .note),
-                ])
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
+
+                Spacer()
             }
-            .padding(8)
-            .background(panelBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(panelStroke, lineWidth: 0.5)
-            )
+
+            DraggableSegmentedControl(selection: $filterType, items: [
+                ("全部", nil),
+                ("高亮", .highlight),
+                ("下划线", .underline),
+                ("笔记", .note),
+            ])
         }
         .padding(.horizontal, 14)
         .padding(.top, 14)
@@ -164,18 +131,6 @@ struct AnnotationSidebarView: View {
         ScrollViewReader { proxy in
             OverlayScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text(filterType?.label ?? "全部标注")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text("\(filteredAnnotations.count) 条")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    .padding(.horizontal, 4)
-
                     ForEach(filteredAnnotations) { annotation in
                         AnnotationCard(
                             annotation: annotation,
@@ -288,10 +243,6 @@ struct AnnotationCard: View {
         Color.black.opacity(isSelected ? 0.10 : 0.04)
     }
 
-    private var metaChipBackground: Color {
-        Color.primary.opacity(0.05)
-    }
-
     private var excerptBackground: Color {
         Color.primary.opacity(isSelected ? 0.055 : 0.030)
     }
@@ -308,78 +259,49 @@ struct AnnotationCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 8) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(Color(hex: annotation.color).opacity(0.85))
-                        .frame(width: 8, height: 8)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 6) {
+                Circle()
+                    .fill(Color(hex: annotation.color).opacity(0.85))
+                    .frame(width: 8, height: 8)
 
-                    Image(systemName: annotation.type.icon)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                Text(annotation.type.label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
-                    Text(annotation.type.label)
-                        .font(.caption2)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(metaChipBackground, in: Capsule(style: .continuous))
+                Spacer(minLength: 4)
 
-                Spacer(minLength: 8)
+                Text("P\(annotation.pageIndex + 1)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.tertiary)
 
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text("P\(annotation.pageIndex + 1)")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 4)
-                        .background(metaChipBackground, in: Capsule(style: .continuous))
+                Text("·")
+                    .foregroundStyle(.quaternary)
 
-                    Text(annotation.dateCreated.formatted(.dateTime.month().day().hour().minute()))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-                }
+                Text(annotation.dateCreated.formatted(.dateTime.month().day().hour().minute()))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
             }
 
             if let text = annotation.selectedText, !text.isEmpty {
                 HStack(alignment: .top, spacing: 8) {
                     RoundedRectangle(cornerRadius: 2, style: .continuous)
                         .fill(Color(hex: annotation.color).opacity(0.75))
-                        .frame(width: 4)
+                        .frame(width: 3)
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("摘录")
-                            .font(.caption2)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(.secondary)
-
-                        Text(text)
-                            .font(.callout)
-                            .foregroundStyle(.primary)
-                            .lineLimit(5)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                    Text(text)
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                        .lineLimit(5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(10)
-                .background(excerptBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .padding(8)
+                .background(excerptBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
 
             if let previewNote = normalizedNotePreview {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "text.quote")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text("笔记")
-                            .font(.caption2)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(.secondary)
-                    }
-
+                VStack(alignment: .leading, spacing: 4) {
                     if let attributed = try? AttributedString(markdown: previewNote, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
                         Text(attributed)
                             .font(.callout)
@@ -394,8 +316,8 @@ struct AnnotationCard: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .padding(10)
-                .background(noteBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .padding(8)
+                .background(noteBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
 
             if isHovered || isSelected {

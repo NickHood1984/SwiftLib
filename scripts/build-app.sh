@@ -240,6 +240,36 @@ sign_bundle() {
     codesign --force --deep --sign "$CODESIGN_IDENTITY" --timestamp=none "$APP_BUNDLE"
 }
 
+embed_app_icon() {
+    local icon_src="$PROJECT_DIR/图标.png"
+    if [ ! -f "$icon_src" ]; then
+        echo "▸ 跳过图标嵌入（未找到 图标.png）"
+        return
+    fi
+    echo "▸ Embedding app icon..."
+    local iconset
+    iconset="$(mktemp -d).iconset"
+    mkdir -p "$iconset"
+    sips -z 16   16   "$icon_src" --out "$iconset/icon_16x16.png"    >/dev/null
+    sips -z 32   32   "$icon_src" --out "$iconset/icon_16x16@2x.png" >/dev/null
+    sips -z 32   32   "$icon_src" --out "$iconset/icon_32x32.png"    >/dev/null
+    sips -z 64   64   "$icon_src" --out "$iconset/icon_32x32@2x.png" >/dev/null
+    sips -z 128  128  "$icon_src" --out "$iconset/icon_128x128.png"       >/dev/null
+    sips -z 256  256  "$icon_src" --out "$iconset/icon_128x128@2x.png"    >/dev/null
+    sips -z 256  256  "$icon_src" --out "$iconset/icon_256x256.png"       >/dev/null
+    sips -z 512  512  "$icon_src" --out "$iconset/icon_256x256@2x.png"    >/dev/null
+    sips -z 512  512  "$icon_src" --out "$iconset/icon_512x512.png"       >/dev/null
+    sips -z 1024 1024 "$icon_src" --out "$iconset/icon_512x512@2x.png"    >/dev/null
+    iconutil -c icns "$iconset" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+    rm -rf "$iconset"
+    # 确保 Info.plist 中有 CFBundleIconFile
+    if ! /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$APP_BUNDLE/Contents/Info.plist" >/dev/null 2>&1; then
+        /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP_BUNDLE/Contents/Info.plist"
+    else
+        /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$APP_BUNDLE/Contents/Info.plist"
+    fi
+}
+
 create_dmg() {
     echo "▸ Creating DMG..."
     rm -rf "$STAGING_DIR" "$DMG_PATH"
@@ -251,6 +281,7 @@ create_dmg() {
 build_app
 build_cli
 assemble_app_bundle
+embed_app_icon
 prepare_backend_overlay
 download_node_runtime
 embed_helpers

@@ -240,6 +240,23 @@ SwiftLib/
 
 ---
 
-## 📄 许可证
+## � 开源致谢
+
+本项目依赖以下开源组件，特此致谢并遵守其各自许可证：
+
+| 组件 | 版本 | 许可证 | 用途 |
+|------|------|--------|------|
+| [Zotero Translation Server](https://github.com/zotero/translation-server) | 2.0.5 | AGPL-3.0 | 网页元数据抓取后端，随应用捆绑运行 |
+| [translators_CN](https://github.com/l0o0/translators_CN) | — | AGPL-3.0 | 中文学术网站 Zotero 转换器（知网、万方、维普等） |
+| [citeproc-js](https://github.com/Juris-M/citeproc-js) | 1.4.61 | AGPL-3.0 | CSL 引用格式化引擎，嵌入 JavaScriptCore 运行 |
+| [GRDB.swift](https://github.com/groue/GRDB.swift) | — | MIT | SQLite 数据库 ORM |
+| [Readability.js](https://github.com/mozilla/readability) | — | Apache-2.0 | 网页正文提取 |
+| [Defuddle](https://github.com/kepano/defuddle) | — | MIT | 网页内容清洗与结构化提取 |
+
+> **AGPL-3.0 说明**：Zotero Translation Server、translators_CN 及 citeproc-js 均采用 AGPL-3.0 许可证。根据该许可证要求，本项目在分发时须注明上述组件的使用，并保留其原始许可证文本。各组件源代码可通过上方链接获取。
+
+---
+
+## �📄 许可证
 
 本项目为私有项目，暂未公开发布。
