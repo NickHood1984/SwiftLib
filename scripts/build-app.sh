@@ -21,7 +21,7 @@ APP_NAME="SwiftLib"
 CLI_NAME="swiftlib-cli"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 APP_VERSION="${APP_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)}"
-APP_VERSION="${APP_VERSION:-1.1.0}"
+APP_VERSION="${APP_VERSION:-1.1.1}"
 APP_BUILD_VERSION="${APP_BUILD_VERSION:-$APP_VERSION}"
 if [ "$CONFIGURATION" = "Release" ]; then
     DMG_NAME="$APP_NAME-$APP_VERSION.dmg"

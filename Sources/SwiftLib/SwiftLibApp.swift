@@ -81,8 +81,12 @@ struct SwiftLibApp: App {
                 }
 
                 Button("卸载 CLI 工具") {
-                    CLIInstaller.uninstall()
-                    showToast("CLI 工具已卸载", tone: .info, hideAfter: 2.5)
+                    do {
+                        try CLIInstaller.uninstall()
+                        showToast("CLI 工具已卸载", tone: .info, hideAfter: 2.5)
+                    } catch {
+                        showToast("卸载失败：\(error.localizedDescription)", tone: .error, hideAfter: 5)
+                    }
                 }
                 .disabled(!CLIInstaller.isInstalled)
 

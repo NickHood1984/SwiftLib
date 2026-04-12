@@ -7,7 +7,7 @@ cd "$PROJECT_DIR"
 
 APP_NAME="${APP_NAME:-SwiftLib}"
 APP_VERSION="${APP_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)}"
-APP_VERSION="${APP_VERSION:-1.1.0}"
+APP_VERSION="${APP_VERSION:-1.1.1}"
 APP_BUILD_VERSION="${APP_BUILD_VERSION:-$APP_VERSION}"
 SPARKLE_KEYS_ACCOUNT="${SPARKLE_KEYS_ACCOUNT:-com.swiftlib.app}"
 RELEASE_TAG="${RELEASE_TAG:-v$APP_VERSION}"

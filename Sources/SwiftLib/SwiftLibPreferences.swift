@@ -4,9 +4,16 @@ enum SwiftLibPreferences {
     /// 剪藏 YouTube 网页时，是否在后台拉取字幕并追加到 `notes`（默认关闭，避免额外请求与隐私顾虑）。
     static let appendYouTubeTranscriptOnClipKey = "SwiftLib.appendYouTubeTranscriptOnClip"
 
+    static let onboardingCompletedKey = "SwiftLib.onboardingCompleted"
+
     static var appendYouTubeTranscriptOnClip: Bool {
         get { UserDefaults.standard.bool(forKey: appendYouTubeTranscriptOnClipKey) }
         set { UserDefaults.standard.set(newValue, forKey: appendYouTubeTranscriptOnClipKey) }
+    }
+
+    static var onboardingCompleted: Bool {
+        get { UserDefaults.standard.bool(forKey: onboardingCompletedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: onboardingCompletedKey) }
     }
 
     /// 用于 CrossRef / OpenAlex API polite pool 的联系邮箱。

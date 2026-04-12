@@ -80,7 +80,7 @@ enum WordAddinInstaller {
                    xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
                    xsi:type="TaskPaneApp">
           <Id>a1b2c3d4-e5f6-7890-abcd-ef1234567890</Id>
-          <Version>1.1.0.0</Version>
+          <Version>1.1.1.0</Version>
           <ProviderName>SwiftLib</ProviderName>
           <DefaultLocale>zh-CN</DefaultLocale>
           <DisplayName DefaultValue="SwiftLib 引文"/>

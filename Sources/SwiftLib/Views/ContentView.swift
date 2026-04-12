@@ -432,6 +432,7 @@ final class LibraryViewModel: ObservableObject {
 struct ContentView: View {
     @StateObject private var viewModel = LibraryViewModel()
     @StateObject private var cnkiMetadataProvider = CNKIMetadataProvider()
+    @StateObject private var onboarding = OnboardingManager.shared
     @AppStorage("hasPromptedCLIInstallation") private var hasPromptedCLIInstallation = false
     @State private var showCLIInstallPrompt = false
     @State private var cliInstallResult: CLIInstallResult?
@@ -527,6 +528,7 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
+                .coachMarkAnchor(.citationStyle)
             }
         }
         .toolbar(content: {
@@ -596,6 +598,7 @@ struct ContentView: View {
                     .help("打开更多导入方式")
                     .disabled(viewModel.isImporting)
                 }
+                .coachMarkAnchor(.toolbarImport)
             }
 
         })
@@ -818,10 +821,33 @@ struct ContentView: View {
         }
         .frame(minWidth: 900, minHeight: 600)
         .onAppear {
+            // 新手引导（延迟 0.5s，在 CLI 安装提示 1.5s 之前）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                onboarding.triggerOnboardingIfNeeded()
+            }
+
             if !hasPromptedCLIInstallation && !CLIInstaller.isInstalled {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                     showCLIInstallPrompt = true
                 }
+            }
+        }
+        .sheet(isPresented: $onboarding.showWelcomeWizard) {
+            // 向导关闭后启动 Coach Marks（如果向导已完成）
+            if SwiftLibPreferences.onboardingCompleted {
+                onboarding.advanceCoachMarks()
+            }
+        } content: {
+            WelcomeWizardView(onboarding: onboarding)
+        }
+        .overlayPreferenceValue(CoachMarkAnchorKey.self) { anchors in
+            if let step = onboarding.activeCoachMark {
+                CoachMarkOverlay(
+                    step: step,
+                    anchors: anchors,
+                    onNext: { onboarding.completeCurrentCoachMark() },
+                    onSkip: { onboarding.skipAll() }
+                )
             }
         }
         .alert("安装命令行工具", isPresented: $showCLIInstallPrompt) {
@@ -838,7 +864,7 @@ struct ContentView: View {
                 hasPromptedCLIInstallation = true
             }
         } message: {
-            Text("SwiftLib 提供配套的命令行工具 swiftlib-cli，可在终端中快速搜索、添加和导出文献。\n\n是否将其安装到 /usr/local/bin？\n（你也可以稍后在菜单栏「CLI 工具」中安装）")
+            Text("SwiftLib 提供配套的命令行工具 swiftlib-cli，可在终端中快速搜索、添加和导出文献。\n\n是否将其安装到 /usr/local/bin？安装时 macOS 可能会弹出管理员密码窗口。\n（你也可以稍后在菜单栏「CLI 工具」中安装）")
         }
         .alert(
             cliInstallResult?.isSuccess == true ? "安装成功" : "安装失败",
