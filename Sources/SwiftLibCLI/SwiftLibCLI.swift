@@ -7,7 +7,7 @@ struct SwiftLibCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "swiftlib-cli",
         abstract: "swiftlib-cli — 在命令行管理文献库",
-        version: "1.0.0",
+        version: "1.1.0",
         subcommands: [
             Search.self,
             List.self,

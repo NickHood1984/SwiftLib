@@ -42,6 +42,8 @@ struct PDFInfoSidebarView: View {
                         Text(abstract)
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     }
                 }

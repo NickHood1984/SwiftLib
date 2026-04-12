@@ -17,4 +17,18 @@ enum SwiftLibPreferences {
         get { UserDefaults.standard.string(forKey: apiContactEmailKey) ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: apiContactEmailKey) }
     }
+
+    // MARK: - WPS Add-in
+
+    /// 是否启用 WPS 插件自动安装（默认为 true，当检测到 WPS 时自动安装）。
+    static let enableWPSAddinKey = "SwiftLib.enableWPSAddin"
+
+    static var enableWPSAddin: Bool {
+        get {
+            // Defaults to true if the key has never been set
+            if UserDefaults.standard.object(forKey: enableWPSAddinKey) == nil { return true }
+            return UserDefaults.standard.bool(forKey: enableWPSAddinKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: enableWPSAddinKey) }
+    }
 }

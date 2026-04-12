@@ -204,7 +204,29 @@ swift run SwiftLib
 构建产物位于 `build/` 目录：
 - `SwiftLib.app` — 主应用
 - `swiftlib-cli` — 命令行工具
-- `SwiftLib-Debug.dmg` — 分发镜像
+- `SwiftLib-<version>-Debug.dmg` — 调试分发镜像
+- `SwiftLib-<version>.dmg` — Release 分发镜像
+
+### Sparkle 自动更新发布
+
+开源 GitHub 分发不要求 Apple Developer Program，但首次下载的 App 仍然会受到 Gatekeeper / 未公证提示影响。
+
+```bash
+# 1. 首次生成 Sparkle 更新签名密钥（私钥保存在本机 Keychain）
+./scripts/sparkle-tools.sh generate-keys
+
+# 2. 构建 release 包
+APP_VERSION=1.1.0 ./scripts/build-app.sh release
+
+# 3. 生成 GitHub Pages 用的 appcast.xml
+APP_VERSION=1.1.0 ./scripts/publish-appcast.sh
+```
+
+之后需要：
+- 将 `build/SwiftLib-1.1.0.dmg` 上传到 GitHub Release `v1.1.0`
+- 将 GitHub Pages 的发布源设为仓库根目录（`main / root`）
+- 把 `Docs/appcast.xml` 推到仓库
+- 如果你提供了发布说明文件，再把 `Docs/releases/` 一并推上去
 
 ---
 

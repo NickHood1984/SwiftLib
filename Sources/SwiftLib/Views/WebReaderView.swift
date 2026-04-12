@@ -67,6 +67,8 @@ final class WebReaderViewModel: ObservableObject {
     private var shouldPersistTranscriptIntoReference = false
     /// Debounce task for appearance changes (font size / content width).
     private var appearanceDebounceTask: Task<Void, Never>?
+    private var currentViewportSize: CGSize = .zero
+    private var annotationToolbarAnchorRect: CGRect?
     var fetchTranscriptFromOriginalPage: ((String) async -> String?)?
 
     var jumpToAnnotationInView: ((WebAnnotationRecord) -> Void)?
@@ -142,6 +144,7 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     func stageSelection(_ selection: WebSelectionSnapshot?, viewportSize: CGSize) {
+        currentViewportSize = viewportSize
         dismissAnnotationToolbar()
         guard let selection else {
             pendingSelection = nil
@@ -164,6 +167,39 @@ final class WebReaderViewModel: ObservableObject {
         )
         selectionToolbarLayout = Self.toolbarLayout(
             viewportSelectionRect: selection.viewportSelectionRect,
+            viewportSize: viewportSize,
+            fallbackToTop: true
+        )
+    }
+
+    func updateViewportSize(_ viewportSize: CGSize) {
+        guard viewportSize.width > 0, viewportSize.height > 0 else { return }
+        guard viewportSize != currentViewportSize else { return }
+
+        currentViewportSize = viewportSize
+
+        if let pendingSelection {
+            selectionToolbarLayout = Self.toolbarLayout(
+                viewportSelectionRect: pendingSelection.viewportSelectionRect,
+                viewportSize: viewportSize,
+                fallbackToTop: true
+            )
+        }
+
+        if clickedAnnotationRecord != nil {
+            annotationToolbarLayout = Self.toolbarLayout(
+                viewportSelectionRect: annotationToolbarAnchorRect,
+                viewportSize: viewportSize
+            )
+        }
+    }
+
+    func presentAnnotationToolbar(for annotation: WebAnnotationRecord, anchorRect: CGRect, viewportSize: CGSize) {
+        currentViewportSize = viewportSize
+        annotationToolbarAnchorRect = anchorRect
+        clickedAnnotationRecord = annotation
+        annotationToolbarLayout = Self.toolbarLayout(
+            viewportSelectionRect: anchorRect,
             viewportSize: viewportSize
         )
     }
@@ -226,6 +262,7 @@ final class WebReaderViewModel: ObservableObject {
     func dismissAnnotationToolbar() {
         clickedAnnotationRecord = nil
         annotationToolbarLayout = nil
+        annotationToolbarAnchorRect = nil
     }
 
     func navigateTo(_ annotation: WebAnnotationRecord) {
@@ -709,51 +746,19 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     /// 与 PDF 选区工具栏相同的尺寸与上下优先策略（坐标为 SwiftUI 自上而下、视口与 WKWebView 对齐）。
-    static func toolbarLayout(viewportSelectionRect: CGRect?, viewportSize: CGSize) -> SelectionToolbarLayout? {
-        let barW: CGFloat = 180
-        let barH: CGFloat = 50
-        let gap: CGFloat = 12
-        let margin: CGFloat = 6
-
-        let overlayW = viewportSize.width
-        let overlayH = viewportSize.height
-
-        if overlayW <= 0 || overlayH <= 0 {
-            return nil
-        }
-
-        guard let rect = viewportSelectionRect, rect.width >= 1, rect.height >= 1 else {
-            return SelectionToolbarLayout(
-                center: CGPoint(x: overlayW / 2, y: barH / 2 + margin),
-                visible: true
-            )
-        }
-
-        let visibleRect = CGRect(origin: .zero, size: viewportSize)
-        guard rect.intersects(visibleRect) else {
-            return SelectionToolbarLayout(center: .zero, visible: false)
-        }
-
-        let midX = rect.midX
-        let lineTopSwift = rect.minY
-        let lineBottomSwift = rect.maxY
-
-        var centerY: CGFloat
-        let belowY = lineBottomSwift + gap + barH / 2
-        let aboveY = lineTopSwift - gap - barH / 2
-        if belowY + barH / 2 <= overlayH - margin {
-            centerY = belowY
-        } else if aboveY - barH / 2 >= margin {
-            centerY = aboveY
-        } else {
-            centerY = belowY
-        }
-        centerY = min(max(centerY, barH / 2 + margin), overlayH - barH / 2 - margin)
-
-        var centerX = midX
-        centerX = min(max(centerX, barW / 2 + margin), overlayW - barW / 2 - margin)
-
-        return SelectionToolbarLayout(center: CGPoint(x: centerX, y: centerY), visible: true)
+    static func toolbarLayout(
+        viewportSelectionRect: CGRect?,
+        viewportSize: CGSize,
+        fallbackToTop: Bool = false
+    ) -> SelectionToolbarLayout? {
+        let metrics = ReaderActionBarMetrics.resolve(for: .web, viewportWidth: viewportSize.width)
+        return SelectionToolbarLayout.anchored(
+            to: viewportSelectionRect,
+            overlaySize: viewportSize,
+            metrics: metrics,
+            horizontalAnchor: .center,
+            fallbackToTop: fallbackToTop
+        )
     }
 
     private func observeAnnotations() {
@@ -1813,13 +1818,22 @@ struct WebReaderView: View {
                         pinnedYouTubeHeader
                     }
                     youTubeInlineHeader
-                    WebReaderContentView(viewModel: viewModel)
-                        .overlay {
-                            webSelectionToolbarOverlay
-                        }
-                        .overlay {
-                            webAnnotationToolbarOverlay
-                        }
+                    GeometryReader { proxy in
+                        WebReaderContentView(viewModel: viewModel)
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .overlay {
+                                webSelectionToolbarOverlay
+                            }
+                            .overlay {
+                                webAnnotationToolbarOverlay
+                            }
+                            .onAppear {
+                                viewModel.updateViewportSize(proxy.size)
+                            }
+                            .onChange(of: proxy.size) { _, newSize in
+                                viewModel.updateViewportSize(newSize)
+                            }
+                    }
                 }
 
                 if viewModel.isRendering || viewModel.isLiveReadableBusy {
@@ -2001,13 +2015,13 @@ struct WebReaderView: View {
         let shouldShow = viewModel.hasSelection
             && viewModel.selectionToolbarLayout?.visible == true
         if shouldShow, let layout = viewModel.selectionToolbarLayout {
-            WebSelectionActionBar(viewModel: viewModel)
+            WebSelectionActionBar(viewModel: viewModel, metrics: layout.metrics)
                 .fixedSize()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
+                .offset(x: layout.origin.x, y: layout.origin.y)
                 .allowsHitTesting(true)
                 .transition(.scale(scale: 0.92, anchor: .top).combined(with: .opacity))
-                .animation(.spring(response: 0.25, dampingFraction: 0.82), value: layout.center)
+                .animation(.spring(response: 0.25, dampingFraction: 0.82), value: layout.origin)
         }
     }
 
@@ -2015,10 +2029,10 @@ struct WebReaderView: View {
     private var webAnnotationToolbarOverlay: some View {
         if viewModel.clickedAnnotationRecord != nil,
            let layout = viewModel.annotationToolbarLayout, layout.visible {
-            WebAnnotationActionBar(viewModel: viewModel)
+            WebAnnotationActionBar(viewModel: viewModel, metrics: layout.metrics)
                 .fixedSize()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
+                .offset(x: layout.origin.x, y: layout.origin.y)
                 .allowsHitTesting(true)
                 .transition(.opacity)
         }
@@ -2178,6 +2192,7 @@ private struct YouTubeWatchPlayPlaceholder: View {
 
 private struct WebSelectionActionBar: View {
     @ObservedObject var viewModel: WebReaderViewModel
+    let metrics: ReaderActionBarMetrics
     @State private var noteMarkdown = ""
     @State private var editorContentHeight: CGFloat = 36
     @Environment(\.colorScheme) private var colorScheme
@@ -2190,7 +2205,7 @@ private struct WebSelectionActionBar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 2) {
+            HStack(spacing: metrics.topRowSpacing) {
                 toolbarButton(icon: "highlighter", label: "高亮") {
                     viewModel.applySelectionAction(.highlight)
                 }
@@ -2212,7 +2227,7 @@ private struct WebSelectionActionBar: View {
                     } label: {
                         Circle()
                             .fill(Color(nsColor: color.nsColor.withAlphaComponent(1.0)))
-                            .frame(width: 16, height: 16)
+                            .frame(width: metrics.colorDotSize, height: metrics.colorDotSize)
                             .overlay(
                                 Circle()
                                     .strokeBorder(
@@ -2221,7 +2236,7 @@ private struct WebSelectionActionBar: View {
                                     )
                             )
                             .scaleEffect(isSelected ? 1.12 : 1.0)
-                            .frame(width: 22, height: 28)
+                                    .frame(width: metrics.colorButtonWidth, height: metrics.buttonHeight)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -2235,13 +2250,13 @@ private struct WebSelectionActionBar: View {
                     viewModel.clearSelection()
                 }
             }
-            .padding(.horizontal, 5)
-            .padding(.vertical, 3)
+            .padding(.horizontal, metrics.topRowHorizontalPadding)
+            .padding(.vertical, metrics.topRowVerticalPadding)
 
             Rectangle()
                 .fill(Color.white.opacity(0.1))
                 .frame(height: 0.5)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, metrics.dividerHorizontalPadding)
 
             // Note section: always-visible inline editor
             VStack(spacing: 0) {
@@ -2253,12 +2268,12 @@ private struct WebSelectionActionBar: View {
                         editorContentHeight = height
                     }
                 )
-                .frame(height: min(max(editorContentHeight, 36), 180))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .padding(.horizontal, 8)
-                .padding(.top, 6)
+                .frame(height: min(max(editorContentHeight, 36), metrics.selectionEditorMaxHeight))
+                .clipShape(RoundedRectangle(cornerRadius: metrics.editorCornerRadius))
+                .padding(.horizontal, metrics.editorHorizontalPadding)
+                .padding(.top, metrics.editorTopPadding)
 
-                HStack(spacing: 8) {
+                HStack(spacing: metrics.actionRowSpacing) {
                     Spacer()
                     Button("取消") {
                         noteMarkdown = ""
@@ -2266,7 +2281,7 @@ private struct WebSelectionActionBar: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.white.opacity(0.6))
-                    .font(.system(size: 11))
+                    .font(.system(size: metrics.secondaryFontSize))
 
                     Button("保存") {
                         let md = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2275,10 +2290,10 @@ private struct WebSelectionActionBar: View {
                         noteMarkdown = ""
                         viewModel.clearSelection()
                     }
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: metrics.secondaryFontSize, weight: .medium))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, metrics.saveButtonHorizontalPadding)
+                    .padding(.vertical, metrics.saveButtonVerticalPadding)
                     .background(
                         Capsule(style: .continuous)
                             .fill(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2288,14 +2303,14 @@ private struct WebSelectionActionBar: View {
                     .buttonStyle(.plain)
                     .disabled(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .padding(.horizontal, metrics.actionRowHorizontalPadding)
+                .padding(.vertical, metrics.actionRowVerticalPadding)
             }
         }
-        .frame(width: 340)
-        .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .frame(width: metrics.toolbarWidth)
+        .background(bgColor, in: RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous)
                 .strokeBorder(
                     colorScheme == .dark
                         ? Color.white.opacity(0.12)
@@ -2318,31 +2333,32 @@ private struct WebSelectionActionBar: View {
     private var separator: some View {
         Rectangle()
             .fill(colorScheme == .dark ? Color.white.opacity(0.15) : Color.black.opacity(0.12))
-            .frame(width: 1, height: 16)
-            .padding(.horizontal, 2)
+            .frame(width: 1, height: metrics.separatorHeight)
+            .padding(.horizontal, metrics.separatorHorizontalPadding)
     }
 
     private func toolbarButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: metrics.buttonIconSize, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.88))
-                .frame(width: 30, height: 28)
+                .frame(width: metrics.buttonWidth, height: metrics.buttonHeight)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(WebNotionToolbarButtonStyle())
+        .buttonStyle(WebNotionToolbarButtonStyle(cornerRadius: metrics.buttonCornerRadius))
         .help(label)
         .accessibilityLabel(label)
     }
 }
 
 private struct WebNotionToolbarButtonStyle: ButtonStyle {
+    let cornerRadius: CGFloat
     @State private var isHovered = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(configuration.isPressed
                           ? Color.white.opacity(0.18)
                           : (isHovered ? Color.white.opacity(0.10) : Color.clear))
@@ -2358,6 +2374,7 @@ private struct WebNotionToolbarButtonStyle: ButtonStyle {
 
 private struct WebAnnotationActionBar: View {
     @ObservedObject var viewModel: WebReaderViewModel
+    let metrics: ReaderActionBarMetrics
     @State private var isEditingNote = false
     @State private var editingMarkdown = ""
     @State private var autoSaveTask: Task<Void, Never>?
@@ -2373,7 +2390,7 @@ private struct WebAnnotationActionBar: View {
     var body: some View {
         if let annotation = viewModel.clickedAnnotationRecord {
             VStack(spacing: 0) {
-                HStack(spacing: 2) {
+                HStack(spacing: metrics.topRowSpacing) {
                     ForEach(AnnotationColor.palette) { color in
                         let isSelected = annotation.color == color.id
                         Button {
@@ -2384,7 +2401,7 @@ private struct WebAnnotationActionBar: View {
                         } label: {
                             Circle()
                                 .fill(Color(nsColor: color.nsColor.withAlphaComponent(1.0)))
-                                .frame(width: 16, height: 16)
+                                .frame(width: metrics.colorDotSize, height: metrics.colorDotSize)
                                 .overlay(
                                     Circle()
                                         .strokeBorder(
@@ -2393,7 +2410,7 @@ private struct WebAnnotationActionBar: View {
                                         )
                                 )
                                 .scaleEffect(isSelected ? 1.12 : 1.0)
-                                .frame(width: 22, height: 28)
+                                    .frame(width: metrics.colorButtonWidth, height: metrics.buttonHeight)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -2408,21 +2425,21 @@ private struct WebAnnotationActionBar: View {
                         viewModel.dismissAnnotationToolbar()
                     } label: {
                         Image(systemName: "trash")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: metrics.buttonIconSize, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.88))
-                            .frame(width: 30, height: 28)
+                            .frame(width: metrics.buttonWidth, height: metrics.buttonHeight)
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(WebNotionToolbarButtonStyle())
+                    .buttonStyle(WebNotionToolbarButtonStyle(cornerRadius: metrics.buttonCornerRadius))
                     .help("删除标注")
                 }
-                .padding(.horizontal, 5)
-                .padding(.vertical, 3)
+                .padding(.horizontal, metrics.topRowHorizontalPadding)
+                .padding(.vertical, metrics.topRowVerticalPadding)
 
                 Rectangle()
                     .fill(Color.white.opacity(0.1))
                     .frame(height: 0.5)
-                    .padding(.horizontal, 8)
+                    .padding(.horizontal, metrics.dividerHorizontalPadding)
 
                 // Note section: editor / placeholder
                 if isEditingNote {
@@ -2435,9 +2452,10 @@ private struct WebAnnotationActionBar: View {
                             editorContentHeight = height
                         }
                     )
-                    .frame(height: min(max(editorContentHeight, 36), 160))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 6)
+                    .frame(height: min(max(editorContentHeight, 36), metrics.annotationEditorMaxHeight))
+                    .clipShape(RoundedRectangle(cornerRadius: metrics.editorCornerRadius))
+                    .padding(.horizontal, metrics.editorHorizontalPadding)
+                    .padding(.vertical, metrics.editorVerticalPadding)
                 } else {
                     // No note — placeholder to add
                     Button {
@@ -2446,23 +2464,23 @@ private struct WebAnnotationActionBar: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "note.text")
-                                .font(.system(size: 10))
+                                .font(.system(size: metrics.placeholderIconSize))
                             Text("添加笔记…")
-                                .font(.system(size: 11))
+                                .font(.system(size: metrics.placeholderFontSize))
                         }
                         .foregroundStyle(.white.opacity(0.5))
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
+                        .padding(.horizontal, metrics.editorHorizontalPadding)
+                        .padding(.vertical, metrics.editorVerticalPadding)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .frame(width: 340)
-            .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .frame(width: metrics.toolbarWidth)
+            .background(bgColor, in: RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous)
                     .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.06), lineWidth: 0.5)
             )
             .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
@@ -2494,8 +2512,8 @@ private struct WebAnnotationActionBar: View {
     private var separator: some View {
         Rectangle()
             .fill(Color.white.opacity(0.15))
-            .frame(width: 1, height: 16)
-            .padding(.horizontal, 2)
+            .frame(width: 1, height: metrics.separatorHeight)
+            .padding(.horizontal, metrics.separatorHorizontalPadding)
     }
 }
 
@@ -2772,9 +2790,9 @@ private struct WebReaderContentView: NSViewRepresentable {
                     parent.viewModel.highlightSidebarSummary = false
                     parent.viewModel.selectedAnnotationId = annotation.id
                     parent.viewModel.clearSelection(clearViewSelection: false)
-                    parent.viewModel.clickedAnnotationRecord = annotation
-                    parent.viewModel.annotationToolbarLayout = WebReaderViewModel.toolbarLayout(
-                        viewportSelectionRect: clickRect,
+                    parent.viewModel.presentAnnotationToolbar(
+                        for: annotation,
+                        anchorRect: clickRect,
                         viewportSize: viewportSize
                     )
                 }

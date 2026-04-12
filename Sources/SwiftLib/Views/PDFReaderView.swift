@@ -62,11 +62,6 @@ struct StagedSelectionPDFAnchor: Equatable {
     var lastLineBounds: CGRect
 }
 
-struct SelectionToolbarLayout: Equatable {
-    var center: CGPoint
-    var visible: Bool
-}
-
 // MARK: - PDFReader ViewModel
 
 @MainActor
@@ -378,7 +373,7 @@ struct PDFReaderView: View {
                 }
             }
         }
-        .frame(minWidth: 800, minHeight: 600)
+        .frame(minWidth: 980, minHeight: 720)
         .background {
             pdfContainerBackground
                 .ignoresSafeArea(.container, edges: .top)
@@ -407,13 +402,13 @@ struct PDFReaderView: View {
         let shouldShow = viewModel.hasStagedSelection
             && viewModel.selectionToolbarLayout?.visible == true
         if shouldShow, let layout = viewModel.selectionToolbarLayout {
-            SelectionActionBar(viewModel: viewModel)
+            SelectionActionBar(viewModel: viewModel, metrics: layout.metrics)
                 .fixedSize()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
+                .offset(x: layout.origin.x, y: layout.origin.y)
                 .allowsHitTesting(true)
                 .transition(.scale(scale: 0.92, anchor: .top).combined(with: .opacity))
-                .animation(.spring(response: 0.25, dampingFraction: 0.82), value: layout.center)
+                .animation(.spring(response: 0.25, dampingFraction: 0.82), value: layout.origin)
         }
     }
 
@@ -421,10 +416,10 @@ struct PDFReaderView: View {
     private var annotationActionBarOverlay: some View {
         if viewModel.clickedAnnotationRecord != nil,
            let layout = viewModel.annotationToolbarLayout, layout.visible {
-            AnnotationActionBar(viewModel: viewModel)
+            AnnotationActionBar(viewModel: viewModel, metrics: layout.metrics)
                 .fixedSize()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
+                .offset(x: layout.origin.x, y: layout.origin.y)
                 .allowsHitTesting(true)
                 .transition(.opacity)
         }
@@ -464,16 +459,10 @@ struct PDFReaderView: View {
             Button {
                 withAnimation { showAnnotationSidebar.toggle() }
             } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: showAnnotationSidebar ? "sidebar.right" : "sidebar.right")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("\(viewModel.annotations.count)")
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                }
+                Image(systemName: showAnnotationSidebar ? "sidebar.right" : "sidebar.right")
+                    .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(showAnnotationSidebar ? .primary : .secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
+                .frame(width: 26, height: 20)
                 .contentShape(Capsule(style: .continuous))
             }
             .buttonStyle(FloatingGlassCapsuleButtonStyle(isActive: showAnnotationSidebar))
@@ -688,6 +677,7 @@ private struct FloatingGlassCapsuleButtonStyle: ButtonStyle {
 
 private struct SelectionActionBar: View {
     @ObservedObject var viewModel: PDFReaderViewModel
+    let metrics: ReaderActionBarMetrics
     @State private var noteMarkdown = ""
     @State private var editorContentHeight: CGFloat = 36
     @Environment(\.colorScheme) private var colorScheme
@@ -701,7 +691,7 @@ private struct SelectionActionBar: View {
     var body: some View {
         VStack(spacing: 0) {
             // Top row: actions + color dots
-            HStack(spacing: 2) {
+            HStack(spacing: metrics.topRowSpacing) {
                 toolbarButton(icon: "highlighter", label: "高亮") {
                     viewModel.applySelectionAction(.highlight)
                 }
@@ -723,7 +713,7 @@ private struct SelectionActionBar: View {
                     } label: {
                         Circle()
                             .fill(Color(nsColor: color.nsColor.withAlphaComponent(1.0)))
-                            .frame(width: 16, height: 16)
+                            .frame(width: metrics.colorDotSize, height: metrics.colorDotSize)
                             .overlay(
                                 Circle()
                                     .strokeBorder(
@@ -732,7 +722,7 @@ private struct SelectionActionBar: View {
                                     )
                             )
                             .scaleEffect(isSelected ? 1.12 : 1.0)
-                            .frame(width: 22, height: 28)
+                                    .frame(width: metrics.colorButtonWidth, height: metrics.buttonHeight)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -746,14 +736,14 @@ private struct SelectionActionBar: View {
                     viewModel.clearStagedSelection()
                 }
             }
-            .padding(.horizontal, 5)
-            .padding(.vertical, 3)
+            .padding(.horizontal, metrics.topRowHorizontalPadding)
+            .padding(.vertical, metrics.topRowVerticalPadding)
 
             // Divider
             Rectangle()
                 .fill(Color.white.opacity(0.1))
                 .frame(height: 0.5)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, metrics.dividerHorizontalPadding)
 
             // Note section: always-visible inline editor
             VStack(spacing: 0) {
@@ -765,12 +755,12 @@ private struct SelectionActionBar: View {
                         editorContentHeight = height
                     }
                 )
-                .frame(height: min(max(editorContentHeight, 36), 180))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .padding(.horizontal, 8)
-                .padding(.top, 6)
+                .frame(height: min(max(editorContentHeight, 36), metrics.selectionEditorMaxHeight))
+                .clipShape(RoundedRectangle(cornerRadius: metrics.editorCornerRadius))
+                .padding(.horizontal, metrics.editorHorizontalPadding)
+                .padding(.top, metrics.editorTopPadding)
 
-                HStack(spacing: 8) {
+                HStack(spacing: metrics.actionRowSpacing) {
                     Spacer()
                     Button("取消") {
                         noteMarkdown = ""
@@ -778,7 +768,7 @@ private struct SelectionActionBar: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.white.opacity(0.6))
-                    .font(.system(size: 11))
+                    .font(.system(size: metrics.secondaryFontSize))
 
                     Button("保存") {
                         let md = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -792,10 +782,10 @@ private struct SelectionActionBar: View {
                         noteMarkdown = ""
                         viewModel.clearStagedSelection()
                     }
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: metrics.secondaryFontSize, weight: .medium))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, metrics.saveButtonHorizontalPadding)
+                    .padding(.vertical, metrics.saveButtonVerticalPadding)
                     .background(
                         Capsule(style: .continuous)
                             .fill(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -805,14 +795,14 @@ private struct SelectionActionBar: View {
                     .buttonStyle(.plain)
                     .disabled(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .padding(.horizontal, metrics.actionRowHorizontalPadding)
+                .padding(.vertical, metrics.actionRowVerticalPadding)
             }
         }
-        .frame(width: 340)
-        .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .frame(width: metrics.toolbarWidth)
+        .background(bgColor, in: RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous)
                 .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.06), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
@@ -822,31 +812,32 @@ private struct SelectionActionBar: View {
     private var separator: some View {
         Rectangle()
             .fill(Color.white.opacity(0.15))
-            .frame(width: 1, height: 16)
-            .padding(.horizontal, 2)
+            .frame(width: 1, height: metrics.separatorHeight)
+            .padding(.horizontal, metrics.separatorHorizontalPadding)
     }
 
     private func toolbarButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: metrics.buttonIconSize, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.88))
-                .frame(width: 30, height: 28)
+                .frame(width: metrics.buttonWidth, height: metrics.buttonHeight)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(NotionToolbarButtonStyle())
+        .buttonStyle(NotionToolbarButtonStyle(cornerRadius: metrics.buttonCornerRadius))
         .help(label)
         .accessibilityLabel(label)
     }
 }
 
 private struct NotionToolbarButtonStyle: ButtonStyle {
+    let cornerRadius: CGFloat
     @State private var isHovered = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(configuration.isPressed
                           ? Color.white.opacity(0.18)
                           : (isHovered ? Color.white.opacity(0.10) : Color.clear))
@@ -864,6 +855,7 @@ private struct NotionToolbarButtonStyle: ButtonStyle {
 /// Provides: change color, edit note, delete.
 private struct AnnotationActionBar: View {
     @ObservedObject var viewModel: PDFReaderViewModel
+    let metrics: ReaderActionBarMetrics
     @State private var isEditingNote = false
     @State private var editingMarkdown = ""
     @State private var autoSaveTask: Task<Void, Never>?
@@ -880,7 +872,7 @@ private struct AnnotationActionBar: View {
         if let annotation = viewModel.clickedAnnotationRecord {
             VStack(spacing: 0) {
                 // Top row: color dots + actions
-                HStack(spacing: 2) {
+                HStack(spacing: metrics.topRowSpacing) {
                     ForEach(AnnotationColor.palette) { color in
                         let isSelected = annotation.color == color.id
                         Button {
@@ -891,7 +883,7 @@ private struct AnnotationActionBar: View {
                         } label: {
                             Circle()
                                 .fill(Color(nsColor: color.nsColor.withAlphaComponent(1.0)))
-                                .frame(width: 16, height: 16)
+                                .frame(width: metrics.colorDotSize, height: metrics.colorDotSize)
                                 .overlay(
                                     Circle()
                                         .strokeBorder(
@@ -900,7 +892,7 @@ private struct AnnotationActionBar: View {
                                         )
                                 )
                                 .scaleEffect(isSelected ? 1.12 : 1.0)
-                                .frame(width: 22, height: 28)
+                                    .frame(width: metrics.colorButtonWidth, height: metrics.buttonHeight)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -915,22 +907,22 @@ private struct AnnotationActionBar: View {
                         viewModel.dismissAnnotationToolbar()
                     } label: {
                         Image(systemName: "trash")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: metrics.buttonIconSize, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.88))
-                            .frame(width: 30, height: 28)
+                            .frame(width: metrics.buttonWidth, height: metrics.buttonHeight)
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(NotionToolbarButtonStyle())
+                    .buttonStyle(NotionToolbarButtonStyle(cornerRadius: metrics.buttonCornerRadius))
                     .help("删除标注")
                 }
-                .padding(.horizontal, 5)
-                .padding(.vertical, 3)
+                .padding(.horizontal, metrics.topRowHorizontalPadding)
+                .padding(.vertical, metrics.topRowVerticalPadding)
 
                 // Divider
                 Rectangle()
                     .fill(Color.white.opacity(0.1))
                     .frame(height: 0.5)
-                    .padding(.horizontal, 8)
+                    .padding(.horizontal, metrics.dividerHorizontalPadding)
 
                 // Note section: editor / placeholder
                 if isEditingNote {
@@ -943,9 +935,10 @@ private struct AnnotationActionBar: View {
                             editorContentHeight = height
                         }
                     )
-                    .frame(height: min(max(editorContentHeight, 36), 160))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 6)
+                    .frame(height: min(max(editorContentHeight, 36), metrics.annotationEditorMaxHeight))
+                    .clipShape(RoundedRectangle(cornerRadius: metrics.editorCornerRadius))
+                    .padding(.horizontal, metrics.editorHorizontalPadding)
+                    .padding(.vertical, metrics.editorVerticalPadding)
                 } else {
                     // No note — placeholder to add
                     Button {
@@ -954,23 +947,23 @@ private struct AnnotationActionBar: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "note.text")
-                                .font(.system(size: 10))
+                                .font(.system(size: metrics.placeholderIconSize))
                             Text("添加笔记…")
-                                .font(.system(size: 11))
+                                .font(.system(size: metrics.placeholderFontSize))
                         }
                         .foregroundStyle(.white.opacity(0.5))
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
+                        .padding(.horizontal, metrics.editorHorizontalPadding)
+                        .padding(.vertical, metrics.editorVerticalPadding)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .frame(width: 340)
-            .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .frame(width: metrics.toolbarWidth)
+            .background(bgColor, in: RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous)
                     .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.06), lineWidth: 0.5)
             )
             .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
@@ -1002,8 +995,8 @@ private struct AnnotationActionBar: View {
     private var separator: some View {
         Rectangle()
             .fill(Color.white.opacity(0.15))
-            .frame(width: 1, height: 16)
-            .padding(.horizontal, 2)
+            .frame(width: 1, height: metrics.separatorHeight)
+            .padding(.horizontal, metrics.separatorHorizontalPadding)
     }
 }
 
@@ -1301,8 +1294,6 @@ struct AnnotatablePDFView: NSViewRepresentable {
         private var loadedPDFURL: URL?
         private var documentLoadTask: Task<Void, Never>?
         private var toolbarDebounceTask: Task<Void, Never>?
-        private var lastToolbarCenter: CGPoint = .zero
-        private var lastToolbarVisible: Bool = false
 
         init(viewModel: PDFReaderViewModel) {
             self.viewModel = viewModel
@@ -1353,6 +1344,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
                           let firstPage = document.page(at: 0) else { return }
                     let currentPage = document.index(for: pdfView.currentPage ?? firstPage)
                     self.updatePageInfo(current: currentPage, total: document.pageCount)
+                    self.requestToolbarLayoutUpdate()
                 }
             }
         }
@@ -1439,78 +1431,32 @@ struct AnnotatablePDFView: NSViewRepresentable {
             toolbarDebounceTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 16_000_000) // ~1 frame (16ms)
                 guard !Task.isCancelled else { return }
-                self?.updateSelectionToolbarLayout()
+                self?.updateToolbarLayouts()
             }
         }
 
         @MainActor
-        func updateSelectionToolbarLayout() {
-            let barW: CGFloat = 168
-            let barH: CGFloat = 34
-            let gap: CGFloat = 2
-            let margin: CGFloat = 8
-
-            guard viewModel.hasStagedSelection,
-                  let anchor = viewModel.stagedSelectionPDFAnchor,
-                  let pdfView,
-                  let document = pdfView.document,
-                  anchor.pageIndex >= 0,
-                  anchor.pageIndex < document.pageCount,
-                  let page = document.page(at: anchor.pageIndex) else {
+        func updateToolbarLayouts() {
+            if viewModel.hasStagedSelection,
+               let anchor = viewModel.stagedSelectionPDFAnchor,
+               let pdfView {
+                let newLayout = selectionToolbarLayout(for: anchor, in: pdfView)
+                if viewModel.selectionToolbarLayout != newLayout {
+                    viewModel.selectionToolbarLayout = newLayout
+                }
+            } else if viewModel.selectionToolbarLayout != nil {
                 viewModel.selectionToolbarLayout = nil
-                lastToolbarVisible = false
-                return
             }
 
-            // convert(_:from: page) returns coordinates in PDFView's view space,
-            // which has its origin at the lower-left corner (Y increases upward).
-            // The SwiftUI overlay has origin at top-left (Y increases downward),
-            // so we must flip Y.
-            let rectInView = pdfView.convert(anchor.lastLineBounds, from: page)
-            guard !rectInView.isNull, !rectInView.isEmpty else {
-                viewModel.selectionToolbarLayout = SelectionToolbarLayout(center: .zero, visible: false)
-                return
+            if let annotation = viewModel.clickedAnnotationRecord,
+               let pdfView {
+                let newLayout = annotationToolbarLayout(for: annotation, in: pdfView)
+                if viewModel.annotationToolbarLayout != newLayout {
+                    viewModel.annotationToolbarLayout = newLayout
+                }
+            } else if viewModel.annotationToolbarLayout != nil {
+                viewModel.annotationToolbarLayout = nil
             }
-
-            let overlayW = pdfView.bounds.width
-            let overlayH = pdfView.bounds.height
-
-            if !rectInView.intersects(pdfView.bounds) {
-                viewModel.selectionToolbarLayout = SelectionToolbarLayout(center: .zero, visible: false)
-                return
-            }
-
-            // Flip Y: PDFView origin is bottom-left, SwiftUI overlay origin is top-left
-            let lineTopSwift = overlayH - rectInView.maxY
-            let lineBottomSwift = overlayH - rectInView.minY
-
-            var centerY: CGFloat
-            let belowY = lineBottomSwift + gap + barH / 2
-            let aboveY = lineTopSwift - gap - barH / 2
-            if belowY + barH / 2 <= overlayH - margin {
-                centerY = belowY
-            } else if aboveY - barH / 2 >= margin {
-                centerY = aboveY
-            } else {
-                centerY = max(margin + barH / 2, min(belowY, overlayH - barH / 2 - margin))
-            }
-            centerY = min(max(centerY, barH / 2 + margin), overlayH - barH / 2 - margin)
-
-            var centerX = rectInView.maxX
-            centerX = min(max(centerX, barW / 2 + margin), overlayW - barW / 2 - margin)
-
-            let newCenter = CGPoint(x: centerX, y: centerY)
-            // Skip SwiftUI re-render if position unchanged
-            if lastToolbarVisible && lastToolbarCenter == newCenter {
-                return
-            }
-            lastToolbarCenter = newCenter
-            lastToolbarVisible = true
-
-            viewModel.selectionToolbarLayout = SelectionToolbarLayout(
-                center: newCenter,
-                visible: true
-            )
         }
 
         func handleCommittedSelection(_ selection: PDFSelection) {
@@ -1525,7 +1471,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
                 guard let self else { return }
                 viewModel.dismissAnnotationToolbar()
                 viewModel.stageSelection(selection, pageRects: pageRects, pdfAnchor: pdfAnchor)
-                updateSelectionToolbarLayout()
+                updateToolbarLayouts()
             }
         }
 
@@ -1538,57 +1484,11 @@ struct AnnotatablePDFView: NSViewRepresentable {
                     viewModel.selectedAnnotationId = id
                     if let record = viewModel.annotations.first(where: { $0.id == id }) {
                         viewModel.clickedAnnotationRecord = record
-                        computeAnnotationToolbarLayout(for: record)
+                        updateToolbarLayouts()
                     }
                     return
                 }
             }
-        }
-
-        /// Compute position for the annotation action toolbar based on annotation bounds.
-        @MainActor
-        func computeAnnotationToolbarLayout(for annotation: PDFAnnotationRecord) {
-            let margin: CGFloat = 8
-
-            guard let pdfView,
-                  let document = pdfView.document,
-                  annotation.pageIndex >= 0,
-                  annotation.pageIndex < document.pageCount,
-                  let page = document.page(at: annotation.pageIndex) else {
-                viewModel.annotationToolbarLayout = nil
-                return
-            }
-
-            let bounds = annotation.unionBounds
-            let rectInView = pdfView.convert(bounds, from: page)
-            guard !rectInView.isNull, !rectInView.isEmpty else {
-                viewModel.annotationToolbarLayout = nil
-                return
-            }
-
-            let overlayW = pdfView.bounds.width
-            let overlayH = pdfView.bounds.height
-
-            guard rectInView.intersects(pdfView.bounds) else {
-                viewModel.annotationToolbarLayout = nil
-                return
-            }
-
-            // Flip Y
-            let lineBottomSwift = overlayH - rectInView.minY
-            let barH: CGFloat = 34
-            let gap: CGFloat = 4
-            var centerY = lineBottomSwift + gap + barH / 2
-            centerY = min(max(centerY, barH / 2 + margin), overlayH - barH / 2 - margin)
-
-            var centerX = rectInView.midX
-            let barW: CGFloat = 200
-            centerX = min(max(centerX, barW / 2 + margin), overlayW - barW / 2 - margin)
-
-            viewModel.annotationToolbarLayout = SelectionToolbarLayout(
-                center: CGPoint(x: centerX, y: centerY),
-                visible: true
-            )
         }
 
         static func lastLinePDFAnchor(for selection: PDFSelection, document: PDFDocument) -> StagedSelectionPDFAnchor? {
@@ -1614,6 +1514,73 @@ struct AnnotatablePDFView: NSViewRepresentable {
                 viewModel.clearStagedSelection(clearViewSelection: false)
                 viewModel.dismissAnnotationToolbar()
             }
+        }
+
+        @MainActor
+        private func selectionToolbarLayout(for anchor: StagedSelectionPDFAnchor, in pdfView: PDFView) -> SelectionToolbarLayout? {
+            guard let document = pdfView.document,
+                  anchor.pageIndex >= 0,
+                  anchor.pageIndex < document.pageCount,
+                  let page = document.page(at: anchor.pageIndex) else {
+                return nil
+            }
+
+            let rectInView = pdfView.convert(anchor.lastLineBounds, from: page)
+            let overlaySize = pdfView.bounds.size
+            let metrics = ReaderActionBarMetrics.resolve(for: .pdf, viewportWidth: overlaySize.width)
+
+            guard !rectInView.isNull, !rectInView.isEmpty else {
+                return SelectionToolbarLayout(origin: .zero, visible: false, metrics: metrics)
+            }
+            guard rectInView.intersects(pdfView.bounds) else {
+                return SelectionToolbarLayout(origin: .zero, visible: false, metrics: metrics)
+            }
+
+            let overlayRect = Self.overlayRect(fromPDFViewRect: rectInView, overlayHeight: overlaySize.height)
+            return SelectionToolbarLayout.anchored(
+                to: overlayRect,
+                overlaySize: overlaySize,
+                metrics: metrics,
+                horizontalAnchor: .trailing
+            )
+        }
+
+        @MainActor
+        private func annotationToolbarLayout(for annotation: PDFAnnotationRecord, in pdfView: PDFView) -> SelectionToolbarLayout? {
+            guard let document = pdfView.document,
+                  annotation.pageIndex >= 0,
+                  annotation.pageIndex < document.pageCount,
+                  let page = document.page(at: annotation.pageIndex) else {
+                return nil
+            }
+
+            let rectInView = pdfView.convert(annotation.unionBounds, from: page)
+            let overlaySize = pdfView.bounds.size
+            let metrics = ReaderActionBarMetrics.resolve(for: .pdf, viewportWidth: overlaySize.width)
+
+            guard !rectInView.isNull, !rectInView.isEmpty else {
+                return SelectionToolbarLayout(origin: .zero, visible: false, metrics: metrics)
+            }
+            guard rectInView.intersects(pdfView.bounds) else {
+                return SelectionToolbarLayout(origin: .zero, visible: false, metrics: metrics)
+            }
+
+            let overlayRect = Self.overlayRect(fromPDFViewRect: rectInView, overlayHeight: overlaySize.height)
+            return SelectionToolbarLayout.anchored(
+                to: overlayRect,
+                overlaySize: overlaySize,
+                metrics: metrics,
+                horizontalAnchor: .center
+            )
+        }
+
+        private static func overlayRect(fromPDFViewRect rectInView: CGRect, overlayHeight: CGFloat) -> CGRect {
+            CGRect(
+                x: rectInView.minX,
+                y: overlayHeight - rectInView.maxY,
+                width: rectInView.width,
+                height: rectInView.height
+            )
         }
 
         func updatePageInfo(current: Int, total: Int) {

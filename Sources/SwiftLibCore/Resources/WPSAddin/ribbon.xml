@@ -1,0 +1,35 @@
+<customUI xmlns="http://schemas.microsoft.com/office/2006/01/customui" onLoad="OnAddinLoad">
+  <ribbon>
+    <tabs>
+      <tab id="SwiftLibTab" label="SwiftLib" insertAfterMso="TabHome">
+        <group id="SwiftLibGroup" label="引文管理">
+          <button id="insertCitationBtn"
+                  label="插入引文"
+                  screentip="在光标处插入引文"
+                  onAction="OnInsertCitation"
+                  size="large"
+                  imageMso="Bibliography" />
+          <button id="insertBibBtn"
+                  label="插入参考文献"
+                  screentip="在光标处插入参考文献表"
+                  onAction="OnInsertBibliography"
+                  size="large"
+                  imageMso="TableOfContentsGallery" />
+          <separator id="sep1" />
+          <button id="refreshBtn"
+                  label="刷新引文"
+                  screentip="刷新文档中所有引文与参考文献"
+                  onAction="OnRefreshAll"
+                  size="normal"
+                  imageMso="Refresh" />
+          <button id="showPaneBtn"
+                  label="SwiftLib 面板"
+                  screentip="显示 SwiftLib 侧边栏"
+                  onAction="OnShowPane"
+                  size="normal"
+                  imageMso="TaskPane" />
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>

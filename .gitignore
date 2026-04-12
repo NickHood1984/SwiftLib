@@ -10,6 +10,7 @@ DerivedData/
 xcuserdata/
 .swiftpm/
 .xcodebuild/
+.xcodebuild-sparkle-tools/
 
 # === Swift Package Manager ===
 .build/

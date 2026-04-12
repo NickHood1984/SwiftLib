@@ -41,10 +41,17 @@ struct OverlayScrollView<Content: View>: NSViewRepresentable {
         guard let hostingView = scrollView.documentView as? NSHostingView<Content> else { return }
         hostingView.rootView = content
         scrollView.applySwiftLibElegantScrollers()
-        // Nudge AppKit to recompute the document height after content changes.
+
+        let preservedOrigin = scrollView.contentView.bounds.origin
+
+        // Nudge AppKit to recompute the document height after content changes
+        // without forcing the clip view to re-reflect its scroll position on
+        // every transient hover animation frame.
         DispatchQueue.main.async {
             scrollView.documentView?.invalidateIntrinsicContentSize()
-            scrollView.reflectScrolledClipView(scrollView.contentView)
+            scrollView.layoutSubtreeIfNeeded()
+            scrollView.documentView?.layoutSubtreeIfNeeded()
+            scrollView.contentView.scroll(to: preservedOrigin)
         }
     }
 }

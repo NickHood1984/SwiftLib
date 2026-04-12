@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SwiftLib for WPS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --font: -apple-system, "Segoe UI Variable", "Segoe UI", "SF Pro Text", sans-serif;
+      --page:          #f0f0f0;
+      --surface:       #ffffff;
+      --surface-2:     #f5f5f5;
+      --surface-3:     #ededed;
+      --accent:        #0f6cbd;
+      --accent-dim:    rgba(15,108,189,.10);
+      --accent-hover:  #0c57a8;
+      --text-1:        #1a1a1a;
+      --text-2:        #555;
+      --text-3:        #999;
+      --border:        rgba(0,0,0,.08);
+      --border-md:     rgba(0,0,0,.14);
+      --green:         #177b45;
+      --green-dim:     rgba(23,123,69,.10);
+      --red:           #c23b3b;
+      --red-dim:       rgba(194,59,59,.08);
+      --amber:         #8a5400;
+      --amber-dim:     rgba(138,84,0,.08);
+      --shadow-xs:     0 1px 3px rgba(0,0,0,.07);
+      --shadow-sm:     0 2px 8px rgba(0,0,0,.09);
+      --shadow-md:     0 6px 20px rgba(0,0,0,.12);
+      --shadow-lg:     0 12px 40px rgba(0,0,0,.16);
+      --r-xs:  4px;
+      --r-sm:  6px;
+      --r-md:  8px;
+      --r-lg:  12px;
+      --r-xl:  16px;
+      --r-2xl: 20px;
+    }
+
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(0,0,0,.16); }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,.26); }
+    * { scrollbar-width: thin; scrollbar-color: rgba(0,0,0,.16) transparent; }
+
+    html, body { height: 100%; }
+
+    body {
+      font-family: var(--font);
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-1);
+      background: var(--page);
+      overflow-x: hidden;
+      overflow-y: auto;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .shell { display: flex; flex-direction: column; gap: 8px; padding: 10px; padding-bottom: 16px; }
+
+    .card {
+      background: var(--surface);
+      border-radius: var(--r-xl);
+      box-shadow: var(--shadow-xs);
+      border: 1px solid var(--border);
+    }
+
+    .header {
+      position: relative; z-index: 20;
+      display: flex; align-items: center; gap: 9px; padding: 10px 12px;
+    }
+    .app-icon {
+      flex-shrink: 0; width: 28px; height: 28px; border-radius: 8px;
+      background: linear-gradient(145deg, #2281e8 0%, #0f6cbd 100%);
+      color: #fff; font-size: 14px; font-weight: 800;
+      display: flex; align-items: center; justify-content: center;
+      letter-spacing: -.5px; box-shadow: 0 2px 6px rgba(15,108,189,.35);
+    }
+    .app-title { font-size: 14px; font-weight: 700; color: var(--text-1); letter-spacing: -.02em; }
+    .header-divider { width: 1px; height: 13px; background: var(--border-md); flex-shrink: 0; }
+    .doc-summary {
+      flex: 1; min-width: 0; font-size: 11.5px; color: var(--text-3);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .header-actions { flex-shrink: 0; }
+    .overflow-wrap { position: relative; }
+    .icon-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 30px; height: 30px; border: none; border-radius: var(--r-md);
+      background: transparent; color: var(--text-3); cursor: pointer;
+      font-size: 17px; transition: background .12s, color .12s;
+    }
+    .icon-btn:hover { background: var(--surface-2); color: var(--text-1); }
+    .overflow-menu {
+      display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 200;
+      min-width: 204px; padding: 5px; background: var(--surface);
+      border: 1px solid var(--border-md); border-radius: var(--r-xl); box-shadow: var(--shadow-lg);
+    }
+    .overflow-menu.is-open { display: block; }
+    .overflow-menu-item {
+      display: block; width: 100%; padding: 9px 12px; border: none; border-radius: var(--r-lg);
+      background: none; text-align: left; font-family: var(--font); font-size: 13px;
+      font-weight: 500; color: var(--text-1); cursor: pointer; transition: background .1s;
+    }
+    .overflow-menu-item:hover { background: var(--surface-2); }
+    .overflow-menu-item.danger { color: var(--red); }
+    .overflow-menu-divider { height: 1px; background: var(--border); margin: 4px 6px; }
+
+    .meta-bar { padding: 11px 13px 12px; }
+    .meta-label {
+      display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .07em;
+      text-transform: uppercase; color: var(--text-3); margin-bottom: 6px;
+    }
+    .sr-only {
+      position: absolute !important;
+      width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+    }
+    .style-select-row { position: relative; display: flex; align-items: center; gap: 6px; }
+    select {
+      flex: 1; min-width: 0; border: 1.5px solid var(--border-md); border-radius: var(--r-md);
+      background: var(--surface-2); color: var(--text-1); font-family: var(--font);
+      font-size: 13px; padding: 7px 10px; outline: none; cursor: pointer;
+      transition: border-color .12s, box-shadow .12s, background .12s;
+    }
+    select:hover { border-color: var(--accent); background: var(--surface); }
+    select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); background: var(--surface); }
+    .style-native-select { pointer-events: none; }
+    .style-trigger {
+      width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      border: 1.5px solid var(--border-md); border-radius: var(--r-md);
+      background: var(--surface-2); color: var(--text-1); font-family: var(--font);
+      font-size: 13px; padding: 8px 10px; cursor: pointer;
+      transition: border-color .12s, box-shadow .12s, background .12s;
+    }
+    .style-trigger:hover,
+    .style-trigger[aria-expanded="true"] {
+      border-color: var(--accent); background: var(--surface);
+    }
+    .style-trigger:focus {
+      outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim);
+      background: var(--surface);
+    }
+    .style-trigger-label {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;
+    }
+    .style-trigger-caret {
+      flex-shrink: 0; color: var(--text-3); font-size: 11px; transition: transform .12s ease;
+    }
+    .style-trigger[aria-expanded="true"] .style-trigger-caret { transform: rotate(180deg); }
+    .style-menu {
+      display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 220;
+      max-height: 240px; overflow-y: auto; padding: 5px; background: var(--surface);
+      border: 1px solid var(--border-md); border-radius: var(--r-xl); box-shadow: var(--shadow-lg);
+    }
+    .style-menu.is-open { display: block; }
+    .style-option {
+      width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      border: none; border-radius: var(--r-lg); background: none; color: var(--text-1);
+      font-family: var(--font); font-size: 13px; padding: 9px 10px; cursor: pointer; text-align: left;
+      transition: background .12s, color .12s;
+    }
+    .style-option:hover,
+    .style-option:focus {
+      outline: none; background: var(--surface-2);
+    }
+    .style-option.is-selected {
+      background: var(--accent-dim); color: var(--accent); font-weight: 600;
+    }
+    .style-option-check {
+      flex-shrink: 0; width: 16px; text-align: center; opacity: 0; color: inherit;
+    }
+    .style-option.is-selected .style-option-check { opacity: 1; }
+
+    .search-area { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+    .search-box { padding: 12px 13px; border-bottom: 1px solid var(--border); }
+
+    .edit-banner {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      margin-bottom: 10px; padding: 9px 12px; border-radius: var(--r-md);
+      background: #fff8ef; border: 1px solid rgba(207,149,37,.25);
+      color: var(--amber); font-size: 12px; font-weight: 500;
+    }
+    .edit-banner.hidden { display: none; }
+    .edit-cancel { border: none; background: none; color: inherit; cursor: pointer; font-size: 11.5px; font-weight: 700; white-space: nowrap; }
+
+    .orphan-banner { display: none; flex-direction: column; gap: 6px; margin-bottom: 10px; padding: 9px 12px; border-radius: var(--r-md); background: #fffbf0; border: 1px solid #e8c96a; font-size: 12px; }
+    .orphan-banner.hidden { display: none; }
+    .orphan-banner.visible { display: flex; }
+    .orphan-banner-title { font-weight: 700; color: #6b4700; font-size: 12px; margin-bottom: 3px; }
+
+    .selected-wrap { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+    .selected-wrap:empty { display: none; margin-bottom: 0; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+      padding: 4px 7px 4px 10px; background: var(--surface-2);
+      border: 1.5px solid var(--border-md); border-radius: 999px;
+      font-size: 11.5px; font-weight: 500; color: var(--text-1);
+      transition: border-color .12s, background .12s;
+    }
+    .chip:hover { border-color: var(--accent); background: var(--accent-dim); }
+    .chip-index {
+      flex-shrink: 0; width: 17px; height: 17px; border-radius: 50%;
+      background: var(--accent); color: #fff; font-size: 9px; font-weight: 800;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .chip-text { min-width: 0; max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chip-remove {
+      border: none; background: none; color: var(--text-3); cursor: pointer;
+      font-size: 14px; line-height: 1; padding: 0 2px; border-radius: var(--r-xs); transition: color .12s;
+    }
+    .chip-remove:hover { color: var(--red); }
+
+    .citation-options-details { margin-bottom: 10px; }
+    .citation-options-summary {
+      cursor: pointer; font-size: 11px; font-weight: 700; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--text-3); padding: 4px 2px;
+      user-select: none; list-style: none; display: flex; align-items: center; gap: 5px; transition: color .12s;
+    }
+    .citation-options-summary::-webkit-details-marker { display: none; }
+    .citation-options-summary::before { content: "▶"; font-size: 7px; transition: transform .15s; display: inline-block; }
+    .citation-options-details[open] .citation-options-summary::before { transform: rotate(90deg); }
+    .citation-options-summary:hover { color: var(--text-2); }
+    .citation-options-body { display: grid; gap: 8px; margin-top: 8px; padding: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-lg); }
+    .citation-options-grid { display: grid; grid-template-columns: 1fr 100px; gap: 8px; }
+    .citation-options-row { display: grid; gap: 4px; }
+    .citation-options-row label { font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--text-3); }
+    .citation-options-row input[type="text"], .citation-options-row select {
+      width: 100%; border: 1.5px solid var(--border-md); border-radius: var(--r-md); padding: 7px 9px;
+      font-family: var(--font); font-size: 12px; background: var(--surface); color: var(--text-1);
+      outline: none; transition: border-color .12s, box-shadow .12s;
+    }
+    .citation-options-row input[type="text"]:focus, .citation-options-row select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+    .citation-options-checkbox { display: flex; align-items: center; gap: 7px; }
+    .citation-options-checkbox label { font-size: 12.5px; font-weight: 400; letter-spacing: normal; text-transform: none; color: var(--text-1); cursor: pointer; }
+    .citation-options-multi-hint { display: none; font-size: 11px; color: var(--text-3); line-height: 1.5; }
+    .citation-options-multi-hint.visible { display: block; }
+
+    .search-input-wrap {
+      display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+      background: var(--surface-2); border-radius: var(--r-lg);
+      border: 1.5px solid transparent; transition: border-color .12s, background .12s;
+    }
+    .search-input-wrap:focus-within { background: var(--surface); border-color: var(--accent); }
+    .search-icon { flex-shrink: 0; color: var(--text-3); font-size: 15px; }
+    .search-input {
+      flex: 1; border: none; background: transparent; color: var(--text-1);
+      font-family: var(--font); font-size: 14px; padding: 0; outline: none;
+    }
+    .search-input::placeholder { color: var(--text-3); }
+    .hint { margin-top: 8px; font-size: 11px; color: var(--text-3); line-height: 1.5; }
+
+    .results {
+      flex: 0 1 auto; min-height: 200px; max-height: 40vh;
+      overflow-y: auto; padding: 8px; background: var(--surface);
+    }
+    .empty {
+      display: flex; flex-direction: column; align-items: flex-start; justify-content: center;
+      min-height: 180px; padding: 30px 18px 26px;
+    }
+    .empty-icon { font-size: 30px; line-height: 1; margin-bottom: 10px; opacity: .55; }
+    .empty-title { font-size: 15px; font-weight: 700; color: var(--text-1); margin-bottom: 5px; letter-spacing: -.02em; }
+    .empty-copy { font-size: 12.5px; color: var(--text-3); line-height: 1.6; max-width: 240px; }
+    .section-label { padding: 4px 8px 6px; font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); }
+
+    .ref-item {
+      position: relative; margin-bottom: 4px; padding: 10px 12px; border-radius: var(--r-lg);
+      background: var(--surface-2); border: 1.5px solid transparent; cursor: pointer;
+      transition: background .12s, border-color .12s, box-shadow .12s;
+    }
+    .ref-item:last-child { margin-bottom: 0; }
+    .ref-item:hover, .ref-item.active { background: var(--surface); border-color: var(--border-md); box-shadow: var(--shadow-xs); }
+    .ref-item.selected { background: var(--accent-dim); border-color: var(--accent); }
+    .ref-item.ref-cited:not(.selected) {
+      border-left: 3px solid var(--green);
+      background: linear-gradient(90deg, rgba(23,123,69,.06) 0%, var(--surface-2) 48%);
+    }
+    .ref-item.selected .ref-item-check { display: inline-flex; }
+    .ref-item-check {
+      display: none; position: absolute; top: 10px; right: 10px;
+      width: 18px; height: 18px; border-radius: 50%;
+      background: var(--green); color: #fff; font-size: 10px; font-weight: 800;
+      align-items: center; justify-content: center;
+    }
+    .ref-title { font-size: 12.5px; font-weight: 600; line-height: 1.45; color: var(--text-1); margin-bottom: 3px; padding-right: 22px; }
+    .ref-meta { font-size: 11px; color: var(--text-2); line-height: 1.5; }
+    .ref-type-badge, .cited-badge, .managed-badge {
+      display: inline-flex; align-items: center; vertical-align: middle; border-radius: 999px;
+      padding: 2px 6px; font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+    }
+    .ref-type-badge { margin-right: 5px; color: var(--text-3); background: var(--surface-3); }
+    .cited-badge { margin-left: 5px; color: var(--green); background: var(--green-dim); }
+    .cited-badge::before { content: "\2713\00A0"; font-size: 8px; }
+
+    .toolbar { display: flex; gap: 8px; }
+    .btn {
+      flex: 1; min-height: 42px; padding: 10px 14px; border: 1.5px solid var(--border-md);
+      border-radius: var(--r-xl); background: var(--surface); color: var(--text-1);
+      font-family: var(--font); font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: background .12s, border-color .12s, box-shadow .12s;
+    }
+    .btn:hover:not(:disabled) { background: var(--surface-2); box-shadow: var(--shadow-xs); }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-primary { border-color: var(--accent); background: var(--accent); color: #fff; box-shadow: 0 2px 8px rgba(15,108,189,.28); }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); box-shadow: 0 4px 14px rgba(15,108,189,.36); }
+    @keyframes btn-success-flash {
+      from { background: var(--green); border-color: var(--green); box-shadow: 0 2px 8px rgba(23,123,69,.3); }
+      to   { background: var(--accent); border-color: var(--accent); box-shadow: 0 2px 8px rgba(15,108,189,.28); }
+    }
+    .btn-primary.is-success { animation: btn-success-flash 1.4s ease forwards; }
+    #insertBibBtn { flex: 0 0 auto; min-width: 122px; }
+
+    .status-bar { min-height: 16px; padding: 0 2px; font-size: 11px; color: var(--text-3); line-height: 1.5; }
+    .status-bar.is-success { color: var(--green); font-weight: 600; }
+
+    #loadingOverlay {
+      display: none; position: fixed; inset: 0; z-index: 9999;
+      align-items: center; justify-content: center; padding: 24px;
+      background: rgba(240,240,240,.75); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    }
+    #loadingOverlay.is-visible { display: flex; }
+    .loading-card {
+      display: flex; flex-direction: column; align-items: center; gap: 12px;
+      padding: 28px 24px; background: var(--surface); border: 1px solid var(--border-md);
+      border-radius: var(--r-2xl); box-shadow: var(--shadow-lg); width: min(260px, 100%); text-align: center;
+    }
+    .loading-dots { display: flex; gap: 6px; }
+    .loading-dots span { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: dot-bounce .9s ease-in-out infinite; }
+    .loading-dots span:nth-child(2) { animation-delay: .18s; }
+    .loading-dots span:nth-child(3) { animation-delay: .36s; }
+    @keyframes dot-bounce {
+      0%, 80%, 100% { transform: translateY(0); opacity: .35; }
+      40%            { transform: translateY(-7px); opacity: 1; }
+    }
+    .loading-text { font-size: 15px; font-weight: 700; color: var(--text-1); }
+    .loading-sub  { font-size: 12px; color: var(--text-3); line-height: 1.5; max-width: 200px; }
+
+    @media (max-width: 400px) {
+      .shell { padding: 8px; gap: 7px; }
+      .toolbar { flex-direction: column; }
+      #insertBibBtn { min-width: 0; flex: 1; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Loading overlay -->
+  <div id="loadingOverlay" aria-live="polite" aria-busy="false">
+    <div class="loading-card">
+      <div class="loading-dots"><span></span><span></span><span></span></div>
+      <div class="loading-text" id="loadingOverlayText">处理中…</div>
+      <div class="loading-sub">正在与 WPS 同步，请稍候。</div>
+    </div>
+  </div>
+
+  <div class="shell">
+
+    <!-- Header -->
+    <div class="card header">
+      <div class="app-icon" aria-hidden="true">S</div>
+      <span class="app-title">SwiftLib</span>
+      <span class="header-divider"></span>
+      <div class="doc-summary" id="docSummary">正在扫描文档…</div>
+      <div class="header-actions">
+        <div class="overflow-wrap">
+          <button class="icon-btn" id="overflowBtn" type="button" title="更多操作" aria-label="更多操作">&#x22EF;</button>
+          <div class="overflow-menu" id="overflowMenu">
+            <button class="overflow-menu-item" id="refreshBtn" type="button">刷新与修复引文</button>
+            <button class="overflow-menu-item" id="toggleCiteMarksBtn" type="button">显示引文标记</button>
+            <div class="overflow-menu-divider"></div>
+            <button class="overflow-menu-item danger" id="finalizeBtn" type="button">最终定稿（转为纯文字）</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Style Selector -->
+    <div class="card meta-bar">
+      <label class="meta-label" for="styleSelect">引文样式</label>
+      <div class="style-select-row">
+        <select id="styleSelect" class="style-native-select sr-only" tabindex="-1" aria-hidden="true"></select>
+        <button class="style-trigger" id="styleSelectButton" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="styleSelectMenu">
+          <span class="style-trigger-label" id="styleSelectButtonLabel">选择样式</span>
+          <span class="style-trigger-caret" aria-hidden="true">▼</span>
+        </button>
+        <div class="style-menu" id="styleSelectMenu" role="listbox" aria-label="引文样式"></div>
+      </div>
+    </div>
+
+    <!-- Search & Results -->
+    <div class="card search-area">
+      <div class="search-box">
+
+        <!-- Edit banner -->
+        <div class="edit-banner hidden" id="editBanner">
+          <span id="editBannerText">正在编辑引文</span>
+          <button class="edit-cancel" id="editCancelBtn" type="button">取消</button>
+        </div>
+
+        <!-- Selected chips -->
+        <div class="selected-wrap" id="selectionTokens"></div>
+
+        <!-- Citation options -->
+        <details class="citation-options-details" id="citationOptionsPanel" style="display:none;">
+          <summary class="citation-options-summary">引用选项</summary>
+          <div class="citation-options-body">
+            <div class="citation-options-grid">
+              <div class="citation-options-row">
+                <label for="citOptLocator">页码 / 定位符</label>
+                <input type="text" id="citOptLocator" placeholder="如：12–15" autocomplete="off">
+              </div>
+              <div class="citation-options-row">
+                <label for="citOptLocatorLabel">类型</label>
+                <select id="citOptLocatorLabel">
+                  <option value="page">页 page</option>
+                  <option value="chapter">章 chapter</option>
+                  <option value="figure">图 figure</option>
+                  <option value="table">表 table</option>
+                  <option value="section">节 section</option>
+                  <option value="paragraph">段 paragraph</option>
+                </select>
+              </div>
+            </div>
+            <div class="citation-options-row">
+              <label for="citOptPrefix">前缀</label>
+              <input type="text" id="citOptPrefix" placeholder="如：see" autocomplete="off">
+            </div>
+            <div class="citation-options-row">
+              <label for="citOptSuffix">后缀</label>
+              <input type="text" id="citOptSuffix" placeholder="如：table 2" autocomplete="off">
+            </div>
+            <div class="citation-options-checkbox">
+              <input type="checkbox" id="citOptSuppressAuthor">
+              <label for="citOptSuppressAuthor">省略作者（仅显示年份/编号）</label>
+            </div>
+            <p class="citation-options-multi-hint" id="citOptMultiHint">多文献引用时，以上选项应用于第一篇文献。</p>
+          </div>
+        </details>
+
+        <!-- Search input -->
+        <div class="search-input-wrap">
+          <span class="search-icon">🔍</span>
+          <input type="text" class="search-input" id="searchInput"
+            placeholder="搜索标题、作者、期刊或年份…"
+            autocomplete="off" spellcheck="false">
+        </div>
+
+        <div class="hint" id="searchHelp">单击加入队列 · ↑↓ 移动 · Enter 确认 · 双击直接插入</div>
+      </div>
+
+      <!-- Results list -->
+      <div class="results" id="results">
+        <div class="section-label" id="recentLabel" style="display:none;">最近添加</div>
+        <div class="empty" id="emptyState">
+          <div class="empty-icon">📚</div>
+          <div class="empty-title">搜索你的文献库</div>
+          <div class="empty-copy">输入标题、作者或年份关键词，快速挑选需要插入的来源。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <button class="btn btn-primary" id="primaryBtn" type="button">插入引文</button>
+      <button class="btn" id="insertBibBtn" type="button" title="在光标处插入或更新参考文献表">参考文献表</button>
+    </div>
+
+    <div class="status-bar" id="status"></div>
+
+  </div>
+
+  <!-- Relative paths: taskpane is loaded from file:// alongside these scripts -->
+  <script src="./wps-document.js"></script>
+  <script src="./wps-taskpane.js"></script>
+</body>
+</html>

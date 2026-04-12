@@ -127,4 +127,23 @@ final class CiteprocJSCoreEngineTests: XCTestCase {
             )
         }
     }
+
+    func testRenderDocumentCanSkipBibliographyGeneration() throws {
+        let engine = try CiteprocJSCoreEngine(styleXML: numericStyleXML, localeXML: localeXML)
+        engine.setItems([
+            [
+                "id": "1",
+                "type": "article-journal",
+                "title": "No Bibliography Needed",
+            ]
+        ])
+
+        let rendered = try engine.renderDocument(
+            citations: [(id: "citation-1", itemIDs: ["1"], position: 0)],
+            includeBibliography: false
+        )
+
+        XCTAssertEqual(rendered.citationTexts["citation-1"], "[1]")
+        XCTAssertEqual(rendered.bibliographyText, "")
+    }
 }

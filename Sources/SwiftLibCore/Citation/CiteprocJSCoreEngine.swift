@@ -141,7 +141,7 @@ public final class CiteprocJSCoreEngine {
 
     /// Render a document with multiple citation clusters.
     /// Returns (citationTexts: [citationID: renderedText], bibliographyHTML: String)
-    public func renderDocument(citations: [(id: String, itemIDs: [String], position: Int)]) throws
+    public func renderDocument(citations: [(id: String, itemIDs: [String], position: Int)], includeBibliography: Bool = true) throws
         -> (
             citationTexts: [String: String],
             bibliographyText: String,
@@ -157,13 +157,14 @@ public final class CiteprocJSCoreEngine {
                     position: citation.position,
                     citationItems: nil
                 )
-            }
+            },
+            includeBibliography: includeBibliography
         )
     }
 
     /// Render a document with multiple citation clusters.
     /// Returns (citationTexts: [citationID: renderedText], bibliographyHTML: String)
-    public func renderDocument(citations: [(id: String, itemIDs: [String], position: Int, citationItems: [[String: Any]]?)]) throws
+    public func renderDocument(citations: [(id: String, itemIDs: [String], position: Int, citationItems: [[String: Any]]?)], includeBibliography: Bool = true) throws
         -> (
             citationTexts: [String: String],
             bibliographyText: String,
@@ -191,8 +192,11 @@ public final class CiteprocJSCoreEngine {
         // literally in the document.
         jsContext.evaluateScript("__swiftlib_engine.setOutputFormat('text');")
 
+        let sortedCitations = citations.sorted(by: { $0.position < $1.position })
+        var priorCitationRefs: [String] = []
+
         // Process citations in order using processCitationCluster
-        for (index, citation) in citations.sorted(by: { $0.position < $1.position }).enumerated() {
+        for (index, citation) in sortedCitations.enumerated() {
             // Build citationItems JSON: use rich options if provided, else plain {"id":"..."}
             let citationItems: String
             if let richItems = citation.citationItems, !richItems.isEmpty {
@@ -227,9 +231,7 @@ public final class CiteprocJSCoreEngine {
                 }
             """
             // citationsPre: all previously processed citations
-            let pre = citations.prefix(index).sorted(by: { $0.position < $1.position }).enumerated().map { (i, c) in
-                "[\"" + c.id + "\", " + String(i + 1) + "]"
-            }.joined(separator: ",")
+            let pre = priorCitationRefs.joined(separator: ",")
 
             let script = """
                 try {
@@ -260,34 +262,38 @@ public final class CiteprocJSCoreEngine {
                       let errorMsg = errorObj["error"] as? String {
                 throw EngineError.renderFailed(errorMsg)
             }
+
+            priorCitationRefs.append("[\"" + citation.id + "\", " + String(index + 1) + "]")
         }
 
-        // Switch to HTML for bibliography (richer structure for stripHTML)
-        jsContext.evaluateScript("__swiftlib_engine.setOutputFormat('html');")
-
-        // Generate bibliography
-        let bibScript = """
-            try {
-                var bib = __swiftlib_engine.makeBibliography();
-                if (bib && bib.length >= 2) {
-                    JSON.stringify(bib);
-                } else {
-                    "null";
-                }
-            } catch(e) {
-                JSON.stringify({"error": e.message});
-            }
-        """
         var bibliographyText = ""
-        if let bibVal = jsContext.evaluateScript(bibScript),
-           let bibStr = bibVal.toString(), bibStr != "null",
-           let bibData = bibStr.data(using: .utf8),
-           let bibArray = try? JSONSerialization.jsonObject(with: bibData) as? [Any],
-           bibArray.count >= 2,
-           let entries = bibArray[1] as? [String] {
-            // Strip HTML tags for plain text output
-            bibliographyText = entries.map { Self.stripHTML($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                .joined(separator: "\n")
+        if includeBibliography {
+            // Switch to HTML for bibliography (richer structure for stripHTML)
+            jsContext.evaluateScript("__swiftlib_engine.setOutputFormat('html');")
+
+            // Generate bibliography
+            let bibScript = """
+                try {
+                    var bib = __swiftlib_engine.makeBibliography();
+                    if (bib && bib.length >= 2) {
+                        JSON.stringify(bib);
+                    } else {
+                        "null";
+                    }
+                } catch(e) {
+                    JSON.stringify({"error": e.message});
+                }
+            """
+            if let bibVal = jsContext.evaluateScript(bibScript),
+               let bibStr = bibVal.toString(), bibStr != "null",
+               let bibData = bibStr.data(using: .utf8),
+               let bibArray = try? JSONSerialization.jsonObject(with: bibData) as? [Any],
+               bibArray.count >= 2,
+               let entries = bibArray[1] as? [String] {
+                // Strip HTML tags for plain text output
+                bibliographyText = entries.map { Self.stripHTML($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .joined(separator: "\n")
+            }
         }
 
         // Detect whether the CSL style wants superscript citations.
@@ -499,7 +505,8 @@ public final class CiteprocJSCorePool {
     private var engines: [String: PooledEngineEntry] = [:]
     private let lock = NSLock()
     /// Maximum number of cached engines. LRU eviction when exceeded.
-    private let maxEngines = 3
+    /// Each JSContext ≈ 40 MB, so keep this low to control memory usage.
+    private let maxEngines = 2
 
     // MARK: - Last-used style persistence
 

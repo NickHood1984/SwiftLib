@@ -20,8 +20,16 @@ STAGING_DIR="$OUTPUT_DIR/dmg-staging"
 APP_NAME="SwiftLib"
 CLI_NAME="swiftlib-cli"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
-DMG_NAME="$APP_NAME-${CONFIGURATION}.dmg"
+APP_VERSION="${APP_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)}"
+APP_VERSION="${APP_VERSION:-1.1.0}"
+APP_BUILD_VERSION="${APP_BUILD_VERSION:-$APP_VERSION}"
+if [ "$CONFIGURATION" = "Release" ]; then
+    DMG_NAME="$APP_NAME-$APP_VERSION.dmg"
+else
+    DMG_NAME="$APP_NAME-$APP_VERSION-${CONFIGURATION}.dmg"
+fi
 DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
+FRAMEWORKS_DIR="$APP_BUNDLE/Contents/Frameworks"
 
 BACKEND_DIR="$PROJECT_DIR/swiftlib-translation-backend"
 BACKEND_RESOURCE_DIR="$APP_BUNDLE/Contents/Resources/TranslationBackend"
@@ -40,6 +48,68 @@ NODE_DIST_DIR="$NODE_CACHE_DIR/${NODE_DIST_BASENAME}"
 
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 CODESIGN_ENABLED="${CODESIGN_ENABLED:-1}"
+SPARKLE_KEYS_ACCOUNT="${SPARKLE_KEYS_ACCOUNT:-com.swiftlib.app}"
+
+infer_github_repo_path() {
+    local remote_url
+    remote_url="$(git remote get-url origin 2>/dev/null || true)"
+
+    case "$remote_url" in
+        git@github.com:*)
+            remote_url="${remote_url#git@github.com:}"
+            ;;
+        ssh://git@github.com/*)
+            remote_url="${remote_url#ssh://git@github.com/}"
+            ;;
+        https://github.com/*)
+            remote_url="${remote_url#https://github.com/}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    remote_url="${remote_url%.git}"
+    printf '%s\n' "$remote_url"
+}
+
+# Sparkle auto-update configuration
+# Set these environment variables before building, or override the defaults below.
+# Feed URL defaults to GitHub Pages for the current origin repository.
+DEFAULT_GITHUB_REPO="$(infer_github_repo_path || true)"
+if [ -n "$DEFAULT_GITHUB_REPO" ]; then
+    DEFAULT_GITHUB_OWNER="${DEFAULT_GITHUB_REPO%%/*}"
+    DEFAULT_GITHUB_REPO_NAME="${DEFAULT_GITHUB_REPO#*/}"
+    DEFAULT_SPARKLE_FEED_URL="https://${DEFAULT_GITHUB_OWNER}.github.io/${DEFAULT_GITHUB_REPO_NAME}/Docs/appcast.xml"
+else
+    DEFAULT_SPARKLE_FEED_URL="https://example.com/appcast.xml"
+fi
+SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-$DEFAULT_SPARKLE_FEED_URL}"
+
+resolve_sparkle_public_key() {
+    if [ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ] && [ "${SPARKLE_ED_PUBLIC_KEY}" != "REPLACE_WITH_YOUR_PUBLIC_KEY" ]; then
+        printf '%s\n' "${SPARKLE_ED_PUBLIC_KEY}"
+        return 0
+    fi
+
+    if [ -x "$SCRIPT_DIR/sparkle-tools.sh" ]; then
+        local looked_up_key
+        if looked_up_key="$("$SCRIPT_DIR/sparkle-tools.sh" public-key "$SPARKLE_KEYS_ACCOUNT" 2>/dev/null)"; then
+            looked_up_key="$(printf '%s' "$looked_up_key" | tr -d '\n')"
+            if [ -n "$looked_up_key" ]; then
+                printf '%s\n' "$looked_up_key"
+                return 0
+            fi
+        fi
+    fi
+
+    printf '%s\n' "REPLACE_WITH_YOUR_PUBLIC_KEY"
+}
+
+SPARKLE_ED_PUBLIC_KEY="$(resolve_sparkle_public_key)"
+if [ "$SPARKLE_ED_PUBLIC_KEY" = "REPLACE_WITH_YOUR_PUBLIC_KEY" ]; then
+    echo "warning: Sparkle public key is not configured; updates will not validate until a key is generated." >&2
+fi
 
 json_field() {
     local json="$1"
@@ -79,13 +149,14 @@ assemble_app_bundle() {
 
     mkdir -p "$APP_BUNDLE/Contents/MacOS"
     mkdir -p "$APP_BUNDLE/Contents/Resources"
+    mkdir -p "$FRAMEWORKS_DIR"
     cp "$PRODUCTS_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
     for bundle in "$PRODUCTS_DIR"/*.bundle; do
         [ -d "$bundle" ] && cp -R "$bundle" "$APP_BUNDLE/Contents/Resources/"
     done
 
-    cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
+    cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -100,9 +171,9 @@ assemble_app_bundle() {
     <key>CFBundleDisplayName</key>
     <string>SwiftLib</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>${APP_BUILD_VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>${APP_VERSION}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -116,9 +187,54 @@ assemble_app_bundle() {
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+    <key>SUFeedURL</key>
+    <string>${SPARKLE_FEED_URL}</string>
+    <key>SUPublicEDKey</key>
+    <string>${SPARKLE_ED_PUBLIC_KEY}</string>
+    <key>SUEnableInstallerLauncherService</key>
+    <true/>
 </dict>
 </plist>
 PLIST
+}
+
+add_binary_rpath_if_missing() {
+    local binary="$1"
+    local rpath="$2"
+    if ! otool -l "$binary" | awk '/LC_RPATH/{getline; getline; print $2}' | grep -Fx "$rpath" >/dev/null 2>&1; then
+        install_name_tool -add_rpath "$rpath" "$binary"
+    fi
+}
+
+remove_development_rpaths() {
+    local binary="$1"
+    local existing_rpaths
+    existing_rpaths="$(otool -l "$binary" | awk '/LC_RPATH/{getline; getline; print $2}' || true)"
+    while IFS= read -r rpath; do
+        [ -z "$rpath" ] && continue
+        if printf '%s' "$rpath" | grep -q 'PackageFrameworks'; then
+            install_name_tool -delete_rpath "$rpath" "$binary"
+        fi
+    done <<EOF
+$existing_rpaths
+EOF
+}
+
+embed_sparkle_runtime() {
+    local sparkle_framework_src="$PRODUCTS_DIR/Sparkle.framework"
+    local main_binary="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+    if [ ! -d "$sparkle_framework_src" ]; then
+        echo "error: Sparkle.framework was not produced by the build." >&2
+        exit 1
+    fi
+
+    echo "▸ Embedding Sparkle runtime..."
+    rm -rf "$FRAMEWORKS_DIR/Sparkle.framework"
+    cp -R "$sparkle_framework_src" "$FRAMEWORKS_DIR/"
+
+    add_binary_rpath_if_missing "$main_binary" "@executable_path/../Frameworks"
+    remove_development_rpaths "$main_binary"
 }
 
 prepare_backend_overlay() {
@@ -237,6 +353,16 @@ sign_bundle() {
         codesign_target "$dylib"
     done < <(find "$BACKEND_RESOURCE_DIR/vendor/translation-server/node_modules" -type f \( -name '*.node' -o -name '*.dylib' \) 2>/dev/null | sort)
 
+    if [ -d "$FRAMEWORKS_DIR" ]; then
+        while IFS= read -r nested_binary; do
+            codesign_target "$nested_binary"
+        done < <(find "$FRAMEWORKS_DIR" -type f \( -name 'Autoupdate' -o -perm -111 \) ! -path '*/_CodeSignature/*' | sort)
+
+        while IFS= read -r nested_bundle; do
+            codesign_target "$nested_bundle"
+        done < <(find "$FRAMEWORKS_DIR" -depth \( -name '*.xpc' -o -name '*.app' -o -name '*.framework' \) | sort)
+    fi
+
     codesign --force --deep --sign "$CODESIGN_IDENTITY" --timestamp=none "$APP_BUNDLE"
 }
 
@@ -281,6 +407,7 @@ create_dmg() {
 build_app
 build_cli
 assemble_app_bundle
+embed_sparkle_runtime
 embed_app_icon
 prepare_backend_overlay
 download_node_runtime

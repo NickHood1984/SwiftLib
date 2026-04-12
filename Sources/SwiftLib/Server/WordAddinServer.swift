@@ -15,6 +15,7 @@ final class WordAddinServer {
     private(set) var isRunning = false
 
     private let queue = DispatchQueue(label: "WordAddinServer", qos: .userInitiated)
+    private let focusBounceQueue = DispatchQueue(label: "WordAddinServer.FocusBounce", qos: .userInitiated)
 
     // MARK: - Lifecycle
 
@@ -123,6 +124,10 @@ final class WordAddinServer {
             handleStyleImport(conn, body: body)
         case ("POST", "/api/styles/delete"):
             handleStyleDelete(conn, body: body)
+        case ("POST", "/api/perf-log"):
+            handlePerfLog(conn, body: body)
+        case ("POST", "/api/wps/focus-bounce"):
+            handleWPSFocusBounce(conn)
         case ("OPTIONS", _):
             handleOptions(conn)
         case ("GET", _):
@@ -281,6 +286,16 @@ final class WordAddinServer {
 
         // Client may send embedded CSL-JSON snapshots keyed by docItemKey ("lib:<id>" etc.)
         let providedItems = json["items"] as? [String: [String: Any]]
+        let includeBibliography = (json["includeBibliography"] as? Bool) ?? true
+
+        if citationsRaw.isEmpty {
+            sendJSONObject(conn, [
+                "citationTexts": [String: String](),
+                "bibliographyText": "",
+                "superscriptCitationIDs": [String](),
+            ])
+            return
+        }
 
         // Collect all numeric reference IDs mentioned in the citations
         var allRefIDs = Set<Int64>()
@@ -352,7 +367,7 @@ final class WordAddinServer {
         do {
             guard let r = try CiteprocJSCorePool.shared.withEngine(forStyleId: styleId, { engine in
                 engine.setItems(cslItems)
-                return try engine.renderDocument(citations: citations)
+                return try engine.renderDocument(citations: citations, includeBibliography: includeBibliography)
             }) else {
                 sendJSON(conn, status: 500, json: ["error": "无法加载引文样式 \(styleId)，请在样式管理中重新导入该样式。"]); return
             }
@@ -426,6 +441,48 @@ final class WordAddinServer {
         }
     }
 
+    // MARK: - Performance Logging (from WPS add-in)
+
+    private func handlePerfLog(_ conn: NWConnection, body: Data?) {
+        if let body,
+           let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+           let lines = json["lines"] as? [String] {
+            print("──── WPS Add-in Performance ────")
+            for line in lines { print(line) }
+            print("────────────────────────────────")
+        }
+        sendJSON(conn, status: 200, json: ["ok": true])
+    }
+
+    // MARK: - WPS focus bounce (return keyboard focus to WPS document after task pane action)
+    // Briefly activates SwiftLib itself, then immediately re-activates WPS.
+    // This causes macOS to reassign FirstResponder from the task pane WebView
+    // back to the WPS document area without any visible app-switching to the user.
+
+    private func handleWPSFocusBounce(_ conn: NWConnection) {
+        focusBounceQueue.async { [weak self] in
+            guard let self else { conn.cancel(); return }
+            let wpsID = "com.kingsoft.wpsoffice.mac"
+            // Use "System Events" as the invisible bounce target — it is a macOS background
+            // daemon, always running, has no visible UI, so the user sees nothing flash.
+            let script = """
+                tell application "System Events" to activate
+                delay 0.05
+                do shell script "/usr/bin/open -b \(wpsID)"
+                """
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {}
+            self.sendJSON(conn, status: 200, json: ["ok": true])
+        }
+    }
+
     // MARK: - CORS Preflight
 
     private func handleOptions(_ conn: NWConnection) {
@@ -471,7 +528,11 @@ final class WordAddinServer {
         case "/citeproc-bundle.js", "/dist/citeproc-bundle.js":
             resourcePath = "Resources/WordAddin/dist/citeproc-bundle.js"
         default:
-            if cleanPath.hasPrefix("/locales/") {
+            if cleanPath.hasPrefix("/wps/") {
+                // WPS add-in files: /wps/foo.js → Resources/WPSAddin/foo.js
+                let wpsRelative = String(cleanPath.dropFirst("/wps/".count))
+                resourcePath = "Resources/WPSAddin/\(wpsRelative)"
+            } else if cleanPath.hasPrefix("/locales/") {
                 resourcePath = "Resources/WordAddin\(cleanPath)"
             } else if cleanPath.hasPrefix("/CSL/") {
                 resourcePath = "Resources/WordAddin\(cleanPath)"
@@ -727,7 +788,7 @@ final class WordAddinServer {
 
 // MARK: - Bundle helper
 
-private extension Bundle {
+extension Bundle {
     /// The resource bundle for SwiftLibCore (contains WordAddin resources).
     static let swiftLibCoreBundle: Bundle = {
         #if SWIFT_PACKAGE

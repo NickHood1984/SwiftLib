@@ -12,6 +12,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.24.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.7.0"),
     ],
     targets: [
         .target(
@@ -30,6 +31,7 @@ let package = Package(
             name: "SwiftLib",
             dependencies: [
                 "SwiftLibCore",
+                .product(name: "Sparkle", package: "Sparkle"),
             ],
             exclude: [
                 "SwiftLib.entitlements"

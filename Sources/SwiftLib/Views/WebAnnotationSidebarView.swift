@@ -35,22 +35,7 @@ struct WebAnnotationSidebarView: View {
     }
 
     private var sidebarHeader: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Image(systemName: "bookmark.fill")
-                    .foregroundStyle(Color.accentColor)
-                Text("标注")
-                    .font(.headline)
-                Spacer()
-                Text("\(filteredAnnotations.count)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.quaternary)
-                    .clipShape(Capsule())
-            }
-
+        VStack(spacing: 0) {
             DraggableSegmentedControl(selection: $filterType, items: [
                 ("全部", nil),
                 ("高亮", .highlight),
@@ -83,7 +68,7 @@ struct WebAnnotationSidebarView: View {
     private var scrollableSidebarBody: some View {
         ScrollViewReader { proxy in
             OverlayScrollView {
-                LazyVStack(spacing: 8) {
+                VStack(spacing: 8) {
                     if viewModel.hasSidebarSummary {
                         WebSummarySidebarCard(
                             text: (viewModel.reference.abstract ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
@@ -108,7 +93,7 @@ struct WebAnnotationSidebarView: View {
                                     editingAnnotation = annotation
                                 },
                                 onDelete: {
-                                    withAnimation { viewModel.deleteAnnotation(annotation) }
+                                    viewModel.deleteAnnotation(annotation)
                                 }
                             )
                             .id(annotation.id)
@@ -116,7 +101,8 @@ struct WebAnnotationSidebarView: View {
                     }
                 }
                 .padding(.horizontal, 10)
-                .padding(.vertical, 8)
+                .padding(.top, 4)
+                .padding(.bottom, 8)
             }
             .onChange(of: viewModel.sidebarSummaryScrollToken) { _, _ in
                 withAnimation {
@@ -236,8 +222,6 @@ private struct WebSummarySidebarCard: View {
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
         .onHover { isHovered = $0 }
-        .animation(.easeInOut(duration: 0.15), value: isHovered)
-        .animation(.easeInOut(duration: 0.15), value: isHighlighted)
         .help("跳转到正文中的摘要位置")
     }
 }
@@ -250,8 +234,48 @@ private struct WebAnnotationCard: View {
     let onDelete: () -> Void
 
     @State private var isHovered = false
+    @State private var isShowingNotePreview = false
+    @StateObject private var hoverProgress = ManualHoverProgressController()
 
-    var body: some View {
+    private var showsActionButtons: Bool {
+        isHovered || isSelected
+    }
+
+    private var actionButtonOpacity: CGFloat {
+        ManualHoverMotion.footerOpacity(progress: hoverProgress.progress)
+    }
+
+    private var footerRevealHeight: CGFloat {
+        ManualHoverMotion.footerReserve(progress: hoverProgress.progress, maxHeight: 32)
+    }
+
+    private var actionButtonOffset: CGFloat {
+        ManualHoverMotion.footerOffset(progress: hoverProgress.progress, maxOffset: 6)
+    }
+
+    private var actionButtonHitTestingEnabled: Bool {
+        showsActionButtons || hoverProgress.progress > 0.76
+    }
+
+    private let footerBarHeight: CGFloat = 26
+
+    private var fullNoteText: String? {
+        guard let note = annotation.noteText?.trimmingCharacters(in: .whitespacesAndNewlines), !note.isEmpty else {
+            return nil
+        }
+        return note
+    }
+
+    private var normalizedNotePreview: String? {
+        guard let note = fullNoteText else { return nil }
+        let cleanedNote = note
+            .replacingOccurrences(of: #"(?m)^#{1,6} "#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?m)^```[^\n]*"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleanedNote.isEmpty ? nil : cleanedNote
+    }
+
+    private var cardContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle()
@@ -277,6 +301,8 @@ private struct WebAnnotationCard: View {
                 .font(.callout)
                 .lineLimit(4)
                 .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 8)
                 .overlay(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 1)
@@ -284,58 +310,101 @@ private struct WebAnnotationCard: View {
                         .frame(width: 3)
                 }
 
-            if let note = annotation.noteText, !note.isEmpty {
+            if let previewNote = normalizedNotePreview, let fullNote = fullNoteText {
                 HStack(alignment: .top, spacing: 4) {
                     Image(systemName: "text.quote")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    let previewNote = note
-                        .replacingOccurrences(of: #"(?m)^#{1,6} "#, with: "", options: .regularExpression)
-                        .replacingOccurrences(of: #"(?m)^```[^\n]*"#, with: "", options: .regularExpression)
                     if let attributed = try? AttributedString(markdown: previewNote, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
                         Text(attributed)
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Text(previewNote)
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-            }
-
-            HStack {
-                Spacer()
-
-                if isHovered {
-                    HStack(spacing: 8) {
-                        Button { onEdit() } label: {
-                            Image(systemName: "pencil")
-                                .font(.caption2)
-                        }
-                        .buttonStyle(.plain)
-                        .help("编辑笔记")
-
-                        Button { onDelete() } label: {
-                            Image(systemName: "trash")
-                                .font(.caption2)
-                                .foregroundStyle(.red)
-                        }
-                        .buttonStyle(.plain)
-                        .help("删除标注")
-                    }
-                    .transition(.opacity)
+                .padding(.trailing, 24)
+                .padding(.bottom, 16)
+                .overlay(alignment: .bottomTrailing) {
+                    notePreviewIndicator(noteText: fullNote)
+                        .padding(.trailing, 2)
                 }
             }
         }
         .padding(12)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var footerActionStrip: some View {
+        HStack(spacing: 8) {
+            Button { onEdit() } label: {
+                Image(systemName: "pencil")
+                    .font(.caption2)
+            }
+            .buttonStyle(.plain)
+            .help("编辑笔记")
+
+            Button { onDelete() } label: {
+                Image(systemName: "trash")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            .help("删除标注")
+        }
+        .padding(.horizontal, 8)
+        .frame(height: footerBarHeight)
+        .background(
+            RoundedRectangle(cornerRadius: 9)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.8)
+        )
+        .shadow(color: Color.black.opacity(0.07), radius: 5, y: 2)
+        .opacity(actionButtonOpacity)
+        .offset(y: actionButtonOffset)
+        .allowsHitTesting(actionButtonHitTestingEnabled)
+    }
+
+    private var footerExtension: some View {
+        ZStack(alignment: .bottomTrailing) {
+            footerActionStrip
+                .padding(.trailing, 12)
+                .padding(.bottom, 8)
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .frame(height: footerRevealHeight, alignment: .bottom)
+        .clipped()
+        .onHover { hovering in
+            isHovered = hovering
+            syncHoverProgress()
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            cardContent
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    isHovered = hovering
+                    syncHoverProgress()
+                }
+            footerExtension
+        }
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(isSelected
                     ? Color.accentColor.opacity(0.08)
-                    : (isHovered ? Color.primary.opacity(0.04) : Color.clear)
+                    : Color.primary.opacity(ManualHoverMotion.hoverFill(progress: hoverProgress.progress, maxOpacity: 0.04))
                 )
         )
         .overlay(
@@ -345,10 +414,39 @@ private struct WebAnnotationCard: View {
                     lineWidth: 1
                 )
         )
-        .contentShape(Rectangle())
+        .contentShape(RoundedRectangle(cornerRadius: 8))
         .onTapGesture { onTap() }
-        .onHover { isHovered = $0 }
-        .animation(.easeInOut(duration: 0.15), value: isHovered)
-        .animation(.easeInOut(duration: 0.15), value: isSelected)
+        .onAppear {
+            hoverProgress.sync(to: showsActionButtons)
+        }
+        .onChange(of: isSelected) { _, _ in
+            syncHoverProgress()
+        }
+        .onDisappear {
+            hoverProgress.cancel()
+        }
+    }
+
+    private func syncHoverProgress() {
+        hoverProgress.setVisible(showsActionButtons)
+    }
+
+    private func notePreviewIndicator(noteText: String) -> some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            if isShowingNotePreview {
+                AnnotationNoteHoverBubble(noteText: noteText)
+            }
+
+            Image(systemName: "exclamationmark.circle")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .padding(4)
+                .background(Color.primary.opacity(0.04), in: Circle())
+                .opacity(0.82)
+                .help("查看完整笔记")
+        }
+        .onHover { hovering in
+            isShowingNotePreview = hovering
+        }
     }
 }

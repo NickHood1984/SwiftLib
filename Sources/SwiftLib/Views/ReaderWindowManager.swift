@@ -18,6 +18,44 @@ import SwiftLibCore
 final class ReaderWindowManager {
     static let shared = ReaderWindowManager()
 
+    private enum ReaderWindowKind {
+        case pdf
+        case web
+
+        var minSize: NSSize {
+            switch self {
+            case .pdf:
+                return NSSize(width: 980, height: 720)
+            case .web:
+                return NSSize(width: 800, height: 600)
+            }
+        }
+
+        var autosaveVersion: String {
+            switch self {
+            case .pdf:
+                return "v2"
+            case .web:
+                return "v1"
+            }
+        }
+
+        func preferredWindowSize() -> NSSize {
+            let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
+
+            switch self {
+            case .pdf:
+                let width = min(visibleFrame.width - 56, max(1240, visibleFrame.width * 0.9))
+                let height = min(visibleFrame.height - 56, max(820, visibleFrame.height * 0.9))
+                return NSSize(width: width, height: height)
+            case .web:
+                let width = min(max(minSize.width, visibleFrame.width * 0.84), visibleFrame.width - 80)
+                let height = min(max(minSize.height, visibleFrame.height * 0.84), visibleFrame.height - 80)
+                return NSSize(width: width, height: height)
+            }
+        }
+    }
+
     // MARK: - Storage
 
     /// Open reader windows keyed by reference ID.
@@ -32,6 +70,7 @@ final class ReaderWindowManager {
     /// Open (or re-activate) a PDF reader window for the given reference.
     func openPDFReader(for reference: Reference) {
         guard let refId = reference.id, reference.pdfPath != nil else { return }
+        let kind: ReaderWindowKind = .pdf
 
         // Already open → bring to front
         if let existing = windows[refId], existing.isVisible || existing.isMiniaturized {
@@ -43,14 +82,14 @@ final class ReaderWindowManager {
 
         let window = makeWindow(
             title: windowTitle(for: reference, suffix: "PDF"),
-            autosaveName: "SwiftLibPDFReader-\(refId)",
-            minSize: NSSize(width: 800, height: 600)
+            autosaveName: "SwiftLibPDFReader-\(kind.autosaveVersion)-\(refId)",
+            kind: kind
         )
 
         let readerView = PDFReaderView(reference: reference) { [weak self] in
             self?.closeWindow(forReferenceId: refId)
         }
-        .frame(minWidth: 800, minHeight: 600)
+        .frame(minWidth: kind.minSize.width, minHeight: kind.minSize.height)
 
         window.contentViewController = NSHostingController(rootView: readerView)
         registerWindow(window, forReferenceId: refId)
@@ -59,6 +98,7 @@ final class ReaderWindowManager {
     /// Open (or re-activate) a Web reader window for the given reference.
     func openWebReader(for reference: Reference) {
         guard let refId = reference.id, reference.canOpenWebReader else { return }
+        let kind: ReaderWindowKind = .web
 
         if let existing = windows[refId], existing.isVisible || existing.isMiniaturized {
             existing.deminiaturize(nil)
@@ -69,14 +109,14 @@ final class ReaderWindowManager {
 
         let window = makeWindow(
             title: windowTitle(for: reference, suffix: "Web"),
-            autosaveName: "SwiftLibWebReader-\(refId)",
-            minSize: NSSize(width: 800, height: 600)
+            autosaveName: "SwiftLibWebReader-\(kind.autosaveVersion)-\(refId)",
+            kind: kind
         )
 
         let readerView = WebReaderView(reference: reference) { [weak self] in
             self?.closeWindow(forReferenceId: refId)
         }
-        .frame(minWidth: 800, minHeight: 600)
+        .frame(minWidth: kind.minSize.width, minHeight: kind.minSize.height)
 
         window.contentViewController = NSHostingController(rootView: readerView)
         registerWindow(window, forReferenceId: refId)
@@ -98,8 +138,8 @@ final class ReaderWindowManager {
 
     // MARK: - Private helpers
 
-    private func makeWindow(title: String, autosaveName: String, minSize: NSSize) -> NSWindow {
-        let preferredSize = preferredWindowSize(minSize: minSize)
+    private func makeWindow(title: String, autosaveName: String, kind: ReaderWindowKind) -> NSWindow {
+        let preferredSize = kind.preferredWindowSize()
 
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: preferredSize),
@@ -109,7 +149,7 @@ final class ReaderWindowManager {
         )
         window.title = title
         window.isReleasedWhenClosed = false
-        window.minSize = minSize
+        window.minSize = kind.minSize
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .visible
         window.toolbarStyle = .unified
@@ -160,12 +200,5 @@ final class ReaderWindowManager {
     private func windowTitle(for reference: Reference, suffix: String) -> String {
         let title = reference.title.trimmingCharacters(in: .whitespacesAndNewlines)
         return title.isEmpty ? "Reader — \(suffix)" : title
-    }
-
-    private func preferredWindowSize(minSize: NSSize) -> NSSize {
-        let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
-        let width = min(max(minSize.width, 1000), visibleFrame.width - 100)
-        let height = min(max(minSize.height, 800), visibleFrame.height - 100)
-        return NSSize(width: width, height: height)
     }
 }

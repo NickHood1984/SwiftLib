@@ -61,22 +61,7 @@ struct AnnotationSidebarView: View {
     // MARK: - Header
 
     private var sidebarHeader: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center) {
-                Text("标注")
-                    .font(.headline)
-
-                Text("\(filteredAnnotations.count)")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
-
-                Spacer()
-            }
-
+        VStack(alignment: .leading, spacing: 0) {
             DraggableSegmentedControl(selection: $filterType, items: [
                 ("全部", nil),
                 ("高亮", .highlight),
@@ -130,7 +115,7 @@ struct AnnotationSidebarView: View {
     private var annotationList: some View {
         ScrollViewReader { proxy in
             OverlayScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 10) {
                     ForEach(filteredAnnotations) { annotation in
                         AnnotationCard(
                             annotation: annotation,
@@ -143,14 +128,15 @@ struct AnnotationSidebarView: View {
                                 editingAnnotation = annotation
                             },
                             onDelete: {
-                                withAnimation { viewModel.deleteAnnotation(annotation) }
+                                viewModel.deleteAnnotation(annotation)
                             }
                         )
                         .id(annotation.id)
                     }
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 12)
+                .padding(.top, 6)
+                .padding(.bottom, 12)
             }
             .onChange(of: viewModel.selectedAnnotationId) { _, newId in
                 if let newId {
@@ -227,6 +213,11 @@ struct AnnotationCard: View {
     let onDelete: () -> Void
 
     @State private var isHovered = false
+    @State private var isShowingNotePreview = false
+
+    private var showsActionButtons: Bool {
+        isHovered || isSelected
+    }
 
     private var cardBackground: Color {
         if isSelected {
@@ -251,14 +242,23 @@ struct AnnotationCard: View {
         Color.primary.opacity(isSelected ? 0.045 : 0.022)
     }
 
-    private var normalizedNotePreview: String? {
-        guard let note = annotation.noteText, !note.isEmpty else { return nil }
+    private var fullNoteText: String? {
+        guard let note = annotation.noteText?.trimmingCharacters(in: .whitespacesAndNewlines), !note.isEmpty else {
+            return nil
+        }
         return note
-            .replacingOccurrences(of: #"(?m)^#{1,6} "#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"(?m)^```[^\n]*"#, with: "", options: .regularExpression)
     }
 
-    var body: some View {
+    private var normalizedNotePreview: String? {
+        guard let note = fullNoteText else { return nil }
+        let cleanedNote = note
+            .replacingOccurrences(of: #"(?m)^#{1,6} "#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?m)^```[^\n]*"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleanedNote.isEmpty ? nil : cleanedNote
+    }
+
+    private var cardContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 6) {
                 Circle()
@@ -271,83 +271,126 @@ struct AnnotationCard: View {
 
                 Spacer(minLength: 4)
 
-                Text("P\(annotation.pageIndex + 1)")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.tertiary)
+                if showsActionButtons {
+                    HStack(spacing: 6) {
+                        Button(action: onEdit) {
+                            Image(systemName: "pencil")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("编辑笔记")
 
-                Text("·")
-                    .foregroundStyle(.quaternary)
+                        Button(action: onDelete) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.red.opacity(0.7))
+                        }
+                        .buttonStyle(.plain)
+                        .help("删除标注")
+                    }
+                } else {
+                    Text("P\(annotation.pageIndex + 1)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.tertiary)
 
-                Text(annotation.dateCreated.formatted(.dateTime.month().day().hour().minute()))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .monospacedDigit()
+                    Text("·")
+                        .foregroundStyle(.quaternary)
+
+                    Text(annotation.dateCreated.formatted(.dateTime.month().day().hour().minute()))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                }
             }
+            .frame(height: 16)
 
             if let text = annotation.selectedText, !text.isEmpty {
-                HStack(alignment: .top, spacing: 8) {
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(Color(hex: annotation.color).opacity(0.75))
-                        .frame(width: 3)
-
-                    Text(text)
-                        .font(.callout)
-                        .foregroundStyle(.primary)
-                        .lineLimit(5)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(8)
-                .background(excerptBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                Text(text)
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .lineLimit(5)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 10)
+                    .overlay(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .fill(Color(hex: annotation.color).opacity(0.75))
+                            .frame(width: 3)
+                    }
+                    .padding(8)
+                    .background(excerptBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
 
-            if let previewNote = normalizedNotePreview {
+            if let previewNote = normalizedNotePreview, let fullNote = fullNoteText {
                 VStack(alignment: .leading, spacing: 4) {
                     if let attributed = try? AttributedString(markdown: previewNote, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
                         Text(attributed)
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .lineLimit(4)
+                            .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         Text(previewNote)
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .lineLimit(4)
+                            .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .padding(8)
+                .padding(.top, 8)
+                .padding(.leading, 8)
+                .padding(.trailing, 28)
+                .padding(.bottom, 18)
                 .background(noteBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-
-            if isHovered || isSelected {
-                HStack {
-                    Spacer()
-                    HStack(spacing: 8) {
-                        cardActionButton(icon: "pencil", tint: .secondary, action: onEdit)
-                            .help("编辑笔记")
-                        cardActionButton(icon: "trash", tint: .red, action: onDelete)
-                            .help("删除标注")
-                    }
-                    .transition(.opacity)
+                .overlay(alignment: .bottomTrailing) {
+                    notePreviewIndicator(noteText: fullNote)
+                        .padding(.trailing, 7)
+                        .padding(.bottom, 7)
                 }
             }
         }
         .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(cardBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(cardStroke, lineWidth: isSelected ? 1 : 0.5)
-        )
-        .shadow(color: cardShadow, radius: isSelected ? 10 : 5, y: isSelected ? 4 : 2)
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .onTapGesture { onTap() }
-        .onHover { isHovered = $0 }
-        .animation(.easeInOut(duration: 0.15), value: isHovered)
-        .animation(.easeInOut(duration: 0.15), value: isSelected)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    var body: some View {
+        cardContent
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(cardBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(cardStroke, lineWidth: isSelected ? 1 : 0.5)
+            )
+            .shadow(color: cardShadow, radius: isSelected ? 10 : 5, y: isSelected ? 4 : 2)
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .onTapGesture { onTap() }
+            .onHover { isHovered = $0 }
+    }
+
+    private func notePreviewIndicator(noteText: String) -> some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            if isShowingNotePreview {
+                AnnotationNoteHoverBubble(noteText: noteText)
+            }
+
+            Image(systemName: "exclamationmark.circle")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .padding(4)
+                .background(Color.primary.opacity(0.04), in: Circle())
+                .opacity(0.82)
+                .help("查看完整笔记")
+        }
+        .onHover { hovering in
+            isShowingNotePreview = hovering
+        }
     }
 
     private func cardActionButton(icon: String, tint: Color, action: @escaping () -> Void) -> some View {
@@ -362,5 +405,77 @@ struct AnnotationCard: View {
                 )
         }
         .buttonStyle(.plain)
+    }
+}
+
+struct AnnotationNoteHoverBubble: View {
+    let noteText: String
+
+    private var plainText: String {
+        Self.sanitizedPlainText(from: noteText)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("完整笔记")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text(plainText)
+                .font(.system(size: 11))
+                .foregroundStyle(.primary)
+                .lineSpacing(2)
+                .frame(width: 220, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .padding(10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.35), lineWidth: 0.6)
+        )
+        .shadow(color: Color.black.opacity(0.10), radius: 10, y: 4)
+    }
+
+    private static func sanitizedPlainText(from source: String) -> String {
+        let regexReplacements: [(String, String)] = [
+            (#"!\[([^\]]*)\]\([^)]+\)"#, "$1"),
+            (#"\[([^\]]+)\]\([^)]+\)"#, "$1"),
+            (#"(?m)^\s*```[^\n]*$"#, ""),
+            (#"(?m)^\s*~~~[^\n]*$"#, ""),
+            (#"(?m)^\s{0,3}#{1,6}\s*"#, ""),
+            (#"(?m)^\s{0,3}>\s?"#, ""),
+            (#"(?m)^\s*[-*+]\s+\[[ xX]\]\s*"#, ""),
+            (#"(?m)^\s*[-*+]\s+"#, ""),
+            (#"(?m)^\s*\d+\.\s+"#, ""),
+            (#"(?m)^\s*([-*_]\s*){3,}$"#, ""),
+            (#"(\*\*|__)(.*?)\1"#, "$2"),
+            (#"(\*|_)(.*?)\1"#, "$2"),
+            (#"~~(.*?)~~"#, "$1"),
+            (#"`([^`]*)`"#, "$1"),
+            (#"<[^>]+>"#, "")
+        ]
+
+        var result = source
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        for (pattern, replacement) in regexReplacements {
+            result = result.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
+        }
+
+        result = result
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .replacingOccurrences(of: "~~", with: "")
+            .replacingOccurrences(of: "`", with: "")
+
+        let lines = result
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        return lines.joined(separator: "\n")
     }
 }

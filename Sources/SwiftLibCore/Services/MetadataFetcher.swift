@@ -43,9 +43,9 @@ public enum MetadataFetcher {
     private static var userAgent: String {
         let email = contactEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         if email.isEmpty || !email.contains("@") {
-            return "SwiftLib/1.0"
+            return "SwiftLib/1.1.0"
         }
-        return "SwiftLib/1.0 (mailto:\(email))"
+        return "SwiftLib/1.1.0 (mailto:\(email))"
     }
 
     // MARK: - Identifier Detection
