@@ -3,6 +3,17 @@
     <channel>
         <title>SwiftLib</title>
         <item>
+            <title>1.1.1</title>
+            <pubDate>Mon, 13 Apr 2026 06:01:39 +0800</pubDate>
+            <link>https://github.com/NickHood1984/SwiftLib</link>
+            <sparkle:fullReleaseNotesLink>https://github.com/NickHood1984/SwiftLib/releases/tag/v1.1.1</sparkle:fullReleaseNotesLink>
+            <sparkle:version>1.1.1</sparkle:version>
+            <sparkle:shortVersionString>1.1.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.1.1/SwiftLib-1.1.1.dmg" length="161316300" type="application/octet-stream" sparkle:edSignature="fTJObyRFec79cEz/lVxvrRG/ICqItdxMGgbgRb2U32HzzYku2985S1Pk08ufeWwudNOvytDIq+LsfMpq+fj4Cg=="/>
+        </item>
+        <item>
             <title>1.1.0</title>
             <pubDate>Sun, 12 Apr 2026 15:54:07 +0800</pubDate>
             <link>https://github.com/NickHood1984/SwiftLib</link>
@@ -25,7 +36,7 @@
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.1.0/SwiftLib-1.0.0.dmg" length="159087583" type="application/octet-stream" sparkle:edSignature="l6kfAEiP2rTRStMCC3hdF4IBPKSpZiG0qMHpOLY1Y0NnaxHXcWPAIFHnjN+P1zoDW0vKl7trxAy8lxIKRdxoDA=="/>
+            <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.0.0/SwiftLib-1.0.0.dmg" length="159087583" type="application/octet-stream" sparkle:edSignature="l6kfAEiP2rTRStMCC3hdF4IBPKSpZiG0qMHpOLY1Y0NnaxHXcWPAIFHnjN+P1zoDW0vKl7trxAy8lxIKRdxoDA=="/>
         </item>
     </channel>
 </rss>

@@ -55,6 +55,23 @@ PAGES_RELEASE_NOTES_DIR="${PAGES_RELEASE_NOTES_DIR:-$PROJECT_DIR/Docs/releases}"
 DMG_PATH="${DMG_PATH:-$PROJECT_DIR/build/$APP_NAME-$APP_VERSION.dmg}"
 NOTES_SOURCE_FILE="${NOTES_SOURCE_FILE:-}"
 
+normalize_historical_release_urls() {
+    local archive_path archive_name archive_version expected_url current_url
+
+    for archive_path in "$ARCHIVES_DIR"/"$APP_NAME"-*.dmg; do
+        [ -e "$archive_path" ] || continue
+
+        archive_name="$(basename "$archive_path")"
+        archive_version="${archive_name#${APP_NAME}-}"
+        archive_version="${archive_version%.dmg}"
+        expected_url="${REPO_URL}/releases/download/v${archive_version}/${archive_name}"
+        current_url="${DOWNLOAD_URL_PREFIX}${archive_name}"
+
+        APPCAST_EXPECTED_URL="$expected_url" \
+            perl -0pi -e 's|\Q'$current_url'\E|$ENV{APPCAST_EXPECTED_URL}|g' "$APPCAST_PATH"
+    done
+}
+
 if [ ! -f "$DMG_PATH" ]; then
     APP_VERSION="$APP_VERSION" APP_BUILD_VERSION="$APP_BUILD_VERSION" "$SCRIPT_DIR/build-app.sh" release
 fi
@@ -91,6 +108,8 @@ fi
     --link "$REPO_URL" \
     -o "$APPCAST_PATH" \
     "$ARCHIVES_DIR"
+
+normalize_historical_release_urls
 
 echo ""
 echo "Appcast generated:"
