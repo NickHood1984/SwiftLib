@@ -1,0 +1,50 @@
+{
+  "version": 3,
+  "lastUpdated": "2026-04-13",
+  "services": [
+    {
+      "id": "chatgpt",
+      "name": "ChatGPT",
+      "urlPattern": "chatgpt.com",
+      "inputSelector": "#prompt-textarea",
+      "sendSelector": "button[data-testid='send-button']",
+      "responseSelector": "div.agent-turn",
+      "contentSelector": "div.markdown",
+      "streamingSelector": "div[class*='stream']",
+      "notes": "已验证 2026-04-13"
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "urlPattern": "chat.deepseek.com",
+      "inputSelector": "textarea",
+      "sendSelector": "Enter",
+      "responseSelector": "div.ds-message",
+      "contentSelector": "div.ds-markdown",
+      "streamingSelector": "div[class*='loading']",
+      "notes": "已验证 2026-04-13"
+    },
+    {
+      "id": "doubao",
+      "name": "豆包",
+      "urlPattern": "doubao.com",
+      "inputSelector": "textarea",
+      "sendSelector": "button[class*='send']",
+      "responseSelector": "div[class*='flow-markdown-body']",
+      "contentSelector": "div[class*='flow-markdown-body']",
+      "streamingSelector": "div[class*='loading']",
+      "notes": "已验证 2026-04-13"
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi",
+      "urlPattern": "kimi",
+      "inputSelector": "div[contenteditable='true']",
+      "sendSelector": "Enter",
+      "responseSelector": "div.chat-content-item.chat-content-item-assistant",
+      "contentSelector": "div.markdown",
+      "streamingSelector": "",
+      "notes": "已验证 2026-04-13；kimi.moonshot.cn 和 kimi.com 均匹配"
+    }
+  ]
+}
