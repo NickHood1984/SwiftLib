@@ -35,11 +35,26 @@ struct CheckForUpdatesView: View {
 struct SwiftLibApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var addinToast: AddinToastPayload?
-    @AppStorage(SwiftLibPreferences.appendYouTubeTranscriptOnClipKey) private var appendYouTubeTranscriptOnClip = false
-    private let updaterController = SPUStandardUpdaterController(
-        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil
-    )
+    private let glassDriver: GlassUpdateDriver
+    private let updater: SPUUpdater
     private static let defaultWindowSize = preferredDefaultWindowSize()
+
+    init() {
+        let driver = GlassUpdateDriver()
+        let upd = SPUUpdater(
+            hostBundle: .main,
+            applicationBundle: .main,
+            userDriver: driver,
+            delegate: nil
+        )
+        glassDriver = driver
+        updater = upd
+        do {
+            try upd.start()
+        } catch {
+            print("SwiftLib: Failed to start Sparkle updater: \(error)")
+        }
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -63,98 +78,18 @@ struct SwiftLibApp: App {
         .defaultSize(width: Self.defaultWindowSize.width, height: Self.defaultWindowSize.height)
         .commands {
             CommandGroup(after: .appInfo) {
-                CheckForUpdatesView(updater: updaterController.updater)
+                CheckForUpdatesView(updater: updater)
             }
 
-            CommandGroup(after: .appSettings) {
-                Toggle("剪藏 YouTube 时在笔记中追加字幕", isOn: $appendYouTubeTranscriptOnClip)
-
-                Divider()
-
-                Button(CLIInstaller.isInstalled ? "重新安装 CLI 工具" : "安装 CLI 工具") {
-                    do {
-                        try CLIInstaller.install()
-                        showToast("CLI 已安装到 \(CLIInstaller.installURL.path)", tone: .success)
-                    } catch {
-                        showToast("安装失败：\(error.localizedDescription)", tone: .error, hideAfter: 5)
-                    }
+            CommandMenu("AI") {
+                Button("打开 AI 助手") {
+                    AIChatWindowManager.shared.open()
                 }
-
-                Button("卸载 CLI 工具") {
-                    do {
-                        try CLIInstaller.uninstall()
-                        showToast("CLI 工具已卸载", tone: .info, hideAfter: 2.5)
-                    } catch {
-                        showToast("卸载失败：\(error.localizedDescription)", tone: .error, hideAfter: 5)
-                    }
-                }
-                .disabled(!CLIInstaller.isInstalled)
-
-                Button("在 Finder 中显示") {
-                    CLIInstaller.revealInFinder()
-                }
-
-                Divider()
-
-                let installed = CLIInstaller.isInstalled
-                Text("状态：\(installed ? "✅ 已安装" : "❌ 未安装")  路径：\(CLIInstaller.installURL.path)")
-
-                Divider()
-
-                Button(WordAddinInstaller.isInstalled ? "重新安装 Word 插件" : "安装 Word 插件") {
-                    do {
-                        try WordAddinInstaller.install()
-                        showToast("Word 插件已安装", tone: .success)
-                    } catch {
-                        showToast("Word 插件安装失败：\(error.localizedDescription)", tone: .error, hideAfter: 5)
-                    }
-                }
-
-                Button("卸载 Word 插件") {
-                    WordAddinInstaller.uninstall()
-                    showToast("Word 插件已卸载", tone: .info, hideAfter: 2.5)
-                }
-                .disabled(!WordAddinInstaller.isInstalled)
-
-                Button("在 Finder 中显示插件清单") {
-                    WordAddinInstaller.revealManifest()
-                }
-
-                Divider()
-
-                let addinInstalled = WordAddinInstaller.isInstalled
-                Text("Word 插件：\(addinInstalled ? "✅ 已安装" : "❌ 未安装")  服务：\(WordAddinServer.shared.isRunning ? "🟢 运行中" : "⚪ 已停止")")
-
-                if WPSAddinInstaller.isWPSInstalled {
-                    Divider()
-
-                    Button(WPSAddinInstaller.isInstalled ? "重新安装 WPS 插件" : "安装 WPS 插件") {
-                        do {
-                            try WPSAddinInstaller.install()
-                            showToast("WPS 插件已安装", tone: .success)
-                        } catch {
-                            showToast("WPS 插件安装失败：\(error.localizedDescription)", tone: .error, hideAfter: 5)
-                        }
-                    }
-
-                    Button("卸载 WPS 插件") {
-                        WPSAddinInstaller.uninstall()
-                        showToast("WPS 插件已卸载", tone: .info, hideAfter: 2.5)
-                    }
-                    .disabled(!WPSAddinInstaller.isInstalled)
-
-                    Button("在 Finder 中显示 WPS 插件") {
-                        WPSAddinInstaller.revealAddin()
-                    }
-
-                    let wpsInstalled = WPSAddinInstaller.isInstalled
-                    Text("WPS 插件：\(wpsInstalled ? "✅ 已安装" : "❌ 未安装")")
-                }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
             }
-
         }
         Settings {
-            EmptyView()
+            SettingsView()
         }
     }
 
@@ -187,6 +122,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
+        // If persistent storage is unavailable, continue with an in-memory database
+        // only after the user explicitly acknowledges the limitation.
+        if AppDatabase.sharedStorageMode == .inMemoryFallback {
+            let alert = NSAlert()
+            alert.messageText = "数据库已切换为临时内存模式"
+            let detail = AppDatabase.sharedStartupErrorDescription ?? "未知错误"
+            alert.informativeText = "SwiftLib 无法打开持久化数据库，本次会话会改用内存数据库继续运行。你仍可浏览和编辑数据，但重启应用后改动不会保留。\n\n错误详情：\(detail)"
+            alert.alertStyle = .critical
+            alert.addButton(withTitle: "退出")
+            alert.addButton(withTitle: "继续")
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                NSApp.terminate(nil)
+                return
+            }
+        }
+
         // Configure API contact email for CrossRef/OpenAlex polite pool
         MetadataFetcher.contactEmail = SwiftLibPreferences.apiContactEmail
 
@@ -198,6 +150,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         try? WordAddinInstaller.install()
         try? WPSAddinInstaller.install()
         WordAddinServer.shared.start()
+
+        // Pre-warm translation backend so the first metadata resolve doesn't pay cold-start cost
+        Task.detached(priority: .utility) {
+            _ = try? await TranslationBackendProcessManager.shared.currentConnection()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

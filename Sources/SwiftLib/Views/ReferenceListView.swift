@@ -4,15 +4,16 @@ import SwiftLibCore
 // MARK: - ReferenceListView
 
 struct ReferenceListView: View {
-    let references: [Reference]
+    let references: [ReferenceListRow]
     let collections: [Collection]
     let selectedId: Int64?
     let onSelect: (Int64) -> Void
-    let onDelete: ([Reference]) -> Void
-    let onMove: ([Reference], Int64?) -> Void
-    let onRefreshMetadata: ([Reference]) -> Void
+    let onDelete: (Set<Int64>) -> Void
+    let onMove: (Set<Int64>, Int64?) -> Void
+    let onRefreshMetadata: (Set<Int64>) -> Void
     var isRefreshingMetadata = false
     var onDoubleClick: ((Int64) -> Void)? = nil
+    var onLoadMore: ((ReferenceListRow) -> Void)? = nil
 
     // Multi-selection state
     @State private var multiSelection: Set<Int64> = []
@@ -123,20 +124,21 @@ struct ReferenceListView: View {
                             Button("取消多选") { clearMultiSelection() }
                         } else {
                             Button("刷新元数据") {
-                                onRefreshMetadata([ref])
+                                if let id = ref.id { onRefreshMetadata(Set([id])) }
                             }
                             .disabled(isRefreshingMetadata)
                             Divider()
-                            moveToCollectionMenu(forRef: ref)
+                            moveToCollectionMenu(forRefId: refId)
                             Divider()
                             Button("删除", role: .destructive) {
-                                onDelete([ref])
+                                if let id = ref.id { onDelete(Set([id])) }
                             }
                             Divider()
                             Button("⌘+点击可多选") {}
                                 .disabled(true)
                         }
                     }
+                    .onAppear { onLoadMore?(ref) }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -245,15 +247,15 @@ struct ReferenceListView: View {
 
     /// Single-item move
     @ViewBuilder
-    private func moveToCollectionMenu(forRef ref: Reference) -> some View {
+    private func moveToCollectionMenu(forRefId refId: Int64) -> some View {
         Menu("移动到…") {
             Button("移出分组（无分组）") {
-                onMove([ref], nil)
+                onMove(Set([refId]), nil)
             }
             if !collections.isEmpty { Divider() }
             ForEach(collections) { col in
                 Button(col.name) {
-                    onMove([ref], col.id)
+                    onMove(Set([refId]), col.id)
                 }
             }
         }
@@ -318,28 +320,27 @@ struct ReferenceListView: View {
     }
 
     private func batchDelete() {
-        let toDelete = references.filter { multiSelection.contains($0.id ?? -1) }
+        let ids = multiSelection
         clearMultiSelection()
-        onDelete(toDelete)
+        onDelete(ids)
     }
 
     private func batchMove(toCollectionId: Int64?) {
-        let toMove = references.filter { multiSelection.contains($0.id ?? -1) }
+        let ids = multiSelection
         clearMultiSelection()
-        onMove(toMove, toCollectionId)
+        onMove(ids, toCollectionId)
     }
 
     private func batchRefreshMetadata() {
-        let toRefresh = references.filter { multiSelection.contains($0.id ?? -1) }
-        guard !toRefresh.isEmpty else { return }
-        onRefreshMetadata(toRefresh)
+        guard !multiSelection.isEmpty else { return }
+        onRefreshMetadata(multiSelection)
     }
 }
 
 // MARK: - ReferenceRow
 
 struct ReferenceRow: View, Equatable {
-    let reference: Reference
+    let reference: ReferenceListRow
     let isSelected: Bool
     var isMultiSelected: Bool = false
 

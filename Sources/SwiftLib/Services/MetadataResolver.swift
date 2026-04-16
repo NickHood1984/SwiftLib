@@ -547,7 +547,7 @@ final class MetadataResolver {
         return .skipped("未在已知数据库中找到匹配条目。如有标准标识符（ISBN、DOI 等），可填写后重试。")
     }
 
-    private func refreshOutcome(from result: MetadataResolutionResult, original: Reference) async -> ReferenceMetadataRefreshResult {
+    nonisolated private func refreshOutcome(from result: MetadataResolutionResult, original: Reference) async -> ReferenceMetadataRefreshResult {
         switch result {
         case .verified(let envelope):
             var refreshed = MetadataResolution.mergeRefreshedReference(primary: envelope.reference, existing: original)
@@ -713,7 +713,7 @@ final class MetadataResolver {
         }
     }
 
-    private func shouldAutoResolveCNKICandidate(
+    nonisolated private func shouldAutoResolveCNKICandidate(
         _ top: MetadataCandidate,
         second: MetadataCandidate?,
         seed: MetadataResolutionSeed
@@ -734,7 +734,7 @@ final class MetadataResolver {
         return true
     }
 
-    private func refreshWithDirectIdentifierAPIs(_ reference: Reference, seed: MetadataResolutionSeed) async -> ReferenceMetadataRefreshResult? {
+    nonisolated private func refreshWithDirectIdentifierAPIs(_ reference: Reference, seed: MetadataResolutionSeed) async -> ReferenceMetadataRefreshResult? {
         let identifier: MetadataFetcher.Identifier?
         if let doi = normalizedIdentifier(reference.doi) {
             identifier = .doi(doi)
@@ -759,7 +759,7 @@ final class MetadataResolver {
         }
     }
 
-    private func refreshWithOpenAlexTitleSearch(_ reference: Reference, seed: MetadataResolutionSeed) async -> ReferenceMetadataRefreshResult? {
+    nonisolated private func refreshWithOpenAlexTitleSearch(_ reference: Reference, seed: MetadataResolutionSeed) async -> ReferenceMetadataRefreshResult? {
         let title = reference.title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return nil }
         resolverTrace("refreshWithOpenAlexTitleSearch title=\"\(title)\"")
@@ -797,7 +797,7 @@ final class MetadataResolver {
         }
     }
 
-    private func refreshWithBookTitleSearch(_ reference: Reference, seed: MetadataResolutionSeed) async -> ReferenceMetadataRefreshResult? {
+    nonisolated private func refreshWithBookTitleSearch(_ reference: Reference, seed: MetadataResolutionSeed) async -> ReferenceMetadataRefreshResult? {
         let title = reference.title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return nil }
         resolverTrace("refreshWithBookTitleSearch title=\"\(title)\"")
@@ -883,7 +883,7 @@ final class MetadataResolver {
         }
     }
 
-    private func verifyFetchedRecord(
+    nonisolated private func verifyFetchedRecord(
         _ record: AuthoritativeMetadataRecord,
         seed: MetadataResolutionSeed?,
         fallback: Reference?,
@@ -940,7 +940,7 @@ final class MetadataResolver {
         }
     }
 
-    private func blockedOrRejectedResult(
+    nonisolated private func blockedOrRejectedResult(
         error: CNKIMetadataProvider.CNKIError,
         seed: MetadataResolutionSeed?,
         fallback: Reference?,
@@ -990,7 +990,7 @@ final class MetadataResolver {
         }
     }
 
-    private func resolveIdentifierValue(
+    nonisolated private func resolveIdentifierValue(
         _ rawIdentifier: String,
         as identifier: MetadataFetcher.Identifier,
         seed: MetadataResolutionSeed?,
@@ -1001,7 +1001,7 @@ final class MetadataResolver {
         return await resolveIdentifierLocally(identifier, seed: seed, fallback: fallback)
     }
 
-    private func resolveIdentifierLocally(
+    nonisolated private func resolveIdentifierLocally(
         _ identifier: MetadataFetcher.Identifier,
         seed: MetadataResolutionSeed?,
         fallback: Reference?
@@ -1048,7 +1048,7 @@ final class MetadataResolver {
         }
     }
 
-    private func debugLabel(for result: MetadataResolutionResult) -> String {
+    nonisolated private func debugLabel(for result: MetadataResolutionResult) -> String {
         switch result {
         case .verified(let envelope):
             return "verified(title=\"\(envelope.reference.title)\")"
@@ -1065,7 +1065,7 @@ final class MetadataResolver {
         }
     }
 
-    private func debugLabel(for result: ReferenceMetadataRefreshResult) -> String {
+    nonisolated private func debugLabel(for result: ReferenceMetadataRefreshResult) -> String {
         switch result {
         case .refreshed(let reference):
             return "refreshed(title=\"\(reference.title)\")"
@@ -1078,7 +1078,7 @@ final class MetadataResolver {
         }
     }
 
-    private func buildGenericEvidence(
+    nonisolated private func buildGenericEvidence(
         for reference: Reference,
         source: MetadataSource,
         fetchMode: FetchMode,
@@ -1172,20 +1172,20 @@ final class MetadataResolver {
         return seed
     }
 
-    private func identifierString(_ identifier: MetadataFetcher.Identifier) -> String {
+    nonisolated private func identifierString(_ identifier: MetadataFetcher.Identifier) -> String {
         switch identifier {
         case .doi(let value), .pmid(let value), .arxiv(let value), .isbn(let value):
             return value
         }
     }
 
-    private func normalizedIdentifier(_ value: String?) -> String? {
+    nonisolated private func normalizedIdentifier(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private func normalizedHTTPURL(from value: String?) -> URL? {
+    nonisolated private func normalizedHTTPURL(from value: String?) -> URL? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty,
               let url = URL(string: trimmed),
@@ -1196,14 +1196,14 @@ final class MetadataResolver {
         return url
     }
 
-    private func isCNKIURL(_ url: URL?) -> Bool {
+    nonisolated private func isCNKIURL(_ url: URL?) -> Bool {
         guard let url else { return false }
         return MetadataResolution.metadataSource(for: url.absoluteString, fallback: .translationServer) == .cnki
     }
 
     // MARK: - Translation Backend Mapping
 
-    private func mapBackendResult(
+    nonisolated private func mapBackendResult(
         _ result: TranslationBackendResult,
         seed: MetadataResolutionSeed?,
         fallback: Reference?

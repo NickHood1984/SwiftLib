@@ -10,6 +10,8 @@ public final class AppDatabase: Sendable {
     public init(_ dbWriter: any DatabaseWriter) throws {
         self.dbWriter = dbWriter
         try migrator.migrate(dbWriter)
+        // SQLite recommends running PRAGMA optimize on long-lived connections.
+        try? dbWriter.write { db in try db.execute(sql: "PRAGMA optimize") }
     }
 
     private var migrator: DatabaseMigrator {
@@ -522,13 +524,74 @@ public final class AppDatabase: Sendable {
             )
         }
 
+        // ── v11: Normalized dedup columns + PRAGMA optimize ──────────────
+        migrator.registerMigration("v11-normalized-dedup-columns") { db in
+            let existingColumns = try db.columns(in: "reference").map(\.name)
+
+            try db.alter(table: "reference") { t in
+                if !existingColumns.contains("doiNormalized") {
+                    t.add(column: "doiNormalized", .text)
+                }
+                if !existingColumns.contains("isbnNormalized") {
+                    t.add(column: "isbnNormalized", .text)
+                }
+                if !existingColumns.contains("issnNormalized") {
+                    t.add(column: "issnNormalized", .text)
+                }
+                if !existingColumns.contains("pmcidNormalized") {
+                    t.add(column: "pmcidNormalized", .text)
+                }
+            }
+
+            // Back-fill normalized values from existing data using the same
+            // logic as the Swift-side normalizers (case folding, stripping).
+            try db.execute(sql: """
+                UPDATE reference SET
+                    doiNormalized  = CASE WHEN TRIM(COALESCE(doi,'')) != '' THEN LOWER(TRIM(doi)) ELSE NULL END,
+                    isbnNormalized = CASE WHEN TRIM(COALESCE(isbn,'')) != '' THEN REPLACE(REPLACE(UPPER(isbn), '-', ''), ' ', '') ELSE NULL END,
+                    issnNormalized = CASE WHEN TRIM(COALESCE(issn,'')) != '' THEN REPLACE(REPLACE(UPPER(issn), '-', ''), ' ', '') ELSE NULL END,
+                    pmcidNormalized = CASE WHEN TRIM(COALESCE(pmcid,'')) != '' THEN UPPER(TRIM(pmcid)) ELSE NULL END
+            """)
+
+            // Create indexes on the new columns (after back-fill for speed).
+            try db.create(index: "reference_doiNormalized", on: "reference", columns: ["doiNormalized"], ifNotExists: true)
+            try db.create(index: "reference_isbnNormalized", on: "reference", columns: ["isbnNormalized"], ifNotExists: true)
+            try db.create(index: "reference_issnNormalized", on: "reference", columns: ["issnNormalized"], ifNotExists: true)
+            try db.create(index: "reference_pmcidNormalized", on: "reference", columns: ["pmcidNormalized"], ifNotExists: true)
+
+            // Run SQLite's built-in optimizer for long-lived connections.
+            try db.execute(sql: "PRAGMA optimize")
+        }
+
         return migrator
     }
 }
 
 // MARK: - Database Access
 extension AppDatabase {
-    public static let shared = makeShared()
+    public enum SharedStorageMode: Sendable {
+        case persistent
+        case inMemoryFallback
+    }
+
+    private struct SharedBootstrap {
+        let database: AppDatabase
+        let storageMode: SharedStorageMode
+        let startupErrorDescription: String?
+    }
+
+    private static let sharedBootstrap = makeSharedBootstrap()
+
+    /// Compatibility accessor for callers that only need a usable shared database.
+    public static let sharedResult: Result<AppDatabase, Error> = .success(sharedBootstrap.database)
+
+    public static var shared: AppDatabase { sharedBootstrap.database }
+
+    public static var sharedStorageMode: SharedStorageMode { sharedBootstrap.storageMode }
+
+    public static var sharedStartupErrorDescription: String? {
+        sharedBootstrap.startupErrorDescription
+    }
 
     private static func preferredStorageRoot(named leaf: String) -> URL {
         let fm = FileManager.default
@@ -555,7 +618,7 @@ extension AppDatabase {
         return fm.temporaryDirectory.appendingPathComponent(leaf, isDirectory: true)
     }
 
-    private static func makeShared() -> AppDatabase {
+    private static func makeSharedBootstrap() -> SharedBootstrap {
         let dirURL = preferredStorageRoot(named: "SwiftLib")
         do {
             let dbURL = dirURL.appendingPathComponent("library.sqlite")
@@ -569,13 +632,22 @@ extension AppDatabase {
             #endif
             let dbPool = try DatabasePool(path: dbURL.path, configuration: config)
 
-            return try AppDatabase(dbPool)
+            return SharedBootstrap(
+                database: try AppDatabase(dbPool),
+                storageMode: .persistent,
+                startupErrorDescription: nil
+            )
         } catch {
             appDatabaseLog.error("Primary database setup failed at \(dirURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+
             do {
-                return try AppDatabase(DatabaseQueue(path: ":memory:"))
+                return SharedBootstrap(
+                    database: try AppDatabase(DatabaseQueue(path: ":memory:")),
+                    storageMode: .inMemoryFallback,
+                    startupErrorDescription: error.localizedDescription
+                )
             } catch {
-                preconditionFailure("Unable to initialize in-memory database fallback: \(error)")
+                preconditionFailure("Unable to initialize in-memory database fallback: \(error.localizedDescription)")
             }
         }
     }
@@ -652,12 +724,22 @@ extension AppDatabase {
         }
     }
 
-    public func fetchAllReferences(limit: Int = 0) throws -> [Reference] {
+    public func fetchAllReferences(limit: Int = 0, offset: Int = 0) throws -> [Reference] {
         try dbWriter.read { db in
+            var query = Reference.order(Reference.Columns.dateAdded.desc)
             if limit > 0 {
-                return try Reference.order(Reference.Columns.dateAdded.desc).limit(limit).fetchAll(db)
+                query = query.limit(limit, offset: offset > 0 ? offset : nil)
+            } else if offset > 0 {
+                query = query.limit(-1, offset: offset)
             }
-            return try Reference.order(Reference.Columns.dateAdded.desc).fetchAll(db)
+            return try query.fetchAll(db)
+        }
+    }
+
+    /// Fetch a single reference by primary key, or nil if not found.
+    public func fetchReference(id: Int64) throws -> Reference? {
+        try dbWriter.read { db in
+            try Reference.fetchOne(db, id: id)
         }
     }
 
@@ -923,10 +1005,11 @@ extension AppDatabase {
     public func fetchReferences(
         scope: ReferenceScope,
         filter: ReferenceFilter,
-        limit: Int = 0
+        limit: Int = 0,
+        offset: Int = 0
     ) throws -> [Reference] {
         try dbWriter.read { db in
-            try fetchReferences(db: db, scope: scope, filter: filter, limit: limit)
+            try fetchReferences(db: db, scope: scope, filter: filter, limit: limit, offset: offset)
         }
     }
 
@@ -1112,7 +1195,7 @@ extension AppDatabase {
 
     private func findDuplicateReferenceID(for reference: Reference, db: Database) throws -> Int64? {
         if let doi = normalizedDOI(reference.doi),
-           let id = try Int64.fetchOne(db, sql: "SELECT id FROM reference WHERE lower(doi) = ? LIMIT 1", arguments: [doi]) {
+           let id = try Int64.fetchOne(db, sql: "SELECT id FROM reference WHERE doiNormalized = ? LIMIT 1", arguments: [doi]) {
             return id
         }
 
@@ -1122,14 +1205,14 @@ extension AppDatabase {
         }
 
         if let pmcid = normalizedPMCID(reference.pmcid),
-           let id = try Int64.fetchOne(db, sql: "SELECT id FROM reference WHERE upper(pmcid) = ? LIMIT 1", arguments: [pmcid]) {
+           let id = try Int64.fetchOne(db, sql: "SELECT id FROM reference WHERE pmcidNormalized = ? LIMIT 1", arguments: [pmcid]) {
             return id
         }
 
         if let isbn = normalizedISBN(reference.isbn),
            let id = try Int64.fetchOne(
             db,
-            sql: "SELECT id FROM reference WHERE replace(replace(upper(isbn), '-', ''), ' ', '') = ? LIMIT 1",
+            sql: "SELECT id FROM reference WHERE isbnNormalized = ? LIMIT 1",
             arguments: [isbn]
            ) {
             return id
@@ -1148,7 +1231,7 @@ extension AppDatabase {
                 sql: """
                     SELECT id, title
                     FROM reference
-                    WHERE replace(replace(upper(issn), '-', ''), ' ', '') = ?
+                    WHERE issnNormalized = ?
                       AND year = ?
                     LIMIT 20
                     """,
@@ -1168,7 +1251,7 @@ extension AppDatabase {
                     SELECT id, title
                     FROM reference
                     WHERE year = ?
-                      AND lower(trim(authorsNormalized)) = ?
+                      AND authorsNormalized = ?
                     LIMIT 50
                     """,
                 arguments: [year, normalizedAuthors]
@@ -1446,6 +1529,22 @@ public struct ReferenceFilter: Sendable {
 }
 
 extension AppDatabase {
+    public func observeReferenceTitles() -> AnyPublisher<[String], Error> {
+        ValueObservation
+            .tracking { db in
+                try String.fetchAll(
+                    db,
+                    sql: """
+                        SELECT title
+                        FROM reference
+                        ORDER BY dateAdded DESC
+                        """
+                )
+            }
+            .publisher(in: dbWriter, scheduling: .immediate)
+            .eraseToAnyPublisher()
+    }
+
     public func observeReferences() -> AnyPublisher<[Reference], Error> {
         ValueObservation
             .tracking { db in
@@ -1479,14 +1578,69 @@ extension AppDatabase {
             .eraseToAnyPublisher()
     }
 
-    // Internal helper used by both the publisher and direct fetch paths.
-    private func fetchReferences(
+    /// Lightweight list-row observation: only loads the columns needed for
+    /// rendering rows, dramatically reducing decode + memory + diff cost.
+    public func observeReferenceListRows(
+        scope: ReferenceScope,
+        filter: ReferenceFilter,
+        limit: Int = 200
+    ) -> AnyPublisher<[ReferenceListRow], Error> {
+        ValueObservation
+            .tracking { [self] db in
+                let request = try self.buildReferenceQuery(
+                    db: db, scope: scope, filter: filter, limit: limit
+                )
+                return try request
+                    .select(ReferenceListRow.listColumns)
+                    .asRequest(of: ReferenceListRow.self)
+                    .fetchAll(db)
+            }
+            .publisher(in: dbWriter, scheduling: .async(onQueue: .main))
+            .eraseToAnyPublisher()
+    }
+
+    /// Observe the total reference count for the given scope + filter (for UI display).
+    public func observeReferenceCount(
+        scope: ReferenceScope,
+        filter: ReferenceFilter
+    ) -> AnyPublisher<Int, Error> {
+        ValueObservation
+            .tracking { [self] db in
+                let request = try self.buildReferenceQuery(
+                    db: db, scope: scope, filter: filter, limit: 0
+                )
+                return try request.fetchCount(db)
+            }
+            .publisher(in: dbWriter, scheduling: .async(onQueue: .main))
+            .eraseToAnyPublisher()
+    }
+
+    /// Direct (non-observed) fetch of lightweight list rows — used for pagination.
+    public func fetchReferenceListRows(
+        scope: ReferenceScope,
+        filter: ReferenceFilter,
+        limit: Int,
+        offset: Int = 0
+    ) throws -> [ReferenceListRow] {
+        try dbWriter.read { db in
+            let request = try self.buildReferenceQuery(
+                db: db, scope: scope, filter: filter, limit: limit, offset: offset
+            )
+            return try request
+                .select(ReferenceListRow.listColumns)
+                .asRequest(of: ReferenceListRow.self)
+                .fetchAll(db)
+        }
+    }
+
+    // Shared query builder used by both Reference and ReferenceListRow paths.
+    private func buildReferenceQuery(
         db: Database,
         scope: ReferenceScope,
         filter: ReferenceFilter,
         limit: Int,
-        selectedColumns: [any SQLSelectable]? = nil
-    ) throws -> [Reference] {
+        offset: Int = 0
+    ) throws -> QueryInterfaceRequest<Reference> {
         let sanitizedKeywordTokens = filter.keyword
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .components(separatedBy: .whitespacesAndNewlines)
@@ -1516,9 +1670,11 @@ extension AppDatabase {
         // ── 2. Apply SQL-level predicates ─────────────────────────────────
         if !sanitizedKeywordTokens.isEmpty {
             if filter.titleOnly {
-                for token in sanitizedKeywordTokens {
-                    request = request.filter(Reference.Columns.title.like("%\(token)%"))
-                }
+                let ftsQuery = sanitizedKeywordTokens.map { "title:\"\($0)\" *" }.joined(separator: " AND ")
+                request = request.filter(
+                    sql: "id IN (SELECT rowid FROM referenceFts WHERE referenceFts MATCH ?)",
+                    arguments: [ftsQuery]
+                )
             } else {
                 let ftsQuery = sanitizedKeywordTokens.map { "\"\($0)\" *" }.joined(separator: " AND ")
                 request = request.filter(
@@ -1528,9 +1684,18 @@ extension AppDatabase {
             }
         }
         if !filter.author.isEmpty {
-            request = request.filter(
-                Reference.Columns.authorsNormalized.like("%\(filter.author.lowercased())%")
-            )
+            let sanitizedAuthor = filter.author.lowercased()
+                .replacingOccurrences(of: "\"", with: "")
+                .replacingOccurrences(of: "*", with: "")
+                .replacingOccurrences(of: "(", with: "")
+                .replacingOccurrences(of: ")", with: "")
+            if !sanitizedAuthor.isEmpty {
+                let ftsQuery = "authorsNormalized:\"\(sanitizedAuthor)\" *"
+                request = request.filter(
+                    sql: "id IN (SELECT rowid FROM referenceFts WHERE referenceFts MATCH ?)",
+                    arguments: [ftsQuery]
+                )
+            }
         }
         if let yf = filter.yearFrom {
             request = request.filter(Reference.Columns.year >= yf)
@@ -1539,9 +1704,18 @@ extension AppDatabase {
             request = request.filter(Reference.Columns.year <= yt)
         }
         if !filter.journal.isEmpty {
-            request = request.filter(
-                Reference.Columns.journal.like("%\(filter.journal)%")
-            )
+            let sanitizedJournal = filter.journal
+                .replacingOccurrences(of: "\"", with: "")
+                .replacingOccurrences(of: "*", with: "")
+                .replacingOccurrences(of: "(", with: "")
+                .replacingOccurrences(of: ")", with: "")
+            if !sanitizedJournal.isEmpty {
+                let ftsQuery = "journal:\"\(sanitizedJournal)\" *"
+                request = request.filter(
+                    sql: "id IN (SELECT rowid FROM referenceFts WHERE referenceFts MATCH ?)",
+                    arguments: [ftsQuery]
+                )
+            }
         }
         if let type = filter.referenceType {
             request = request.filter(Reference.Columns.referenceType == type.rawValue)
@@ -1558,8 +1732,26 @@ extension AppDatabase {
         // ── 3. Order + limit ──────────────────────────────────────────────
         request = request.order(Reference.Columns.dateAdded.desc)
         if limit > 0 {
-            request = request.limit(limit)
+            request = request.limit(limit, offset: offset > 0 ? offset : nil)
+        } else if offset > 0 {
+            request = request.limit(-1, offset: offset)
         }
+
+        return request
+    }
+
+    // Internal helper used by both the publisher and direct fetch paths.
+    private func fetchReferences(
+        db: Database,
+        scope: ReferenceScope,
+        filter: ReferenceFilter,
+        limit: Int,
+        offset: Int = 0,
+        selectedColumns: [any SQLSelectable]? = nil
+    ) throws -> [Reference] {
+        var request = try buildReferenceQuery(
+            db: db, scope: scope, filter: filter, limit: limit, offset: offset
+        )
 
         if let selectedColumns {
             request = request.select(selectedColumns)

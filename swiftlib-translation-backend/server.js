@@ -1406,7 +1406,7 @@ const server = http.createServer(async (request, response) => {
       json(response, 200, {
         translationServerRevision,
         translatorsCNRevision,
-        supportedInputs: ["url", "identifier"],
+        supportedInputs: ["url", "identifier", "search-cn"],
         supportsRefresh: true,
         supportsChineseSearch: true,
         supportsBaiduScholar: true,   // 百度学术适配器已启用（三层降级策略）
@@ -1470,7 +1470,7 @@ server.listen(0, "127.0.0.1", async () => {
         capabilities: {
           translationServerRevision,
           translatorsCNRevision,
-          supportedInputs: ["url", "identifier"],
+          supportedInputs: ["url", "identifier", "search-cn"],
           supportsRefresh: true,
           runtimeMode,
           overlayRevision,

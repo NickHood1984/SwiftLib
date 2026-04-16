@@ -1,6 +1,7 @@
 import SwiftUI
 import PDFKit
 import Combine
+import WebKit
 import SwiftLibCore
 
 // MARK: - Annotation Tool
@@ -85,6 +86,13 @@ final class PDFReaderViewModel: ObservableObject {
     /// When set, shows an annotation action toolbar near the clicked highlight.
     @Published var clickedAnnotationRecord: PDFAnnotationRecord?
     @Published var annotationToolbarLayout: SelectionToolbarLayout?
+
+    // MARK: - OCR Recognition
+    @Published var ocrMarkdown: String?
+    @Published var isOCRLoading = false
+    @Published var ocrError: String?
+    @Published var showOCRResult = false
+    private var ocrTask: Task<Void, Never>?
 
     let reference: Reference
     let pdfURL: URL
@@ -252,6 +260,34 @@ final class PDFReaderViewModel: ObservableObject {
         )
         clearStagedSelection()
     }
+
+    // MARK: - OCR
+
+    func startOCR() {
+        guard !isOCRLoading else { return }
+        ocrTask?.cancel()
+        isOCRLoading = true
+        ocrError = nil
+
+        ocrTask = Task {
+            do {
+                let markdown = try await PaddleOCRClient.shared.recognize(fileURL: pdfURL)
+                self.ocrMarkdown = markdown
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.88)) {
+                    self.showOCRResult = true
+                }
+            } catch is CancellationError {
+                // ignored
+            } catch {
+                self.ocrError = error.localizedDescription
+            }
+            self.isOCRLoading = false
+        }
+    }
+
+    func dismissOCR() {
+        showOCRResult = false
+    }
 }
 
 // MARK: - Main Reader
@@ -311,23 +347,17 @@ struct PDFReaderView: View {
             // Elevated plane: center PDF + right annotation sidebar
             HStack(spacing: 0) {
                 ZStack(alignment: .bottom) {
-                    AnnotatablePDFView(viewModel: viewModel)
-                        .padding(6)
-                        .overlay {
-                            selectionActionBarOverlay
-                        }
-                        .overlay {
-                            annotationActionBarOverlay
-                        }
+                    centerContentView
 
                     floatingReaderTab
                         .padding(.horizontal, 18)
                         .padding(.bottom, 12)
                 }
+                .animation(.spring(response: 0.45, dampingFraction: 0.88), value: viewModel.showOCRResult)
                 .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
                 .background(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white)
+                        .fill(readerPanelBackground)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -344,32 +374,49 @@ struct PDFReaderView: View {
                 .ignoresSafeArea(.container, edges: .top)
 
                 if showAnnotationSidebar {
-                    Rectangle()
-                        .fill(pdfContainerBackground)
-                        .frame(width: 4)
-                        .frame(maxHeight: .infinity)
-                        .contentShape(Rectangle())
-                        .onHover { hovering in
-                            if hovering {
-                                NSCursor.resizeLeftRight.push()
-                            } else {
-                                NSCursor.pop()
+                    HStack(spacing: 0) {
+                        Rectangle()
+                            .fill(pdfContainerBackground)
+                            .frame(width: 4)
+                            .frame(maxHeight: .infinity)
+                            .contentShape(Rectangle())
+                            .onHover { hovering in
+                                if hovering {
+                                    NSCursor.resizeLeftRight.push()
+                                } else {
+                                    NSCursor.pop()
+                                }
                             }
-                        }
-                        .gesture(
-                            DragGesture(minimumDistance: 1)
-                                .updating($dragOffset) { value, state, _ in
-                                    state = value.translation.width
-                                }
-                                .onEnded { value in
-                                    let newWidth = sidebarWidth - value.translation.width
-                                    sidebarWidth = min(max(newWidth, 260), 500)
-                                }
-                        )
+                            .gesture(
+                                DragGesture(minimumDistance: 1)
+                                    .updating($dragOffset) { value, state, _ in
+                                        state = value.translation.width
+                                    }
+                                    .onEnded { value in
+                                        let newWidth = sidebarWidth - value.translation.width
+                                        sidebarWidth = min(max(newWidth, 260), 500)
+                                    }
+                            )
 
-                    AnnotationSidebarView(viewModel: viewModel)
-                        .frame(width: min(max(sidebarWidth - dragOffset, 260), 500))
-                        .transition(.move(edge: .trailing))
+                        AnnotationSidebarView(
+                            annotations: viewModel.annotations,
+                            selectedAnnotationId: viewModel.selectedAnnotationId,
+                            onNavigate: { annotation in
+                                viewModel.navigateTo(annotation)
+                            },
+                            onDelete: { annotation in
+                                viewModel.deleteAnnotation(annotation)
+                            },
+                            onUpdateNote: { annotation, noteText in
+                                viewModel.updateAnnotationNote(annotation, noteText: noteText)
+                            }
+                        )
+                        .equatable()
+                            .frame(width: min(max(sidebarWidth - dragOffset, 260), 500))
+                            .transition(.move(edge: .trailing))
+                    }
+                    .padding(.top, 8)
+                    .padding(.bottom, 8)
                 }
             }
         }
@@ -394,6 +441,64 @@ struct PDFReaderView: View {
         .toolbarBackground(pdfContainerBackground, for: .windowToolbar)
         .onAppear {
             NoteEditorPool.shared.warmUp()
+        }
+        .alert("OCR 识别失败", isPresented: Binding(
+            get: { viewModel.ocrError != nil },
+            set: { if !$0 { viewModel.ocrError = nil } }
+        )) {
+            Button("确定") { viewModel.ocrError = nil }
+        } message: {
+            Text(viewModel.ocrError ?? "")
+        }
+    }
+
+    private static let ocrViewTransition: AnyTransition = .asymmetric(
+        insertion: .opacity
+            .combined(with: .scale(scale: 0.96, anchor: .center))
+            .combined(with: .offset(y: 6)),
+        removal: .opacity
+            .combined(with: .scale(scale: 0.96, anchor: .center))
+            .combined(with: .offset(y: 6))
+    )
+
+    @ViewBuilder
+    private var centerContentView: some View {
+        if viewModel.showOCRResult, let markdown = viewModel.ocrMarkdown {
+            OCRMarkdownView(markdown: markdown, onDismiss: {
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.88)) {
+                    viewModel.dismissOCR()
+                }
+            })
+            .transition(Self.ocrViewTransition)
+        } else {
+            pdfContentView
+                .padding(6)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(readerCanvasBackground)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay {
+                    selectionActionBarOverlay
+                }
+                .overlay {
+                    annotationActionBarOverlay
+                }
+                .transition(Self.ocrViewTransition)
+        }
+    }
+
+    /// Apply `.colorInvert()` at the SwiftUI level instead of using CIFilter
+    /// contentFilters inside the NSView. SwiftUI composites the inversion on the
+    /// GPU without rasterizing the NSView's text rendering pipeline, so text
+    /// stays crisp on Retina displays.
+    @ViewBuilder
+    private var pdfContentView: some View {
+        if colorScheme == .dark {
+            AnnotatablePDFView(viewModel: viewModel)
+                .colorInvert()
+        } else {
+            AnnotatablePDFView(viewModel: viewModel)
         }
     }
 
@@ -454,6 +559,26 @@ struct PDFReaderView: View {
             )
 
             pageIndicator
+
+            // OCR recognition button
+            Button {
+                viewModel.startOCR()
+            } label: {
+                if viewModel.isOCRLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 26, height: 20)
+                } else {
+                    Image(systemName: "doc.text.viewfinder")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(viewModel.showOCRResult ? .primary : .secondary)
+                        .frame(width: 26, height: 20)
+                        .contentShape(Capsule(style: .continuous))
+                }
+            }
+            .buttonStyle(FloatingGlassCapsuleButtonStyle(isActive: viewModel.showOCRResult))
+            .disabled(viewModel.isOCRLoading)
+            .help("智能识别（OCR）")
 
             // Right sidebar toggle (Annotations)
             Button {
@@ -568,8 +693,24 @@ struct PDFReaderView: View {
     private var pdfContainerBackground: Color {
         Color(nsColor: NSColor(name: nil) { trait in
             trait.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                ? NSColor(calibratedWhite: 0.15, alpha: 1.0)
+                ? NSColor(calibratedWhite: 0.12, alpha: 1.0)
                 : NSColor(calibratedWhite: 0.90, alpha: 1.0)
+        })
+    }
+
+    private var readerPanelBackground: Color {
+        Color(nsColor: NSColor(name: nil) { trait in
+            trait.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? NSColor(calibratedWhite: 0.12, alpha: 1.0)
+                : .white
+        })
+    }
+
+    private var readerCanvasBackground: Color {
+        Color(nsColor: NSColor(name: nil) { trait in
+            trait.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? NSColor(calibratedWhite: 0.02, alpha: 1.0)
+                : NSColor(calibratedWhite: 0.94, alpha: 1.0)
         })
     }
 
@@ -678,9 +819,24 @@ private struct FloatingGlassCapsuleButtonStyle: ButtonStyle {
 private struct SelectionActionBar: View {
     @ObservedObject var viewModel: PDFReaderViewModel
     let metrics: ReaderActionBarMetrics
+    @ObservedObject private var aiChat = AIChatWindowManager.shared
     @State private var noteMarkdown = ""
     @State private var editorContentHeight: CGFloat = 36
+    @State private var capturedSelectionText = ""
+    @State private var capturedPageRects: [Int: [CGRect]] = [:]
     @Environment(\.colorScheme) private var colorScheme
+
+    private func saveNoteIfNeeded() {
+        let md = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !md.isEmpty, !capturedSelectionText.isEmpty else { return }
+        viewModel.addAnnotations(
+            type: .note,
+            selectedText: capturedSelectionText,
+            noteText: md,
+            pageRects: capturedPageRects
+        )
+        noteMarkdown = ""
+    }
 
     private var bgColor: Color {
         colorScheme == .dark
@@ -702,6 +858,38 @@ private struct SelectionActionBar: View {
                         NSPasteboard.general.setString(viewModel.stagedSelectionText, forType: .string)
                     }
                 }
+
+                AISparklesHoverButton(
+                    metrics: metrics,
+                    isLoading: aiChat.isLoading,
+                    onTranslate: {
+                        guard !viewModel.stagedSelectionText.isEmpty else { return }
+                        let text = viewModel.stagedSelectionText
+                        Task {
+                            do {
+                                let prompt = "请将以下内容翻译成中文，只返回翻译结果，不要添加任何解释：\n\n\(text)"
+                                let response = try await AIChatWindowManager.shared.sendText(prompt)
+                                let sep = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
+                                noteMarkdown += sep + response
+                            } catch {
+                                let sep = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
+                                noteMarkdown += sep + "⚠️ \(error.localizedDescription)"
+                            }
+                        }
+                    },
+                    onQA: {
+                        guard !viewModel.stagedSelectionText.isEmpty else { return }
+                        let text = viewModel.stagedSelectionText
+                        Task {
+                            do {
+                                try await AIChatWindowManager.shared.injectTextOnly(text)
+                            } catch {
+                                let sep = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
+                                noteMarkdown += sep + "⚠️ \(error.localizedDescription)"
+                            }
+                        }
+                    }
+                )
 
                 separator
 
@@ -730,12 +918,16 @@ private struct SelectionActionBar: View {
                     .animation(.easeOut(duration: 0.12), value: isSelected)
                 }
 
+                Spacer(minLength: 4)
+
                 separator
 
-                toolbarButton(icon: "trash", label: "取消选择") {
+                toolbarButton(icon: "trash", label: "关闭") {
+                    saveNoteIfNeeded()
                     viewModel.clearStagedSelection()
                 }
             }
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, metrics.topRowHorizontalPadding)
             .padding(.vertical, metrics.topRowVerticalPadding)
 
@@ -745,61 +937,35 @@ private struct SelectionActionBar: View {
                 .frame(height: 0.5)
                 .padding(.horizontal, metrics.dividerHorizontalPadding)
 
-            // Note section: always-visible inline editor
-            VStack(spacing: 0) {
-                RichNoteEditorView(
-                    markdown: $noteMarkdown,
-                    placeholder: "添加笔记…",
-                    autoFocus: false,
-                    onContentHeightChanged: { height in
-                        editorContentHeight = height
-                    }
-                )
-                .frame(height: min(max(editorContentHeight, 36), metrics.selectionEditorMaxHeight))
-                .clipShape(RoundedRectangle(cornerRadius: metrics.editorCornerRadius))
-                .padding(.horizontal, metrics.editorHorizontalPadding)
-                .padding(.top, metrics.editorTopPadding)
-
-                HStack(spacing: metrics.actionRowSpacing) {
-                    Spacer()
-                    Button("取消") {
-                        noteMarkdown = ""
-                        viewModel.clearStagedSelection()
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white.opacity(0.6))
-                    .font(.system(size: metrics.secondaryFontSize))
-
-                    Button("保存") {
-                        let md = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !md.isEmpty else { return }
-                        viewModel.addAnnotations(
-                            type: .note,
-                            selectedText: viewModel.stagedSelectionText,
-                            noteText: md,
-                            pageRects: viewModel.stagedSelectionPageRects
-                        )
-                        noteMarkdown = ""
-                        viewModel.clearStagedSelection()
-                    }
-                    .font(.system(size: metrics.secondaryFontSize, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, metrics.saveButtonHorizontalPadding)
-                    .padding(.vertical, metrics.saveButtonVerticalPadding)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                  ? Color.accentColor.opacity(0.35)
-                                  : Color.accentColor)
-                    )
-                    .buttonStyle(.plain)
-                    .disabled(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            // Note section: inline editor (auto-saves on dismiss / trash click)
+            RichNoteEditorView(
+                markdown: $noteMarkdown,
+                placeholder: "添加笔记…",
+                autoFocus: false,
+                onContentHeightChanged: { height in
+                    editorContentHeight = height
                 }
-                .padding(.horizontal, metrics.actionRowHorizontalPadding)
-                .padding(.vertical, metrics.actionRowVerticalPadding)
-            }
+            )
+            .frame(height: min(max(editorContentHeight, 36), metrics.selectionEditorMaxHeight))
+            .clipShape(RoundedRectangle(cornerRadius: metrics.editorCornerRadius))
+            .padding(.horizontal, metrics.editorHorizontalPadding)
+            .padding(.top, metrics.editorTopPadding)
+            .padding(.bottom, metrics.actionRowVerticalPadding)
         }
         .frame(width: metrics.toolbarWidth)
+        .onAppear {
+            capturedSelectionText = viewModel.stagedSelectionText
+            capturedPageRects = viewModel.stagedSelectionPageRects
+        }
+        .onChange(of: viewModel.stagedSelectionText) { _, newValue in
+            if !newValue.isEmpty {
+                capturedSelectionText = newValue
+                capturedPageRects = viewModel.stagedSelectionPageRects
+            }
+        }
+        .onDisappear {
+            saveNoteIfNeeded()
+        }
         .background(bgColor, in: RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous)
@@ -900,6 +1066,8 @@ private struct AnnotationActionBar: View {
                         .animation(.easeOut(duration: 0.12), value: isSelected)
                     }
 
+                    Spacer(minLength: 4)
+
                     separator
 
                     Button {
@@ -915,6 +1083,7 @@ private struct AnnotationActionBar: View {
                     .buttonStyle(NotionToolbarButtonStyle(cornerRadius: metrics.buttonCornerRadius))
                     .help("删除标注")
                 }
+                .frame(maxWidth: .infinity)
                 .padding(.horizontal, metrics.topRowHorizontalPadding)
                 .padding(.vertical, metrics.topRowVerticalPadding)
 
@@ -932,7 +1101,11 @@ private struct AnnotationActionBar: View {
                         placeholder: "添加笔记…",
                         autoFocus: true,
                         onContentHeightChanged: { height in
-                            editorContentHeight = height
+                            // Animate so the height change doesn't trigger a synchronous
+                            // layout pass that makes the PDF view jitter.
+                            withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
+                                editorContentHeight = height
+                            }
                         }
                     )
                     .frame(height: min(max(editorContentHeight, 36), metrics.annotationEditorMaxHeight))
@@ -972,6 +1145,13 @@ private struct AnnotationActionBar: View {
                 let noteText = annotation.noteText ?? ""
                 editingMarkdown = noteText
                 isEditingNote = !noteText.isEmpty
+                // Pre-estimate height from line count to reduce the initial jump
+                // when WKWebView reports its actual height.
+                if !noteText.isEmpty {
+                    let lines = noteText.components(separatedBy: "\n").count
+                    let estimated = CGFloat(lines) * 22 + 24
+                    editorContentHeight = min(max(estimated, 36), metrics.annotationEditorMaxHeight)
+                }
             }
             .onChange(of: annotation.id) { _, _ in
                 let noteText = annotation.noteText ?? ""
@@ -1067,6 +1247,7 @@ final class CommitAwarePDFView: PDFView {
 
 struct AnnotatablePDFView: NSViewRepresentable {
     @ObservedObject var viewModel: PDFReaderViewModel
+    @Environment(\.colorScheme) private var colorScheme
 
     func makeCoordinator() -> Coordinator {
         Coordinator(viewModel: viewModel)
@@ -1074,31 +1255,23 @@ struct AnnotatablePDFView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> PDFView {
         let pdfView = CommitAwarePDFView()
-        let canvasBackgroundColor = NSColor(name: nil) { trait in
-            trait.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                ? NSColor(calibratedWhite: 0.18, alpha: 1.0)
-                : NSColor(calibratedWhite: 0.94, alpha: 1.0)
-        }
         pdfView.autoScales = true
         pdfView.displaysPageBreaks = true
         pdfView.pageBreakMargins = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
         pdfView.displayMode = .singlePageContinuous
         pdfView.displayDirection = .vertical
         pdfView.pageShadowsEnabled = false
-        pdfView.backgroundColor = canvasBackgroundColor
         pdfView.applyElegantScrollers()
+        context.coordinator.isDarkMode = colorScheme == .dark
+        Self.applyReaderAppearance(to: pdfView, isDarkMode: context.coordinator.isDarkMode)
 
-        // Remove NSScrollView bezel border and keep the inner PDF canvas subtly gray.
+        // Remove NSScrollView bezel border and re-apply dark canvas after subviews settle.
+        let isDark = context.coordinator.isDarkMode
         DispatchQueue.main.async { [weak pdfView] in
-            guard let sv = pdfView?.internalScrollView else { return }
+            guard let pdfView, let sv = pdfView.internalScrollView else { return }
             sv.borderType = .noBorder
-            sv.backgroundColor = canvasBackgroundColor
             sv.drawsBackground = true
-            sv.contentView.backgroundColor = canvasBackgroundColor
-            if let documentView = pdfView?.documentView {
-                documentView.wantsLayer = true
-                documentView.layer?.backgroundColor = canvasBackgroundColor.cgColor
-            }
+            Self.applyReaderAppearance(to: pdfView, isDarkMode: isDark)
         }
 
         context.coordinator.pdfView = pdfView
@@ -1135,6 +1308,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
 
     func updateNSView(_ pdfView: PDFView, context: Context) {
         context.coordinator.viewModel = viewModel
+        context.coordinator.isDarkMode = colorScheme == .dark
 
         guard let pdfView = pdfView as? CommitAwarePDFView else { return }
 
@@ -1156,6 +1330,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
         context.coordinator.loadDocument(from: viewModel.pdfURL, into: pdfView)
 
         pdfView.applyElegantScrollers()
+        Self.applyReaderAppearance(to: pdfView, isDarkMode: context.coordinator.isDarkMode)
 
         // Skip syncAnnotations if annotations haven't changed (hash check)
         let currentHash = viewModel.annotations.hashValue
@@ -1173,50 +1348,13 @@ struct AnnotatablePDFView: NSViewRepresentable {
 
     private func syncAnnotations(pdfView: PDFView, records: [PDFAnnotationRecord], coordinator: Coordinator) {
         guard let document = pdfView.document else { return }
-
-        let existingKeys = Set(coordinator.trackedAnnotations.keys)
-        let recordKeys = Set(records.compactMap { $0.id })
-
-        let removedKeys = existingKeys.subtracting(recordKeys)
-        for key in removedKeys {
-            if let tracked = coordinator.trackedAnnotations[key],
-               let page = document.page(at: tracked.pageIndex) {
-                page.removeAnnotation(tracked.annotation)
-            }
-            coordinator.trackedAnnotations.removeValue(forKey: key)
-        }
-
-        for record in records {
-            guard let recordId = record.id else { continue }
-            let recordHash = record.renderHash
-
-            if let tracked = coordinator.trackedAnnotations[recordId],
-               tracked.renderHash == recordHash {
-                continue
-            }
-
-            if let tracked = coordinator.trackedAnnotations[recordId],
-               let existingPage = document.page(at: tracked.pageIndex) {
-                existingPage.removeAnnotation(tracked.annotation)
-            }
-
-            if record.pageIndex < document.pageCount,
-               let page = document.page(at: record.pageIndex) {
-                let annotation = createPDFAnnotation(from: record)
-                page.addAnnotation(annotation)
-                coordinator.trackedAnnotations[recordId] = TrackedAnnotation(
-                    annotation: annotation,
-                    pageIndex: record.pageIndex,
-                    renderHash: recordHash
-                )
-            }
-        }
+        coordinator.applyAnnotationRecords(records, to: document)
     }
 
     private func createPDFAnnotation(from record: PDFAnnotationRecord) -> PDFAnnotation {
-        let bounds = record.unionBounds
+        let bounds = sanitizedAnnotationBounds(for: record)
         let color = AnnotationColor.nsColor(for: record.color)
-        let rects = record.rects
+        let rects = sanitizedAnnotationRects(for: record)
 
         let annotation: PDFAnnotation
         switch record.type {
@@ -1231,15 +1369,39 @@ struct AnnotatablePDFView: NSViewRepresentable {
             annotation.color = color
         }
 
-        if !rects.isEmpty {
+        if record.type != .note, !rects.isEmpty {
             annotation.quadrilateralPoints = buildQuadrilateralPoints(from: rects, relativeTo: bounds)
         }
 
-        if let noteText = record.noteText, !noteText.isEmpty {
-            annotation.contents = noteText
+        return annotation
+    }
+
+    private func sanitizedAnnotationBounds(for record: PDFAnnotationRecord) -> CGRect {
+        let bounds = record.unionBounds.standardized
+        if bounds.width.isFinite,
+           bounds.height.isFinite,
+           bounds.minX.isFinite,
+           bounds.minY.isFinite,
+           bounds.width > 0,
+           bounds.height > 0 {
+            return bounds
         }
 
-        return annotation
+        if let fallback = sanitizedAnnotationRects(for: record).first {
+            return fallback.standardized
+        }
+
+        return CGRect(x: 0, y: 0, width: 1, height: 1)
+    }
+
+    private func sanitizedAnnotationRects(for record: PDFAnnotationRecord) -> [CGRect] {
+        record.rects
+            .map { $0.standardized }
+            .filter {
+                $0.minX.isFinite && $0.minY.isFinite
+                    && $0.width.isFinite && $0.height.isFinite
+                    && $0.width > 0 && $0.height > 0
+            }
     }
 
     private func buildQuadrilateralPoints(from rects: [CGRect], relativeTo union: CGRect) -> [NSValue] {
@@ -1256,21 +1418,79 @@ struct AnnotatablePDFView: NSViewRepresentable {
     private func navigateToAnnotation(in pdfView: PDFView, page: PDFPage, bounds: CGRect) {
         let focusRect = bounds.insetBy(dx: -120, dy: -200)
         pdfView.go(to: focusRect, on: page)
+    }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            flashAnnotation(in: pdfView, page: page, bounds: bounds)
+    private static func applyReaderAppearance(to pdfView: PDFView, isDarkMode: Bool) {
+        // When dark mode is on, SwiftUI applies .colorInvert() on the entire
+        // view. So internally we use pure white (inverts to pure black).
+        let canvasBackgroundColor = isDarkMode ? .white : canvasBackgroundColor(isDarkMode: false)
+        let documentBackgroundColor = isDarkMode ? .white : documentViewBackgroundColor(isDarkMode: false)
+        pdfView.displaysPageBreaks = !isDarkMode
+        pdfView.pageBreakMargins = isDarkMode
+            ? NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+            : NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        pdfView.backgroundColor = canvasBackgroundColor
+        pdfView.wantsLayer = true
+        pdfView.layer?.backgroundColor = canvasBackgroundColor.cgColor
+        pdfView.layer?.cornerRadius = 10
+        pdfView.layer?.masksToBounds = true
+
+        if let scrollView = pdfView.internalScrollView {
+            scrollView.backgroundColor = canvasBackgroundColor
+            scrollView.drawsBackground = false
+            scrollView.contentView.backgroundColor = canvasBackgroundColor
+            scrollView.contentView.wantsLayer = true
+            scrollView.contentView.layer?.backgroundColor = canvasBackgroundColor.cgColor
+            normalizeScrollViewBackgroundHierarchy(in: scrollView, backgroundColor: canvasBackgroundColor)
+        }
+
+        guard let documentView = pdfView.documentView else { return }
+        documentView.wantsLayer = true
+        documentView.layer?.backgroundColor = documentBackgroundColor.cgColor
+        documentView.contentFilters = []
+        normalizeDocumentHierarchy(in: documentView, backgroundColor: documentBackgroundColor)
+    }
+
+    private static func normalizeScrollViewBackgroundHierarchy(in scrollView: NSScrollView, backgroundColor: NSColor) {
+        for subview in scrollView.subviews {
+            let className = NSStringFromClass(type(of: subview))
+
+            if subview === scrollView.contentView || className.contains("PDFClipView") {
+                subview.wantsLayer = true
+                subview.layer?.backgroundColor = backgroundColor.cgColor
+                continue
+            }
+
+            if subview is NSVisualEffectView || className.contains("ContentBackground") {
+                subview.wantsLayer = true
+                subview.layer?.backgroundColor = NSColor.clear.cgColor
+                subview.isHidden = true
+                continue
+            }
         }
     }
 
-    private func flashAnnotation(in pdfView: PDFView, page: PDFPage, bounds: CGRect) {
-        let flashBounds = bounds.insetBy(dx: -1.5, dy: -1.5)
-        let flashAnnotation = PDFAnnotation(bounds: flashBounds, forType: .highlight, withProperties: nil)
-        flashAnnotation.color = NSColor.systemBlue.withAlphaComponent(0.22)
-        page.addAnnotation(flashAnnotation)
+    private static func normalizeDocumentHierarchy(in rootView: NSView, backgroundColor: NSColor) {
+        for subview in rootView.subviews {
+            let className = NSStringFromClass(type(of: subview))
+            if className.contains("PDFPageView") {
+                continue
+            }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            page.removeAnnotation(flashAnnotation)
+            subview.wantsLayer = true
+            subview.layer?.backgroundColor = backgroundColor.cgColor
+            normalizeDocumentHierarchy(in: subview, backgroundColor: backgroundColor)
         }
+    }
+
+    private static func canvasBackgroundColor(isDarkMode: Bool) -> NSColor {
+        isDarkMode
+            ? NSColor(calibratedWhite: 0.02, alpha: 1.0)
+            : NSColor(calibratedWhite: 0.94, alpha: 1.0)
+    }
+
+    private static func documentViewBackgroundColor(isDarkMode: Bool) -> NSColor {
+        canvasBackgroundColor(isDarkMode: isDarkMode)
     }
 
     struct TrackedAnnotation {
@@ -1284,6 +1504,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
         weak var pdfView: PDFView?
         var trackedAnnotations: [Int64: TrackedAnnotation] = [:]
         var lastAnnotationsHash: Int = 0
+        var isDarkMode = false
 
         private var scrollObserver: NSObjectProtocol?
         private var scaleObserver: NSObjectProtocol?
@@ -1303,6 +1524,146 @@ struct AnnotatablePDFView: NSViewRepresentable {
             teardownObservers()
             cancelDocumentLoad()
             toolbarDebounceTask?.cancel()
+        }
+
+        // MARK: - Annotation sync
+        //
+        // NEVER call page.removeAnnotation() after the document is set on PDFView.
+        // PDFKit's tile pool renders pages on a private background queue and reads
+        // the per-page annotations NSMutableArray concurrently. Mutating that array
+        // from the main thread while the renderer reads it causes memory corruption
+        // (a slot ends up pointing to an arbitrary address – observed as
+        // __NSCFConstantString – and PDFKit crashes calling akAnnotationAdaptor on it).
+        //
+        // Safe strategy:
+        //   • Pre-load ALL annotations into pages before assigning the document to
+        //     PDFView (no renderer running yet → no race).
+        //   • For subsequent changes, update annotation properties in-place (color,
+        //     shouldDisplay) and only ever ADD, never remove from the array.
+        //   • "Deleted" annotations become invisible via shouldDisplay = false.
+
+        /// Pre-load – called BEFORE pdfView.document is set.
+        func preloadAnnotations(into document: PDFDocument, records: [PDFAnnotationRecord]) {
+            trackedAnnotations.removeAll()
+            for record in records {
+                guard let recordId = record.id,
+                      record.pageIndex < document.pageCount,
+                      let page = document.page(at: record.pageIndex) else { continue }
+                let annotation = Self.makePDFAnnotation(from: record)
+                page.addAnnotation(annotation)
+                trackedAnnotations[recordId] = TrackedAnnotation(
+                    annotation: annotation,
+                    pageIndex: record.pageIndex,
+                    renderHash: record.renderHash
+                )
+            }
+        }
+
+        /// Incremental sync – called from updateNSView after document is live.
+        /// Only adds new annotations; never removes from the page array.
+        func applyAnnotationRecords(_ records: [PDFAnnotationRecord], to document: PDFDocument) {
+            let recordIds = Set(records.compactMap { $0.id })
+
+            // Hide annotations whose records were deleted.
+            for (key, tracked) in trackedAnnotations where !recordIds.contains(key) {
+                tracked.annotation.shouldDisplay = false
+            }
+
+            for record in records {
+                guard let recordId = record.id else { continue }
+                let recordHash = record.renderHash
+
+                if let tracked = trackedAnnotations[recordId],
+                   tracked.renderHash == recordHash {
+                    // Unchanged — make sure it's visible (may have been hidden).
+                    if !tracked.annotation.shouldDisplay { tracked.annotation.shouldDisplay = true }
+                    continue
+                }
+
+                if let tracked = trackedAnnotations[recordId] {
+                    // Exists but properties changed (e.g. color) — update in-place.
+                    // Avoid remove/add so the NSMutableArray is never mutated.
+                    Self.applyProperties(of: record, to: tracked.annotation)
+                    trackedAnnotations[recordId] = TrackedAnnotation(
+                        annotation: tracked.annotation,
+                        pageIndex: tracked.pageIndex,
+                        renderHash: recordHash
+                    )
+                } else {
+                    // New annotation — add once.
+                    guard record.pageIndex < document.pageCount,
+                          let page = document.page(at: record.pageIndex) else { continue }
+                    let annotation = Self.makePDFAnnotation(from: record)
+                    page.addAnnotation(annotation)
+                    trackedAnnotations[recordId] = TrackedAnnotation(
+                        annotation: annotation,
+                        pageIndex: record.pageIndex,
+                        renderHash: recordHash
+                    )
+                }
+            }
+        }
+
+        // MARK: - Annotation factory (static — no instance state)
+
+        static func makePDFAnnotation(from record: PDFAnnotationRecord) -> PDFAnnotation {
+            let bounds = safeBounds(for: record)
+            let color  = AnnotationColor.nsColor(for: record.color)
+            let rects  = safeRects(for: record)
+
+            let annotation: PDFAnnotation
+            switch record.type {
+            case .highlight:
+                annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
+                annotation.color = color
+            case .underline:
+                annotation = PDFAnnotation(bounds: bounds, forType: .underline, withProperties: nil)
+                annotation.color = color.withAlphaComponent(0.8)
+            case .note:
+                annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
+                annotation.color = color
+            }
+            if record.type != .note, !rects.isEmpty {
+                annotation.quadrilateralPoints = buildQuads(from: rects, relativeTo: bounds)
+            }
+            return annotation
+        }
+
+        static func applyProperties(of record: PDFAnnotationRecord, to annotation: PDFAnnotation) {
+            let color = AnnotationColor.nsColor(for: record.color)
+            switch record.type {
+            case .highlight, .note:
+                annotation.color = color
+            case .underline:
+                annotation.color = color.withAlphaComponent(0.8)
+            }
+            annotation.shouldDisplay = true
+        }
+
+        private static func safeBounds(for record: PDFAnnotationRecord) -> CGRect {
+            let b = record.unionBounds.standardized
+            if b.width > 0, b.height > 0,
+               b.minX.isFinite, b.minY.isFinite,
+               b.width.isFinite, b.height.isFinite { return b }
+            return safeRects(for: record).first?.standardized ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+        }
+
+        private static func safeRects(for record: PDFAnnotationRecord) -> [CGRect] {
+            record.rects.map { $0.standardized }.filter {
+                $0.minX.isFinite && $0.minY.isFinite &&
+                $0.width.isFinite && $0.height.isFinite &&
+                $0.width > 0 && $0.height > 0
+            }
+        }
+
+        private static func buildQuads(from rects: [CGRect], relativeTo union: CGRect) -> [NSValue] {
+            rects.flatMap { rect -> [NSValue] in
+                let r = rect.offsetBy(dx: -union.minX, dy: -union.minY)
+                return [
+                    CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY),
+                    CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY),
+                ].map(NSValue.init(point:))
+            }
         }
 
         func ensureObservers(for pdfView: PDFView) {
@@ -1366,20 +1727,15 @@ struct AnnotatablePDFView: NSViewRepresentable {
         @MainActor
         private func finishLoadingDocument(_ document: PDFDocument?, for url: URL) {
             guard loadedPDFURL == url, let pdfView else { return }
+            // Pre-load annotations into the PDFDocument pages BEFORE handing the
+            // document to PDFView. At this point PDFKit's tile renderer hasn't
+            // started yet, so there is zero race with the background render queue.
+            if let document {
+                preloadAnnotations(into: document, records: viewModel.annotations)
+                lastAnnotationsHash = viewModel.annotations.hashValue
+            }
             pdfView.document = document
-            let canvasBackgroundColor = NSColor(name: nil) { trait in
-                trait.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                    ? NSColor(calibratedWhite: 0.18, alpha: 1.0)
-                    : NSColor(calibratedWhite: 0.94, alpha: 1.0)
-            }
-            if let scrollView = pdfView.internalScrollView {
-                scrollView.backgroundColor = canvasBackgroundColor
-                scrollView.contentView.backgroundColor = canvasBackgroundColor
-            }
-            if let documentView = pdfView.documentView {
-                documentView.wantsLayer = true
-                documentView.layer?.backgroundColor = canvasBackgroundColor.cgColor
-            }
+            AnnotatablePDFView.applyReaderAppearance(to: pdfView, isDarkMode: isDarkMode)
             ensureObservers(for: pdfView)
             if let document,
                let firstPage = document.page(at: 0) {
@@ -1437,6 +1793,10 @@ struct AnnotatablePDFView: NSViewRepresentable {
 
         @MainActor
         func updateToolbarLayouts() {
+            if let pdfView {
+                AnnotatablePDFView.applyReaderAppearance(to: pdfView, isDarkMode: isDarkMode)
+            }
+
             if viewModel.hasStagedSelection,
                let anchor = viewModel.stagedSelectionPDFAnchor,
                let pdfView {
@@ -1611,4 +1971,294 @@ struct AnnotatablePDFView: NSViewRepresentable {
             return pageRects
         }
     }
+}
+
+// MARK: - OCR Markdown View
+
+private struct OCRMarkdownView: View {
+    let markdown: String
+    let onDismiss: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var renderedHTML: String {
+        OCRMarkdownWebView.documentHTML(for: markdown, colorScheme: colorScheme)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Label("智能识别结果", systemImage: "doc.text.viewfinder")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString(markdown, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.borderless)
+                .help("复制全部 Markdown")
+
+                Button {
+                    onDismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("返回 PDF")
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
+
+            Divider()
+
+                        OCRMarkdownWebView(html: renderedHTML)
+                                .padding(16)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(colorScheme == .dark ? Color(nsColor: NSColor(calibratedWhite: 0.08, alpha: 1.0)) : .white)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct OCRMarkdownWebView: NSViewRepresentable {
+        let html: String
+
+        func makeCoordinator() -> Coordinator {
+                Coordinator()
+        }
+
+        func makeNSView(context: Context) -> WKWebView {
+                let configuration = WKWebViewConfiguration()
+                let webView = WKWebView(frame: .zero, configuration: configuration)
+                webView.navigationDelegate = context.coordinator
+                webView.allowsBackForwardNavigationGestures = false
+                webView.setValue(false, forKey: "drawsBackground")
+                return webView
+        }
+
+        func updateNSView(_ nsView: WKWebView, context: Context) {
+                guard context.coordinator.lastLoadedHTML != html else { return }
+                context.coordinator.lastLoadedHTML = html
+                nsView.loadHTMLString(html, baseURL: nil)
+        }
+
+        static func documentHTML(for markdown: String, colorScheme: ColorScheme) -> String {
+                let bodyHTML = MarkdownHTMLRenderer.render(markdown: markdown, baseURL: nil)
+                let resolvedBodyHTML = bodyHTML.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? "<p>识别结果为空。</p>"
+                        : bodyHTML
+
+                let palette: (bg: String, text: String, secondary: String, border: String, code: String, link: String) = {
+                        switch colorScheme {
+                        case .dark:
+                                return (
+                                        bg: "#111418",
+                                        text: "#eef2f7",
+                                        secondary: "#b6c0cc",
+                                        border: "rgba(255, 255, 255, 0.12)",
+                                        code: "rgba(255, 255, 255, 0.08)",
+                                        link: "#8ec5ff"
+                                )
+                        default:
+                                return (
+                                        bg: "#ffffff",
+                                        text: "#1f2937",
+                                        secondary: "#4b5563",
+                                        border: "rgba(15, 23, 42, 0.12)",
+                                        code: "#f3f4f6",
+                                        link: "#2563eb"
+                                )
+                        }
+                }()
+
+                let colorSchemeName = colorScheme == .dark ? "dark" : "light"
+
+                return """
+                <!doctype html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1">
+                    <style>
+                        :root {
+                            color-scheme: \(colorSchemeName);
+                            --ocr-bg: \(palette.bg);
+                            --ocr-text: \(palette.text);
+                            --ocr-secondary: \(palette.secondary);
+                            --ocr-border: \(palette.border);
+                            --ocr-code-bg: \(palette.code);
+                            --ocr-link: \(palette.link);
+                        }
+
+                        * {
+                            box-sizing: border-box;
+                        }
+
+                        html, body {
+                            margin: 0;
+                            padding: 0;
+                            background: transparent;
+                            color: var(--ocr-text);
+                            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+                            font-size: 15px;
+                            line-height: 1.72;
+                            -webkit-font-smoothing: antialiased;
+                        }
+
+                        body {
+                            padding: 24px 28px 32px;
+                        }
+
+                        #article-content {
+                            max-width: 920px;
+                            margin: 0 auto;
+                            user-select: text;
+                            word-break: break-word;
+                        }
+
+                        #article-content h1,
+                        #article-content h2,
+                        #article-content h3,
+                        #article-content h4,
+                        #article-content h5,
+                        #article-content h6 {
+                            line-height: 1.28;
+                            margin: 1.35em 0 0.55em;
+                        }
+
+                        #article-content p,
+                        #article-content ul,
+                        #article-content ol,
+                        #article-content pre,
+                        #article-content table,
+                        #article-content blockquote,
+                        #article-content hr,
+                        #article-content .math-display,
+                        #article-content .swiftlib-md-media-block {
+                            margin: 1em 0;
+                        }
+
+                        #article-content ul,
+                        #article-content ol {
+                            padding-left: 1.5em;
+                        }
+
+                        #article-content li + li {
+                            margin-top: 0.28em;
+                        }
+
+                        #article-content code,
+                        #article-content pre,
+                        #article-content .math-display {
+                            font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+                        }
+
+                        #article-content code {
+                            background: var(--ocr-code-bg);
+                            border-radius: 6px;
+                            padding: 0.12em 0.4em;
+                            font-size: 0.92em;
+                        }
+
+                        #article-content pre,
+                        #article-content .math-display {
+                            background: var(--ocr-code-bg);
+                            border: 1px solid var(--ocr-border);
+                            border-radius: 12px;
+                            padding: 14px 16px;
+                            overflow-x: auto;
+                            white-space: pre-wrap;
+                        }
+
+                        #article-content pre code {
+                            background: transparent;
+                            border-radius: 0;
+                            padding: 0;
+                        }
+
+                        #article-content blockquote {
+                            color: var(--ocr-secondary);
+                            border-left: 3px solid var(--ocr-border);
+                            padding-left: 14px;
+                        }
+
+                        #article-content table {
+                            width: 100%;
+                            border-collapse: collapse;
+                            display: block;
+                            overflow-x: auto;
+                        }
+
+                        #article-content th,
+                        #article-content td {
+                            border: 1px solid var(--ocr-border);
+                            padding: 8px 10px;
+                            vertical-align: top;
+                        }
+
+                        #article-content th {
+                            background: var(--ocr-code-bg);
+                            font-weight: 600;
+                        }
+
+                        #article-content hr {
+                            border: none;
+                            border-top: 1px solid var(--ocr-border);
+                        }
+
+                        #article-content a {
+                            color: var(--ocr-link);
+                            text-decoration: none;
+                        }
+
+                        #article-content a:hover {
+                            text-decoration: underline;
+                        }
+
+                        #article-content img,
+                        #article-content .swiftlib-md-image {
+                            display: block;
+                            max-width: 100%;
+                            height: auto;
+                            margin: 18px auto;
+                            border-radius: 10px;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div id="article-content">\(resolvedBodyHTML)</div>
+                </body>
+                </html>
+                """
+        }
+
+        final class Coordinator: NSObject, WKNavigationDelegate {
+                var lastLoadedHTML = ""
+
+                func webView(
+                        _ webView: WKWebView,
+                        decidePolicyFor navigationAction: WKNavigationAction,
+                        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+                ) {
+                        if navigationAction.navigationType == .linkActivated,
+                             let url = navigationAction.request.url,
+                             let scheme = url.scheme?.lowercased(),
+                             scheme != "about",
+                             scheme != "data" {
+                                NSWorkspace.shared.open(url)
+                                decisionHandler(.cancel)
+                                return
+                        }
+
+                        decisionHandler(.allow)
+                }
+        }
 }

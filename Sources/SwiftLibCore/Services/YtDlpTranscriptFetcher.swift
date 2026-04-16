@@ -276,7 +276,7 @@ actor YtDlpBinaryLocator {
 
 struct DefaultYtDlpBinaryDownloader: YtDlpBinaryDownloading {
     func download(from remoteURL: URL, to localURL: URL) async throws {
-        let (temporaryURL, response) = try await URLSession.shared.download(from: remoteURL)
+        let (temporaryURL, response) = try await NetworkClient.session.download(from: remoteURL)
         if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 400 {
             throw YtDlpTranscriptError.executableUnavailable("下载最新 yt-dlp 失败：HTTP \(httpResponse.statusCode)")
         }

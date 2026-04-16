@@ -839,6 +839,39 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         container["language"] = language
         container["pmid"] = pmid
         container["pmcid"] = pmcid
+
+        // Normalized dedup columns (v11) — written on every save so the
+        // persisted values stay in sync with the source fields.
+        container["doiNormalized"] = Self.normalizeForDedupDOI(doi)
+        container["isbnNormalized"] = Self.normalizeForDedupISBN(isbn)
+        container["issnNormalized"] = Self.normalizeForDedupISSN(issn)
+        container["pmcidNormalized"] = Self.normalizeForDedupPMCID(pmcid)
+    }
+
+    // MARK: - Static normalization helpers (shared with migration)
+
+    public static func normalizeForDedupDOI(_ value: String?) -> String? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        return raw.lowercased()
+    }
+
+    public static func normalizeForDedupISBN(_ value: String?) -> String? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        let normalized = raw.replacingOccurrences(of: #"[^0-9Xx]"#, with: "", options: .regularExpression).uppercased()
+        guard normalized.count == 10 || normalized.count == 13 else { return nil }
+        return normalized
+    }
+
+    public static func normalizeForDedupISSN(_ value: String?) -> String? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        let normalized = raw.replacingOccurrences(of: #"[^0-9Xx]"#, with: "", options: .regularExpression).uppercased()
+        guard normalized.count == 8 else { return nil }
+        return normalized
+    }
+
+    public static func normalizeForDedupPMCID(_ value: String?) -> String? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        return raw.uppercased()
     }
 
     public enum Columns: String, ColumnExpression {
@@ -853,5 +886,65 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         case translators, eventTitle, eventPlace, genre, institution, number
         case collectionTitle, numberOfPages
         case language, pmid, pmcid
+        // Normalized dedup columns (v11)
+        case doiNormalized, isbnNormalized, issnNormalized, pmcidNormalized
+    }
+}
+
+// MARK: - ReferenceListRow (lightweight model for list display)
+
+/// A lightweight projection of `Reference` containing only the columns needed
+/// for rendering list rows. This avoids loading `abstract`, `notes`, `webContent`,
+/// `editors`, `translators`, and other heavy fields into memory.
+public struct ReferenceListRow: Identifiable, Hashable, Sendable, FetchableRecord {
+    public var id: Int64?
+    public var title: String
+    public var authors: [AuthorName]
+    public var year: Int?
+    public var journal: String?
+    public var pdfPath: String?
+    public var referenceType: ReferenceType
+    public var verificationStatus: VerificationStatus
+    public var dateAdded: Date
+    public var dateModified: Date
+    public var collectionId: Int64?
+
+    /// The subset of columns required for list rendering.
+    public static let listColumns: [any SQLSelectable] = [
+        Reference.Columns.id,
+        Reference.Columns.title,
+        Reference.Columns.authors,
+        Reference.Columns.year,
+        Reference.Columns.journal,
+        Reference.Columns.pdfPath,
+        Reference.Columns.referenceType,
+        Reference.Columns.verificationStatus,
+        Reference.Columns.dateAdded,
+        Reference.Columns.dateModified,
+        Reference.Columns.collectionId,
+    ]
+
+    public init(row: Row) {
+        id = row["id"]
+        title = row["title"]
+
+        if let jsonStr = row["authors"] as String?,
+           let data = jsonStr.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([AuthorName].self, from: data) {
+            authors = decoded
+        } else if let plain = row["authors"] as String? {
+            authors = AuthorName.parseList(plain)
+        } else {
+            authors = []
+        }
+
+        year = row["year"]
+        journal = row["journal"]
+        pdfPath = row["pdfPath"]
+        referenceType = row["referenceType"]
+        verificationStatus = row["verificationStatus"] ?? .legacy
+        dateAdded = row["dateAdded"]
+        dateModified = row["dateModified"]
+        collectionId = row["collectionId"]
     }
 }

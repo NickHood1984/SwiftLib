@@ -3,6 +3,33 @@ import OSLog
 
 private let pmLog = Logger(subsystem: "SwiftLib", category: "TranslationBackendPM")
 
+private final class HandshakeReadState {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var resumed = false
+    private let newline = Data("\n".utf8)
+
+    func resumeIfNeeded() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !resumed else { return false }
+        resumed = true
+        return true
+    }
+
+    func appendAndExtractLine(from chunk: Data) -> (line: Data, remaining: Data)? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        buffer.append(chunk)
+        guard let newlineRange = buffer.range(of: newline) else { return nil }
+
+        let line = Data(buffer[..<newlineRange.lowerBound])
+        let remaining = Data(buffer[newlineRange.upperBound...])
+        return (line, remaining)
+    }
+}
+
 actor TranslationBackendProcessManager {
     static let shared = TranslationBackendProcessManager()
 
@@ -39,10 +66,22 @@ actor TranslationBackendProcessManager {
     }
 
     nonisolated func shutdownSync() {
-        // Best-effort synchronous kill on app termination
+        let semaphore = DispatchSemaphore(value: 0)
         Task {
-            await self.terminateProcess()
+            await self.shutdown()
+            semaphore.signal()
         }
+        semaphore.wait()
+    }
+
+    private func shutdown() {
+        guard let proc = process, proc.isRunning else {
+            terminateProcess()
+            return
+        }
+        proc.terminate()
+        proc.waitUntilExit()
+        terminateProcess()
     }
 
     private func terminateProcess() {
@@ -136,62 +175,68 @@ actor TranslationBackendProcessManager {
 
     private func readHandshake(from pipe: Pipe, process proc: Process) async throws -> TranslationBackendHandshake {
         try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let handle = pipe.fileHandleForReading
-                var buffer = Data()
-                let deadline = Date().addingTimeInterval(30)
+            let handle = pipe.fileHandleForReading
+            let state = HandshakeReadState()
 
-                while Date() < deadline {
-                    let chunk = handle.availableData
-                    if chunk.isEmpty {
-                        if !proc.isRunning {
-                            continuation.resume(throwing: NSError(
-                                domain: "TranslationBackendProcessManager",
-                                code: -2,
-                                userInfo: [NSLocalizedDescriptionKey: "Translation backend 进程意外退出，无法读取握手信息。"]
-                            ))
-                            return
-                        }
-                        Thread.sleep(forTimeInterval: 0.05)
-                        continue
-                    }
-
-                    buffer.append(chunk)
-
-                    // Look for first newline — handshake is a single JSON line
-                    if let newlineRange = buffer.range(of: Data("\n".utf8)) {
-                        let lineData = buffer[buffer.startIndex..<newlineRange.lowerBound]
-                        do {
-                            let handshake = try JSONDecoder().decode(TranslationBackendHandshake.self, from: lineData)
-                            // Set up ongoing stdout forwarding after handshake
-                            let remaining = buffer[newlineRange.upperBound...]
-                            if !remaining.isEmpty {
-                                FileHandle.standardError.write(remaining)
-                            }
-                            handle.readabilityHandler = { h in
-                                let data = h.availableData
-                                if !data.isEmpty {
-                                    FileHandle.standardError.write(data)
-                                }
-                            }
-                            continuation.resume(returning: handshake)
-                            return
-                        } catch {
-                            continuation.resume(throwing: NSError(
-                                domain: "TranslationBackendProcessManager",
-                                code: -3,
-                                userInfo: [NSLocalizedDescriptionKey: "无法解析 Translation backend 握手数据：\(error.localizedDescription)"]
-                            ))
-                            return
-                        }
-                    }
-                }
-
+            // Timeout after 30 seconds
+            let deadlineWorkItem = DispatchWorkItem {
+                guard state.resumeIfNeeded() else { return }
+                handle.readabilityHandler = nil
                 continuation.resume(throwing: NSError(
                     domain: "TranslationBackendProcessManager",
                     code: -4,
-                    userInfo: [NSLocalizedDescriptionKey: "等待 Translation backend 握手超时（30秒）。"]
+                    userInfo: [NSLocalizedDescriptionKey: "Translation backend 握手超时（30 秒）。"]
                 ))
+            }
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 30, execute: deadlineWorkItem)
+
+            handle.readabilityHandler = { [weak proc] h in
+                let chunk = h.availableData
+                if chunk.isEmpty {
+                    // EOF — process exited
+                    if !(proc?.isRunning ?? false) {
+                        guard state.resumeIfNeeded() else { return }
+                        deadlineWorkItem.cancel()
+                        h.readabilityHandler = nil
+                        continuation.resume(throwing: NSError(
+                            domain: "TranslationBackendProcessManager",
+                            code: -2,
+                            userInfo: [NSLocalizedDescriptionKey: "Translation backend 进程意外退出，无法读取握手信息。"]
+                        ))
+                    }
+                    return
+                }
+
+                // Look for first newline — handshake is a single JSON line
+                if let extracted = state.appendAndExtractLine(from: chunk) {
+                    guard state.resumeIfNeeded() else { return }
+                    deadlineWorkItem.cancel()
+
+                    do {
+                        let handshake = try JSONDecoder().decode(
+                            TranslationBackendHandshake.self,
+                            from: extracted.line
+                        )
+                        // Set up ongoing stdout forwarding after handshake
+                        if !extracted.remaining.isEmpty {
+                            FileHandle.standardError.write(extracted.remaining)
+                        }
+                        h.readabilityHandler = { fh in
+                            let data = fh.availableData
+                            if !data.isEmpty {
+                                FileHandle.standardError.write(data)
+                            }
+                        }
+                        continuation.resume(returning: handshake)
+                    } catch {
+                        h.readabilityHandler = nil
+                        continuation.resume(throwing: NSError(
+                            domain: "TranslationBackendProcessManager",
+                            code: -3,
+                            userInfo: [NSLocalizedDescriptionKey: "无法解析 Translation backend 握手数据：\(error.localizedDescription)"]
+                        ))
+                    }
+                }
             }
         }
     }

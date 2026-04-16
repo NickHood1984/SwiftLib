@@ -769,7 +769,10 @@ async function fetchDocumentRenderPayload(styleId, scan) {
   // data.error and can still present the orphan banner using data.orphanIds.
   const rawResp = await fetch("/api/render-document", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(window.__SWIFTLIB_TOKEN ? { "Authorization": "Bearer " + window.__SWIFTLIB_TOKEN } : {}),
+    },
     body: JSON.stringify({
       style: styleId,
       citations: reqCitations,
@@ -2577,7 +2580,10 @@ async function runPrimaryAction() {
 // ---------------------------------------------------------------------------
 
 async function fetchJSON(pathOrUrl, options) {
-  const response = options ? await fetch(pathOrUrl, options) : await fetch(pathOrUrl);
+  const opts = options ? { ...options } : {};
+  opts.headers = Object.assign({}, opts.headers || {});
+  if (window.__SWIFTLIB_TOKEN) opts.headers["Authorization"] = "Bearer " + window.__SWIFTLIB_TOKEN;
+  const response = await fetch(pathOrUrl, opts);
   if (!response.ok) {
     const fallback = await response.text();
     let message = fallback || `HTTP ${response.status}`;

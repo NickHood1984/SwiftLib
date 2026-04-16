@@ -2193,9 +2193,18 @@ private struct YouTubeWatchPlayPlaceholder: View {
 private struct WebSelectionActionBar: View {
     @ObservedObject var viewModel: WebReaderViewModel
     let metrics: ReaderActionBarMetrics
+    @ObservedObject private var aiChat = AIChatWindowManager.shared
     @State private var noteMarkdown = ""
     @State private var editorContentHeight: CGFloat = 36
+    @State private var capturedSelection: WebSelectionSnapshot? = nil
     @Environment(\.colorScheme) private var colorScheme
+
+    private func saveNoteIfNeeded() {
+        let md = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !md.isEmpty, let selection = capturedSelection else { return }
+        viewModel.addAnnotation(type: .note, selection: selection, noteText: md)
+        noteMarkdown = ""
+    }
 
     private var bgColor: Color {
         colorScheme == .dark
@@ -2216,6 +2225,36 @@ private struct WebSelectionActionBar: View {
                         NSPasteboard.general.setString(text, forType: .string)
                     }
                 }
+
+                AISparklesHoverButton(
+                    metrics: metrics,
+                    isLoading: aiChat.isLoading,
+                    onTranslate: {
+                        guard let text = viewModel.pendingSelection?.text, !text.isEmpty else { return }
+                        Task {
+                            do {
+                                let prompt = "请将以下内容翻译成中文，只返回翻译结果，不要添加任何解释：\n\n\(text)"
+                                let response = try await AIChatWindowManager.shared.sendText(prompt)
+                                let sep = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
+                                noteMarkdown += sep + response
+                            } catch {
+                                let sep = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
+                                noteMarkdown += sep + "⚠️ \(error.localizedDescription)"
+                            }
+                        }
+                    },
+                    onQA: {
+                        guard let text = viewModel.pendingSelection?.text, !text.isEmpty else { return }
+                        Task {
+                            do {
+                                try await AIChatWindowManager.shared.injectTextOnly(text)
+                            } catch {
+                                let sep = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
+                                noteMarkdown += sep + "⚠️ \(error.localizedDescription)"
+                            }
+                        }
+                    }
+                )
 
                 separator
 
@@ -2244,12 +2283,16 @@ private struct WebSelectionActionBar: View {
                     .animation(.easeOut(duration: 0.12), value: isSelected)
                 }
 
+                Spacer(minLength: 4)
+
                 separator
 
-                toolbarButton(icon: "trash", label: "取消选择") {
+                toolbarButton(icon: "trash", label: "关闭") {
+                    saveNoteIfNeeded()
                     viewModel.clearSelection()
                 }
             }
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, metrics.topRowHorizontalPadding)
             .padding(.vertical, metrics.topRowVerticalPadding)
 
@@ -2258,56 +2301,33 @@ private struct WebSelectionActionBar: View {
                 .frame(height: 0.5)
                 .padding(.horizontal, metrics.dividerHorizontalPadding)
 
-            // Note section: always-visible inline editor
-            VStack(spacing: 0) {
-                RichNoteEditorView(
-                    markdown: $noteMarkdown,
-                    placeholder: "添加笔记…",
-                    autoFocus: false,
-                    onContentHeightChanged: { height in
-                        editorContentHeight = height
-                    }
-                )
-                .frame(height: min(max(editorContentHeight, 36), metrics.selectionEditorMaxHeight))
-                .clipShape(RoundedRectangle(cornerRadius: metrics.editorCornerRadius))
-                .padding(.horizontal, metrics.editorHorizontalPadding)
-                .padding(.top, metrics.editorTopPadding)
-
-                HStack(spacing: metrics.actionRowSpacing) {
-                    Spacer()
-                    Button("取消") {
-                        noteMarkdown = ""
-                        viewModel.clearSelection()
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white.opacity(0.6))
-                    .font(.system(size: metrics.secondaryFontSize))
-
-                    Button("保存") {
-                        let md = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !md.isEmpty, let selection = viewModel.pendingSelection else { return }
-                        viewModel.addAnnotation(type: .note, selection: selection, noteText: md)
-                        noteMarkdown = ""
-                        viewModel.clearSelection()
-                    }
-                    .font(.system(size: metrics.secondaryFontSize, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, metrics.saveButtonHorizontalPadding)
-                    .padding(.vertical, metrics.saveButtonVerticalPadding)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                  ? Color.accentColor.opacity(0.35)
-                                  : Color.accentColor)
-                    )
-                    .buttonStyle(.plain)
-                    .disabled(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            // Note section: inline editor (auto-saves on dismiss / trash click)
+            RichNoteEditorView(
+                markdown: $noteMarkdown,
+                placeholder: "添加笔记…",
+                autoFocus: false,
+                onContentHeightChanged: { height in
+                    editorContentHeight = height
                 }
-                .padding(.horizontal, metrics.actionRowHorizontalPadding)
-                .padding(.vertical, metrics.actionRowVerticalPadding)
-            }
+            )
+            .frame(height: min(max(editorContentHeight, 36), metrics.selectionEditorMaxHeight))
+            .clipShape(RoundedRectangle(cornerRadius: metrics.editorCornerRadius))
+            .padding(.horizontal, metrics.editorHorizontalPadding)
+            .padding(.top, metrics.editorTopPadding)
+            .padding(.bottom, metrics.actionRowVerticalPadding)
         }
         .frame(width: metrics.toolbarWidth)
+        .onAppear {
+            capturedSelection = viewModel.pendingSelection
+        }
+        .onChange(of: viewModel.pendingSelection) { _, newValue in
+            if let newValue {
+                capturedSelection = newValue
+            }
+        }
+        .onDisappear {
+            saveNoteIfNeeded()
+        }
         .background(bgColor, in: RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: metrics.toolbarCornerRadius, style: .continuous)

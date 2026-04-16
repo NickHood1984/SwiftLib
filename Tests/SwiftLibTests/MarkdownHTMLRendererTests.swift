@@ -57,4 +57,40 @@ final class MarkdownHTMLRendererTests: XCTestCase {
         XCTAssertTrue(html.contains("<ul><li>first</li><li>second</li></ul>"))
         XCTAssertTrue(html.contains("<p>Run <code>swift test</code></p>"))
     }
+
+    func testRenderPreservesInlineAndDisplayMathAsSafeHTMLFallback() {
+        let markdown = """
+        Inline math: $E = mc^2$
+
+        $$
+        a^2 + b^2 = c^2
+        $$
+        """
+
+        let html = MarkdownHTMLRenderer.render(markdown: markdown, baseURL: nil)
+
+        XCTAssertTrue(html.contains("<p>Inline math: $E = mc^2$</p>"))
+        XCTAssertTrue(html.contains("<div class=\"math-display\">$$"))
+        XCTAssertTrue(html.contains("a^2 + b^2 = c^2"))
+        XCTAssertTrue(html.contains("$$</div>"))
+    }
+
+    func testRenderConvertsOCRSuperscriptMarkersInParagraphText() {
+        let markdown = "Daniel I. Peters $ ^{a,1} $ $$ ^{ID} $$, Lyndsie M. Collis $ ^{a,b,1,2,*} $"
+
+        let html = MarkdownHTMLRenderer.render(markdown: markdown, baseURL: nil)
+
+        XCTAssertTrue(html.contains("Daniel I. Peters <sup>a,1</sup> <sup>ID</sup>"))
+        XCTAssertTrue(html.contains("Lyndsie M. Collis <sup>a,b,1,2,*</sup>"))
+    }
+
+    func testRenderConvertsOCRSuperscriptMarkersInsideRawHTMLTable() {
+        let markdown = #"<table><tr><td>Species</td><td>Filter feeder: pico- and nanoplankton $ ^{a,b} $</td><td>Limited avoidance, adaptive tolerance $ ^{1} $</td></tr></table>"#
+
+        let html = MarkdownHTMLRenderer.render(markdown: markdown, baseURL: nil)
+
+        XCTAssertTrue(html.contains("<table>"))
+        XCTAssertTrue(html.contains("Filter feeder: pico- and nanoplankton <sup>a,b</sup>"))
+        XCTAssertTrue(html.contains("Limited avoidance, adaptive tolerance <sup>1</sup>"))
+    }
 }

@@ -11,11 +11,32 @@ final class WordAddinServer {
     static let shared = WordAddinServer()
     static let port: UInt16 = 23858
 
+    /// Per-launch bearer token – generated once at init, injected into served HTML.
+    let authToken: String = UUID().uuidString
+
+    /// Allowed CORS origin (matches the server's own address).
+    private var allowedOrigin: String { "http://127.0.0.1:\(Self.port)" }
+
     private var listener: NWListener?
     private(set) var isRunning = false
 
     private let queue = DispatchQueue(label: "WordAddinServer", qos: .userInitiated)
     private let focusBounceQueue = DispatchQueue(label: "WordAddinServer.FocusBounce", qos: .userInitiated)
+
+    // MARK: - Render-document cache
+
+    private let renderCacheLock = NSLock()
+    private var renderCacheGeneration: UInt64 = 0
+    private var lastRenderBody: Data?
+    private var lastRenderGeneration: UInt64 = 0
+    private var lastRenderResponse: Data?
+
+    /// Call when reference data changes (save / delete) to invalidate the cached render result.
+    func invalidateRenderCache() {
+        renderCacheLock.lock()
+        renderCacheGeneration &+= 1
+        renderCacheLock.unlock()
+    }
 
     // MARK: - Lifecycle
 
@@ -80,6 +101,31 @@ final class WordAddinServer {
         }
     }
 
+    // MARK: - Auth helpers
+
+    /// Parse raw HTTP headers into a dictionary (lowercased keys).
+    private func parseHeaders(_ raw: String) -> [String: String] {
+        let lines = raw.components(separatedBy: "\r\n")
+        var headers: [String: String] = [:]
+        // Skip request line (index 0), stop at empty line
+        for i in 1..<lines.count {
+            let line = lines[i]
+            if line.isEmpty { break }
+            if let colonIdx = line.firstIndex(of: ":") {
+                let key = line[..<colonIdx].trimmingCharacters(in: .whitespaces).lowercased()
+                let value = line[line.index(after: colonIdx)...].trimmingCharacters(in: .whitespaces)
+                headers[key] = value
+            }
+        }
+        return headers
+    }
+
+    /// Check bearer token in the Authorization header. Returns true if valid.
+    private func verifyAuth(headers: [String: String]) -> Bool {
+        guard let authHeader = headers["authorization"] else { return false }
+        return authHeader == "Bearer \(authToken)"
+    }
+
     // MARK: - Routing
 
     private func route(_ conn: NWConnection, raw: String) {
@@ -94,15 +140,31 @@ final class WordAddinServer {
         let method = String(parts[0])
         let rawPath = String(parts[1])
 
-        // Extract body for POST
+        let headers = parseHeaders(raw)
+
+        // Extract body for POST — validate Content-Length when present
         let body: Data? = {
             guard method == "POST", let range = raw.range(of: "\r\n\r\n") else { return nil }
             let bodyStr = String(raw[range.upperBound...])
             return bodyStr.data(using: .utf8)
         }()
 
+        if method == "POST", let clStr = headers["content-length"], let cl = Int(clStr) {
+            let actualLength = body?.count ?? 0
+            if actualLength != cl {
+                sendResponse(conn, status: 400, body: "Content-Length mismatch"); return
+            }
+        }
+
         // Split path and query
         let (path, queryString) = splitPathQuery(rawPath)
+
+        // Require bearer token for API routes (static file GETs are exempt
+        // because the HTML/JS must load before the client knows the token).
+        let isAPIRoute = path.hasPrefix("/api/")
+        if isAPIRoute && !verifyAuth(headers: headers) {
+            sendResponse(conn, status: 401, body: "Unauthorized"); return
+        }
 
         switch (method, path) {
         // API endpoints
@@ -277,6 +339,17 @@ final class WordAddinServer {
               let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             sendJSON(conn, status: 400, json: ["error": "invalid request body"]); return
         }
+
+        // Check render cache
+        renderCacheLock.lock()
+        let gen = renderCacheGeneration
+        if body == lastRenderBody, gen == lastRenderGeneration, let cached = lastRenderResponse {
+            renderCacheLock.unlock()
+            sendRawResponse(conn, status: 200, contentType: "application/json", body: cached)
+            return
+        }
+        renderCacheLock.unlock()
+
         guard let styleId = json["style"] as? String else {
             sendJSON(conn, status: 400, json: ["error": "missing style"]); return
         }
@@ -400,9 +473,16 @@ final class WordAddinServer {
             response["citationFormatting"] = fmtDict
         }
         sendJSONObject(conn, response)
-    }
 
-    // MARK: - API: Import style
+        // Store in cache
+        if let responseData = try? JSONSerialization.data(withJSONObject: response) {
+            renderCacheLock.lock()
+            lastRenderBody = body
+            lastRenderGeneration = gen
+            lastRenderResponse = responseData
+            renderCacheLock.unlock()
+        }
+    }
 
     private func handleStyleImport(_ conn: NWConnection, body: Data?) {
         guard let body,
@@ -487,7 +567,7 @@ final class WordAddinServer {
 
     private func handleOptions(_ conn: NWConnection) {
         let header = "HTTP/1.1 204 No Content\r\n"
-            + "Access-Control-Allow-Origin: *\r\n"
+            + "Access-Control-Allow-Origin: \(allowedOrigin)\r\n"
             + "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
             + "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
             + "Access-Control-Max-Age: 86400\r\n"
@@ -501,8 +581,17 @@ final class WordAddinServer {
 
     // MARK: - Static File Serving
 
+    /// In-memory cache for bundle static files (includes auth-token injection for HTML).
+    private var staticFileCache: [String: (contentType: String, body: Data)] = [:]
+
     private func serveStaticFile(_ conn: NWConnection, path: String) {
         let cleanPath = path == "/" ? "/taskpane.html" : path
+
+        // Check cache first
+        if let cached = staticFileCache[cleanPath] {
+            sendRawResponse(conn, status: 200, contentType: cached.contentType, body: cached.body)
+            return
+        }
 
         // Programmatic placeholder icons
         if cleanPath == "/icon-16.png" || cleanPath == "/icon-32.png" || cleanPath == "/icon-80.png" {
@@ -549,11 +638,25 @@ final class WordAddinServer {
             sendResponse(conn, status: 404, body: "Not Found"); return
         }
 
-        guard let fileData = try? Data(contentsOf: url) else {
+        guard var fileData = try? Data(contentsOf: url) else {
             sendResponse(conn, status: 500, body: "Internal Server Error"); return
         }
 
+        // Inject auth token into HTML pages so scripts can authenticate API calls.
+        if cleanPath.hasSuffix(".html"),
+           var html = String(data: fileData, encoding: .utf8) {
+            let tokenScript = "<script>window.__SWIFTLIB_TOKEN=\"\(authToken)\";</script>"
+            // Insert right after <head> (or before first <script>) to ensure availability
+            if let headRange = html.range(of: "<head>", options: .caseInsensitive) {
+                html.insert(contentsOf: "\n  \(tokenScript)", at: headRange.upperBound)
+            } else {
+                html = tokenScript + html
+            }
+            fileData = html.data(using: .utf8) ?? fileData
+        }
+
         let contentType = mimeType(for: cleanPath)
+        staticFileCache[cleanPath] = (contentType: contentType, body: fileData)
         sendRawResponse(conn, status: 200, contentType: contentType, body: fileData)
     }
 
@@ -597,7 +700,7 @@ final class WordAddinServer {
         var header = "HTTP/1.1 \(status) \(statusText)\r\n"
         header += "Content-Type: \(contentType)\r\n"
         header += "Content-Length: \(body.count)\r\n"
-        header += "Access-Control-Allow-Origin: *\r\n"
+        header += "Access-Control-Allow-Origin: \(allowedOrigin)\r\n"
         header += "Connection: close\r\n"
         header += "\r\n"
         var responseData = header.data(using: .utf8)!

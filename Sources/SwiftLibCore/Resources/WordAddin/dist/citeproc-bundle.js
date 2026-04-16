@@ -19067,7 +19067,8 @@
   async function getCachedStyleXml(base, styleId) {
     if (styleXmlCache.has(styleId)) return styleXmlCache.get(styleId);
     const styleUrl = `${base}/api/csl?id=${encodeURIComponent(styleId)}`;
-    const r = await fetch(styleUrl);
+    const _h = window.__SWIFTLIB_TOKEN ? { "Authorization": "Bearer " + window.__SWIFTLIB_TOKEN } : {};
+    const r = await fetch(styleUrl, { headers: _h });
     if (!r.ok) throw new Error(`CSL ${r.status}`);
     const xml = await r.text();
     styleXmlCache.set(styleId, xml);
@@ -19077,7 +19078,8 @@
     const id = localeId || "en-US";
     if (localeXmlCache.has(id)) return localeXmlCache.get(id);
     const localeUrl = `${base}/api/locale?id=${encodeURIComponent(id)}`;
-    const r = await fetch(localeUrl);
+    const _h = window.__SWIFTLIB_TOKEN ? { "Authorization": "Bearer " + window.__SWIFTLIB_TOKEN } : {};
+    const r = await fetch(localeUrl, { headers: _h });
     if (!r.ok) throw new Error(`locale ${r.status}`);
     const xml = await r.text();
     localeXmlCache.set(id, xml);
@@ -19089,7 +19091,8 @@
     const missing = ids.filter((id) => !citeItemById.has(id));
     if (missing.length) {
       const key = missing.slice().sort((a, b) => a - b).join(",");
-      const r = await fetch(`${base}/api/cite-items?ids=${key}`);
+      const _h = window.__SWIFTLIB_TOKEN ? { "Authorization": "Bearer " + window.__SWIFTLIB_TOKEN } : {};
+      const r = await fetch(`${base}/api/cite-items?ids=${key}`, { headers: _h });
       if (!r.ok) throw new Error(`cite-items ${r.status}`);
       const items = await r.json();
       for (const it of items) {

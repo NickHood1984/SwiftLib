@@ -115,9 +115,10 @@ async function _insertBibliographyAtSelection(doc, sel) {
       citationItems: c.citationItems || null,
     }));
 
+    const authHeaders = window.__SWIFTLIB_TOKEN ? { "Authorization": "Bearer " + window.__SWIFTLIB_TOKEN } : {};
     const resp = await fetch(SWIFTLIB_SERVER + "/api/render-document", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders },
       body: JSON.stringify({
         style: style,
         citations: citPayload,

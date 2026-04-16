@@ -15,6 +15,32 @@ private func cnkiDebugTrace(_ message: String) {
 }
 
 @MainActor
+private final class CNKIParserWebViewPool {
+    private var available: [WKWebView] = []
+    private let maxSize = 2
+
+    func acquire(configureDataStore: (WKWebViewConfiguration) -> Void) -> WKWebView {
+        if let webView = available.popLast() {
+            return webView
+        }
+        let config = WKWebViewConfiguration()
+        HiddenWKWebViewMediaGuard.configure(config)
+        configureDataStore(config)
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.customUserAgent = ReaderExtractionManager.safariLikeUserAgent
+        return webView
+    }
+
+    func release(_ webView: WKWebView) {
+        webView.navigationDelegate = nil
+        webView.stopLoading()
+        guard available.count < maxSize else { return }
+        webView.loadHTMLString("", baseURL: nil)
+        available.append(webView)
+    }
+}
+
+@MainActor
 final class CNKIMetadataProvider: NSObject, ObservableObject {
     enum CNKIError: LocalizedError {
         case webViewNotReady
@@ -150,6 +176,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
     }
 
     private weak var webView: WKWebView?
+    private let parserPool = CNKIParserWebViewPool()
     private var pendingOperation: PendingOperation?
     private var pendingContinuation: CheckedContinuation<OperationOutput, Error>?
     private var verificationContinuation: CheckedContinuation<Void, Error>?
@@ -387,7 +414,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
             request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await NetworkClient.session.data(for: request)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
 
         guard statusCode == 200 || statusCode == 403 else {
@@ -509,8 +536,16 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
     private func scheduleInspection(for webView: WKWebView) {
         inspectionTask?.cancel()
         inspectionTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 850_000_000)
+            // Quick first check after 200ms; if page isn't ready, retry after another 650ms.
+            try? await Task.sleep(nanoseconds: 200_000_000)
             guard let self, self.pendingContinuation != nil, self.webView === webView else { return }
+            let state = await self.pageResolutionState(in: webView)
+            if state.isReady {
+                await self.inspectLoadedPage(in: webView)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 650_000_000)
+            guard !Task.isCancelled, self.pendingContinuation != nil, self.webView === webView else { return }
             await self.inspectLoadedPage(in: webView)
         }
     }
@@ -574,13 +609,8 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
     }
 
     private func extractSearchCandidates(seed: MetadataResolutionSeed, fromHTML html: String, baseURL: URL) async throws -> [MetadataCandidate] {
-        let parserWebView = WKWebView(frame: .zero, configuration: {
-            let configuration = WKWebViewConfiguration()
-            HiddenWKWebViewMediaGuard.configure(configuration)
-            configureWebView(configuration)
-            return configuration
-        }())
-        parserWebView.customUserAgent = ReaderExtractionManager.safariLikeUserAgent
+        let parserWebView = parserPool.acquire { configureWebView($0) }
+        defer { parserPool.release(parserWebView) }
 
         let wrapperHTML: String = {
             if html.range(of: #"<html[\s>]"#, options: [.regularExpression, .caseInsensitive]) != nil {
@@ -727,7 +757,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
             request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await NetworkClient.session.data(for: request)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard statusCode == 200 else {
             throw CNKIError.navigationFailed("候选详情预览返回 HTTP \(statusCode)")
@@ -747,13 +777,8 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
     }
 
     private func extractDetailPayload(fromHTML html: String, baseURL: URL) async throws -> DetailPayload {
-        let parserWebView = WKWebView(frame: .zero, configuration: {
-            let configuration = WKWebViewConfiguration()
-            HiddenWKWebViewMediaGuard.configure(configuration)
-            configureWebView(configuration)
-            return configuration
-        }())
-        parserWebView.customUserAgent = ReaderExtractionManager.safariLikeUserAgent
+        let parserWebView = parserPool.acquire { configureWebView($0) }
+        defer { parserPool.release(parserWebView) }
 
         let wrapperHTML: String = {
             if html.range(of: #"<html[\s>]"#, options: [.regularExpression, .caseInsensitive]) != nil {
@@ -1562,7 +1587,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
                 request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
             }
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await NetworkClient.session.data(for: request)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
 
             if statusCode == 403 {

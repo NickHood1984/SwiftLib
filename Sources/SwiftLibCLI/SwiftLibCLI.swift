@@ -7,7 +7,7 @@ struct SwiftLibCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "swiftlib-cli",
         abstract: "swiftlib-cli — 在命令行管理文献库",
-        version: "1.1.1",
+        version: "1.2.0",
         subcommands: [
             Search.self,
             List.self,
@@ -258,16 +258,13 @@ struct List: ParsableCommand {
                 }
                 filter.referenceType = type
             }
-            refs = try AppDatabase.shared.fetchReferences(scope: scope, filter: filter, limit: limit)
+            refs = try AppDatabase.shared.fetchReferences(scope: scope, filter: filter, limit: limit, offset: offset)
         } else if let cid = collection {
             refs = try AppDatabase.shared.fetchReferences(collectionId: cid)
         } else if let tid = tag {
             refs = try AppDatabase.shared.fetchReferences(tagId: tid)
         } else {
-            refs = try AppDatabase.shared.fetchAllReferences(limit: limit)
-        }
-        if offset > 0 {
-            refs = Array(refs.dropFirst(offset))
+            refs = try AppDatabase.shared.fetchAllReferences(limit: limit, offset: offset)
         }
         printJSON(refs.map(ReferenceDTO.init))
     }

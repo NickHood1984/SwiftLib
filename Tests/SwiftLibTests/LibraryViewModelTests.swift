@@ -27,6 +27,47 @@ final class LibraryViewModelTests: XCTestCase {
         XCTAssertEqual(vm.selectedSidebar, .allReferences)
     }
 
+    func testComputeTitleKeywordsUsesDistinctTitlesAndFiltersStopWords() {
+        let keywords = LibraryViewModel.computeTitleKeywords(
+            from: [
+                "Deep Learning for Vision",
+                "Deep Learning in Medicine",
+                "The Vision of Learning Systems",
+                "learning learning learning",
+                "的 研究 分析"
+            ]
+        )
+
+        XCTAssertEqual(keywords.first?.word, "learning")
+        XCTAssertEqual(keywords.first?.count, 4)
+        XCTAssertEqual(keywords.first(where: { $0.word == "vision" })?.count, 2)
+        XCTAssertFalse(keywords.contains(where: { $0.word == "the" }))
+        XCTAssertFalse(keywords.contains(where: { $0.word == "研究" }))
+    }
+
+    func testLoadMoreIfNeededDoesNotAppendDuplicatePages() async throws {
+        let db = try makeTestDB()
+
+        for index in 0..<220 {
+            var ref = Reference(title: "Reference \(index)")
+            try db.saveReference(&ref)
+        }
+
+        let vm = LibraryViewModel(db: db)
+        try await waitUntil(timeout: 2) { vm.references.count == 200 }
+
+        guard let lastVisible = vm.references.last else {
+            return XCTFail("Expected the initial page to be populated")
+        }
+
+        vm.loadMoreIfNeeded(currentItem: lastVisible)
+        vm.loadMoreIfNeeded(currentItem: lastVisible)
+
+        try await waitUntil(timeout: 2) { vm.references.count == 220 }
+        XCTAssertEqual(vm.references.count, 220)
+        XCTAssertEqual(Set(vm.references.compactMap(\.id)).count, 220)
+    }
+
     // MARK: - Save Reference
 
     func testSaveReference() throws {
@@ -56,7 +97,7 @@ final class LibraryViewModelTests: XCTestCase {
         vm.saveReference(&ref)
         let id = ref.id!
 
-        vm.deleteReferences([ref])
+        vm.deleteReferences(ids: Set([id]))
         let fetched = try db.fetchReferences(ids: [id])
         XCTAssertTrue(fetched.isEmpty, "Deleted reference should not be fetchable")
     }
@@ -131,5 +172,17 @@ final class LibraryViewModelTests: XCTestCase {
         XCTAssertEqual(vm.errorMessage, "Test error")
         vm.errorMessage = nil
         XCTAssertNil(vm.errorMessage)
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval,
+        condition: @escaping @MainActor () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("Timed out waiting for condition")
     }
 }

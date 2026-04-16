@@ -19,6 +19,27 @@ enum MarkdownHTMLRenderer {
                 continue
             }
 
+            // Pass through raw HTML blocks (e.g. <table>, <div>, etc.)
+            if let htmlTag = parseHTMLBlockOpen(trimmed) {
+                var htmlLines: [String] = [line]
+                let closingTag = "</\(htmlTag)>"
+                if !trimmed.contains(closingTag) {
+                    index += 1
+                    while index < lines.count {
+                        htmlLines.append(lines[index])
+                        if lines[index].contains(closingTag) {
+                            index += 1
+                            break
+                        }
+                        index += 1
+                    }
+                } else {
+                    index += 1
+                }
+                blocks.append(replaceOCRAnnotationMarkersInRawHTML(htmlLines.joined(separator: "\n")))
+                continue
+            }
+
             if let fence = parseFence(trimmed) {
                 index += 1
                 var codeLines: [String] = []
@@ -71,6 +92,33 @@ enum MarkdownHTMLRenderer {
                 continue
             }
 
+            // Display math block: $$...$$
+            if trimmed.hasPrefix("$$") {
+                if trimmed.hasSuffix("$$") && trimmed.count > 4 {
+                    // Single-line display math: $$ ... $$
+                    let inner = String(trimmed.dropFirst(2).dropLast(2))
+                    blocks.append(#"<div class="math-display">$$\#(inner)$$</div>"#)
+                    index += 1
+                    continue
+                }
+                // Multi-line display math
+                index += 1
+                var mathLines: [String] = [trimmed]
+                while index < lines.count {
+                    let ml = lines[index]
+                    mathLines.append(ml)
+                    index += 1
+                    if ml.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("$$") { break }
+                }
+                blocks.append(#"<div class="math-display">\#(mathLines.joined(separator: "\n"))</div>"#)
+                continue
+            }
+
+            if isTableRow(trimmed) {
+                blocks.append(renderTable(lines: lines, startIndex: &index, baseURL: baseURL))
+                continue
+            }
+
             if let listKind = parseListKind(line) {
                 blocks.append(renderList(lines: lines, startIndex: &index, kind: listKind, baseURL: baseURL))
                 continue
@@ -117,13 +165,104 @@ enum MarkdownHTMLRenderer {
         let content: String
     }
 
+    private static let htmlBlockTags: Set<String> = [
+        "table", "div", "p", "pre", "blockquote", "ul", "ol", "dl",
+        "h1", "h2", "h3", "h4", "h5", "h6", "hr", "section",
+        "article", "aside", "details", "figcaption", "figure",
+        "header", "footer", "main", "nav", "summary",
+    ]
+
+    private static func parseHTMLBlockOpen(_ trimmed: String) -> String? {
+        guard trimmed.hasPrefix("<") else { return nil }
+        let scanner = Scanner(string: trimmed)
+        scanner.currentIndex = trimmed.index(after: trimmed.startIndex)
+        guard let tag = scanner.scanCharacters(from: .letters) else { return nil }
+        let lower = tag.lowercased()
+        return htmlBlockTags.contains(lower) ? lower : nil
+    }
+
     private static func startsSpecialBlock(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         return parseFence(trimmed) != nil ||
             isThematicBreak(trimmed) ||
             parseHeading(trimmed) != nil ||
             trimmed.hasPrefix(">") ||
-            parseListKind(line) != nil
+            parseListKind(line) != nil ||
+            isTableRow(trimmed) ||
+            trimmed.hasPrefix("$$") ||
+            parseHTMLBlockOpen(trimmed) != nil
+    }
+
+    private static func isTableRow(_ trimmed: String) -> Bool {
+        trimmed.hasPrefix("|") && trimmed.hasSuffix("|") && trimmed.count > 1
+    }
+
+    private static func isTableSeparator(_ trimmed: String) -> Bool {
+        guard isTableRow(trimmed) else { return false }
+        let inner = trimmed.dropFirst().dropLast()
+        let cells = inner.split(separator: "|", omittingEmptySubsequences: false)
+        return !cells.isEmpty && cells.allSatisfy { cell in
+            let c = cell.trimmingCharacters(in: .whitespaces)
+            return !c.isEmpty && c.allSatisfy { $0 == "-" || $0 == ":" }
+        }
+    }
+
+    private static func parseTableCells(_ trimmed: String) -> [String] {
+        var row = trimmed
+        if row.hasPrefix("|") { row = String(row.dropFirst()) }
+        if row.hasSuffix("|") { row = String(row.dropLast()) }
+        return row.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    private static func parseTableAlignment(_ trimmed: String) -> [String] {
+        parseTableCells(trimmed).map { cell in
+            let startsColon = cell.hasPrefix(":")
+            let endsColon = cell.hasSuffix(":")
+            if startsColon && endsColon { return "center" }
+            if endsColon { return "right" }
+            return "left"
+        }
+    }
+
+    private static func renderTable(lines: [String], startIndex: inout Int, baseURL: URL?) -> String {
+        let headerTrimmed = lines[startIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        startIndex += 1
+
+        // Check for separator line
+        var alignments: [String]?
+        if startIndex < lines.count {
+            let sepTrimmed = lines[startIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+            if isTableSeparator(sepTrimmed) {
+                alignments = parseTableAlignment(sepTrimmed)
+                startIndex += 1
+            }
+        }
+
+        let headerCells = parseTableCells(headerTrimmed)
+        let aligns = alignments ?? Array(repeating: "left", count: headerCells.count)
+
+        var html = "<table><thead><tr>"
+        for (i, cell) in headerCells.enumerated() {
+            let align = i < aligns.count ? aligns[i] : "left"
+            html += #"<th style="text-align:\#(align)">\#(renderInline(cell, baseURL: baseURL))</th>"#
+        }
+        html += "</tr></thead><tbody>"
+
+        while startIndex < lines.count {
+            let rowTrimmed = lines[startIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isTableRow(rowTrimmed) && !isTableSeparator(rowTrimmed) else { break }
+            let cells = parseTableCells(rowTrimmed)
+            html += "<tr>"
+            for (i, cell) in cells.enumerated() {
+                let align = i < aligns.count ? aligns[i] : "left"
+                html += #"<td style="text-align:\#(align)">\#(renderInline(cell, baseURL: baseURL))</td>"#
+            }
+            html += "</tr>"
+            startIndex += 1
+        }
+
+        html += "</tbody></table>"
+        return html
     }
 
     private static func parseFence(_ trimmed: String) -> Fence? {
@@ -283,6 +422,19 @@ enum MarkdownHTMLRenderer {
             return storePlaceholder("<code>\(escapeHTML(inner))</code>")
         }
 
+        output = replaceOCRAnnotationMarkers(in: output) { content, kind in
+            storePlaceholder("<\(kind.htmlTag)>\(escapeHTML(content))</\(kind.htmlTag)>")
+        }
+
+        // Protect inline math $...$ (but not $$) before other processing
+        output = replaceMatches(
+            pattern: #"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)"#,
+            in: output
+        ) { match, source in
+            let full = capture(match, in: source, at: 0) ?? ""
+            return storePlaceholder(full)
+        }
+
         output = replaceMatches(
             pattern: #"!\[([^\]]*)\]\((.+?)\)"#,
             in: output
@@ -373,6 +525,64 @@ enum MarkdownHTMLRenderer {
         }
         let range = NSRange(text.startIndex..., in: text)
         return regex.firstMatch(in: text, options: [], range: range) != nil
+    }
+
+    private enum OCRAnnotationKind {
+        case superscript
+        case subscriptText
+
+        var htmlTag: String {
+            switch self {
+            case .superscript: return "sup"
+            case .subscriptText: return "sub"
+            }
+        }
+    }
+
+    private static func replaceOCRAnnotationMarkersInRawHTML(_ text: String) -> String {
+        replaceOCRAnnotationMarkers(in: text) { content, kind in
+            "<\(kind.htmlTag)>\(escapeHTML(content))</\(kind.htmlTag)>"
+        }
+    }
+
+    private static func replaceOCRAnnotationMarkers(
+        in text: String,
+        replacement: (String, OCRAnnotationKind) -> String
+    ) -> String {
+        var result = text
+        let patterns: [(String, OCRAnnotationKind)] = [
+            (#"\${1,2}\s*\^\{([^{}$<>\n]+)\}\s*\${1,2}"#, .superscript),
+            (#"\${1,2}\s*_\{([^{}$<>\n]+)\}\s*\${1,2}"#, .subscriptText),
+        ]
+
+        for (pattern, kind) in patterns {
+            result = replaceMatches(pattern: pattern, in: result) { match, source in
+                guard let rawContent = capture(match, in: source, at: 1) else {
+                    return capture(match, in: source, at: 0) ?? ""
+                }
+
+                let normalizedContent = normalizedOCRAnnotationContent(rawContent)
+                guard isLikelyOCRAnnotationContent(normalizedContent) else {
+                    return capture(match, in: source, at: 0) ?? ""
+                }
+
+                return replacement(normalizedContent, kind)
+            }
+        }
+
+        return result
+    }
+
+    private static func normalizedOCRAnnotationContent(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: #"\s*,\s*"#, with: ",", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isLikelyOCRAnnotationContent(_ text: String) -> Bool {
+        guard !text.isEmpty, text.count <= 32 else { return false }
+        return text.range(of: #"^[A-Za-z0-9*,.†‡\- ]+$"#, options: .regularExpression) != nil
     }
 
     private static func resolveURL(_ rawValue: String, baseURL: URL?) -> String {

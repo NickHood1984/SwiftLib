@@ -55,7 +55,7 @@ struct TranslationBackendClient {
             request.httpBody = Data("{}".utf8)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await NetworkClient.session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 translationBackendTrace("POST /maintenance/update-translators invalid response")
                 return .failure(makeError("本地元数据服务没有返回有效响应。"))
@@ -112,7 +112,7 @@ struct TranslationBackendClient {
         do {
             let connection = try await processManager.currentConnection()
             let request = try buildRequest(connection: connection, path: "/capabilities", method: "GET")
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await NetworkClient.session.data(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                 let status = (response as? HTTPURLResponse)?.statusCode
                 translationBackendTrace("GET /capabilities -> \(status.map(String.init) ?? "invalid response")")
@@ -143,7 +143,7 @@ struct TranslationBackendClient {
             request.httpBody = try JSONEncoder().encode(body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await NetworkClient.session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 translationBackendTrace("POST \(path) invalid response")
                 return .unavailable("本地元数据服务没有返回有效响应。")

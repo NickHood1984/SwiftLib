@@ -22,7 +22,9 @@ function escapeHtml(s) {
 }
 
 async function fetchJSON(path) {
-  const resp = await fetch(DIALOG_SERVER + path);
+  const headers = {};
+  if (window.__SWIFTLIB_TOKEN) headers["Authorization"] = "Bearer " + window.__SWIFTLIB_TOKEN;
+  const resp = await fetch(DIALOG_SERVER + path, { headers });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();
 }

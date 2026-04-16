@@ -2,11 +2,16 @@ import SwiftUI
 import SwiftLibCore
 
 struct AnnotationSidebarView: View {
-    @ObservedObject var viewModel: PDFReaderViewModel
+    private static let topScrollID = "swiftlib-pdf-annotation-sidebar-top"
+
+    let annotations: [PDFAnnotationRecord]
+    let selectedAnnotationId: Int64?
+    let onNavigate: (PDFAnnotationRecord) -> Void
+    let onDelete: (PDFAnnotationRecord) -> Void
+    let onUpdateNote: (PDFAnnotationRecord, String) -> Void
     @State private var filterType: AnnotationType?
     @State private var editingAnnotation: PDFAnnotationRecord?
     @State private var editNoteText = ""
-    @State private var filteredAnnotations: [PDFAnnotationRecord] = []
 
     private var sidebarBackground: Color {
         Color(nsColor: NSColor(name: nil) { trait in
@@ -33,29 +38,21 @@ struct AnnotationSidebarView: View {
                 emptyState
             } else {
                 annotationList
+                    .padding(.top, 10)
+                    .clipped()
             }
         }
         .background(sidebarBackground)
         .sheet(item: $editingAnnotation) { annotation in
             editNoteSheet(annotation: annotation)
         }
-        .onAppear {
-            updateFilteredAnnotations()
-        }
-        .onChange(of: viewModel.annotations) { _, _ in
-            updateFilteredAnnotations()
-        }
-        .onChange(of: filterType) { _, _ in
-            updateFilteredAnnotations()
-        }
     }
 
-    private func updateFilteredAnnotations() {
+    private var filteredAnnotations: [PDFAnnotationRecord] {
         if let filterType {
-            filteredAnnotations = viewModel.annotations.filter { $0.type == filterType }
-        } else {
-            filteredAnnotations = viewModel.annotations
+            return annotations.filter { $0.type == filterType }
         }
+        return annotations
     }
 
     // MARK: - Header
@@ -114,31 +111,55 @@ struct AnnotationSidebarView: View {
 
     private var annotationList: some View {
         ScrollViewReader { proxy in
-            OverlayScrollView {
-                VStack(alignment: .leading, spacing: 10) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    Color.clear
+                        .frame(height: 0)
+                        .id(Self.topScrollID)
+
                     ForEach(filteredAnnotations) { annotation in
                         AnnotationCard(
                             annotation: annotation,
-                            isSelected: viewModel.selectedAnnotationId == annotation.id,
+                            isSelected: selectedAnnotationId == annotation.id,
                             onTap: {
-                                viewModel.navigateTo(annotation)
+                                onNavigate(annotation)
                             },
                             onEdit: {
                                 editNoteText = annotation.noteText ?? ""
                                 editingAnnotation = annotation
                             },
                             onDelete: {
-                                viewModel.deleteAnnotation(annotation)
+                                onDelete(annotation)
                             }
                         )
                         .id(annotation.id)
                     }
                 }
                 .padding(.horizontal, 12)
-                .padding(.top, 6)
+                .padding(.top, 4)
                 .padding(.bottom, 12)
+                .background(alignment: .top) {
+                    // Placed INSIDE the ScrollView content so the configurator's
+                    // NSView is a child of the NSScrollView — enclosingScrollView
+                    // then correctly reaches the outer NSScrollView and applies
+                    // the thin overlay scroller style.
+                    SwiftUIScrollViewScrollerConfigurator()
+                        .frame(height: 1)
+                }
             }
-            .onChange(of: viewModel.selectedAnnotationId) { _, newId in
+            .onAppear {
+                guard selectedAnnotationId == nil else { return }
+                DispatchQueue.main.async {
+                    proxy.scrollTo(Self.topScrollID, anchor: .top)
+                }
+            }
+            .onChange(of: filterType) { _, _ in
+                guard selectedAnnotationId == nil else { return }
+                DispatchQueue.main.async {
+                    proxy.scrollTo(Self.topScrollID, anchor: .top)
+                }
+            }
+            .onChange(of: selectedAnnotationId) { _, newId in
                 if let newId {
                     withAnimation { proxy.scrollTo(newId, anchor: .center) }
                 }
@@ -192,7 +213,7 @@ struct AnnotationSidebarView: View {
             HStack {
                 Spacer()
                 Button("保存") {
-                    viewModel.updateAnnotationNote(annotation, noteText: editNoteText)
+                    onUpdateNote(annotation, editNoteText)
                     editingAnnotation = nil
                 }
                 .keyboardShortcut(.defaultAction)
@@ -200,6 +221,13 @@ struct AnnotationSidebarView: View {
         }
         .padding(20)
         .frame(width: 400, height: 320)
+    }
+}
+
+extension AnnotationSidebarView: Equatable {
+    static func == (lhs: AnnotationSidebarView, rhs: AnnotationSidebarView) -> Bool {
+        lhs.annotations == rhs.annotations
+            && lhs.selectedAnnotationId == rhs.selectedAnnotationId
     }
 }
 
@@ -212,8 +240,51 @@ struct AnnotationCard: View {
     let onEdit: () -> Void
     let onDelete: () -> Void
 
+    private let fullNoteText: String?
+    private let normalizedNotePreview: String?
+    private let normalizedNoteAttributedPreview: AttributedString?
+
     @State private var isHovered = false
     @State private var isShowingNotePreview = false
+
+    init(
+        annotation: PDFAnnotationRecord,
+        isSelected: Bool,
+        onTap: @escaping () -> Void,
+        onEdit: @escaping () -> Void,
+        onDelete: @escaping () -> Void
+    ) {
+        self.annotation = annotation
+        self.isSelected = isSelected
+        self.onTap = onTap
+        self.onEdit = onEdit
+        self.onDelete = onDelete
+
+        let note = annotation.noteText?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let usableNote = (note?.isEmpty == false) ? note : nil
+        self.fullNoteText = usableNote
+
+        if let usableNote {
+            let cleanedNote = usableNote
+                .replacingOccurrences(of: #"(?m)^#{1,6} "#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: #"(?m)^```[^\n]*"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let preview = cleanedNote.isEmpty ? nil : cleanedNote
+            self.normalizedNotePreview = preview
+            if let preview {
+                self.normalizedNoteAttributedPreview = try? AttributedString(
+                    markdown: preview,
+                    options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+                )
+            } else {
+                self.normalizedNoteAttributedPreview = nil
+            }
+        } else {
+            self.normalizedNotePreview = nil
+            self.normalizedNoteAttributedPreview = nil
+        }
+    }
 
     private var showsActionButtons: Bool {
         isHovered || isSelected
@@ -240,22 +311,6 @@ struct AnnotationCard: View {
 
     private var noteBackground: Color {
         Color.primary.opacity(isSelected ? 0.045 : 0.022)
-    }
-
-    private var fullNoteText: String? {
-        guard let note = annotation.noteText?.trimmingCharacters(in: .whitespacesAndNewlines), !note.isEmpty else {
-            return nil
-        }
-        return note
-    }
-
-    private var normalizedNotePreview: String? {
-        guard let note = fullNoteText else { return nil }
-        let cleanedNote = note
-            .replacingOccurrences(of: #"(?m)^#{1,6} "#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"(?m)^```[^\n]*"#, with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleanedNote.isEmpty ? nil : cleanedNote
     }
 
     private var cardContent: some View {
@@ -324,7 +379,7 @@ struct AnnotationCard: View {
 
             if let previewNote = normalizedNotePreview, let fullNote = fullNoteText {
                 VStack(alignment: .leading, spacing: 4) {
-                    if let attributed = try? AttributedString(markdown: previewNote, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+                    if let attributed = normalizedNoteAttributedPreview {
                         Text(attributed)
                             .font(.callout)
                             .foregroundStyle(.secondary)
@@ -368,7 +423,7 @@ struct AnnotationCard: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(cardStroke, lineWidth: isSelected ? 1 : 0.5)
             )
-            .shadow(color: cardShadow, radius: isSelected ? 10 : 5, y: isSelected ? 4 : 2)
+                .shadow(color: cardShadow, radius: isSelected ? 8 : 0, y: isSelected ? 3 : 0)
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .onTapGesture { onTap() }
             .onHover { isHovered = $0 }

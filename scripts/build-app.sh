@@ -13,7 +13,6 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
 DERIVED_DATA="$PROJECT_DIR/.xcodebuild"
-PRODUCTS_DIR="$DERIVED_DATA/Build/Products/$CONFIGURATION"
 OUTPUT_DIR="$PROJECT_DIR/build"
 STAGING_DIR="$OUTPUT_DIR/dmg-staging"
 
@@ -21,7 +20,7 @@ APP_NAME="SwiftLib"
 CLI_NAME="swiftlib-cli"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 APP_VERSION="${APP_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)}"
-APP_VERSION="${APP_VERSION:-1.1.1}"
+APP_VERSION="${APP_VERSION:-1.2.0}"
 APP_BUILD_VERSION="${APP_BUILD_VERSION:-$APP_VERSION}"
 if [ "$CONFIGURATION" = "Release" ]; then
     DMG_NAME="$APP_NAME-$APP_VERSION.dmg"
@@ -30,6 +29,19 @@ else
 fi
 DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
 FRAMEWORKS_DIR="$APP_BUNDLE/Contents/Frameworks"
+
+if [ -f "$PROJECT_DIR/Package.swift" ] && [ ! -d "$PROJECT_DIR/$APP_NAME.xcodeproj" ] && [ ! -d "$PROJECT_DIR/$APP_NAME.xcworkspace" ]; then
+    BUILD_SYSTEM="swiftpm"
+    if [ "$CONFIGURATION" = "Release" ]; then
+        SWIFTPM_CONFIGURATION="release"
+    else
+        SWIFTPM_CONFIGURATION="debug"
+    fi
+    PRODUCTS_DIR="$PROJECT_DIR/.build/arm64-apple-macosx/$SWIFTPM_CONFIGURATION"
+else
+    BUILD_SYSTEM="xcodebuild"
+    PRODUCTS_DIR="$DERIVED_DATA/Build/Products/$CONFIGURATION"
+fi
 
 BACKEND_DIR="$PROJECT_DIR/swiftlib-translation-backend"
 BACKEND_RESOURCE_DIR="$APP_BUNDLE/Contents/Resources/TranslationBackend"
@@ -119,22 +131,42 @@ json_field() {
 
 build_app() {
     echo "▸ Building $APP_NAME app ($CONFIGURATION)..."
-    xcodebuild build \
-        -scheme "$APP_NAME" \
-        -configuration "$CONFIGURATION" \
-        -destination 'platform=macOS' \
-        -derivedDataPath "$DERIVED_DATA" \
-        -quiet
+    if [ "$BUILD_SYSTEM" = "swiftpm" ]; then
+        if [ "$CONFIGURATION" = "Release" ]; then
+            swift build -c release --product "$APP_NAME"
+        else
+            swift build --product "$APP_NAME"
+        fi
+    else
+        # Reusing DerivedData with SwiftPM package graphs can leave behind
+        # stale bare repositories that make xcodebuild fail with
+        # "already exists in file system" during dependency resolution.
+        rm -rf "$DERIVED_DATA/SourcePackages"
+        xcodebuild build \
+            -scheme "$APP_NAME" \
+            -configuration "$CONFIGURATION" \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$DERIVED_DATA" \
+            -quiet
+    fi
 }
 
 build_cli() {
     echo "▸ Building $CLI_NAME CLI ($CONFIGURATION)..."
-    xcodebuild build \
-        -scheme "$CLI_NAME" \
-        -configuration "$CONFIGURATION" \
-        -destination 'platform=macOS' \
-        -derivedDataPath "$DERIVED_DATA" \
-        -quiet
+    if [ "$BUILD_SYSTEM" = "swiftpm" ]; then
+        if [ "$CONFIGURATION" = "Release" ]; then
+            swift build -c release --product "$CLI_NAME"
+        else
+            swift build --product "$CLI_NAME"
+        fi
+    else
+        xcodebuild build \
+            -scheme "$CLI_NAME" \
+            -configuration "$CONFIGURATION" \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$DERIVED_DATA" \
+            -quiet
+    fi
 }
 
 assemble_app_bundle() {
@@ -176,6 +208,8 @@ assemble_app_bundle() {
     <string>${APP_VERSION}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>LSMinimumSystemVersion</key>

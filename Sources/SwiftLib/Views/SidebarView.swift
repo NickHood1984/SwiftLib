@@ -65,6 +65,7 @@ struct SidebarView: View {
                         }
                     }
                 }
+                .coachMarkAnchor(.sidebarCollections)
 
                 sidebarSection {
                     Text("标签")
@@ -97,6 +98,7 @@ struct SidebarView: View {
                         }
                     }
                 }
+                .coachMarkAnchor(.sidebarTags)
 
             }
             .padding(.horizontal, 10)

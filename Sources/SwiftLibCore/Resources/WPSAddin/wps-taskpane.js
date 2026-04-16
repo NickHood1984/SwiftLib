@@ -9,6 +9,11 @@
 /* global WPSDocument */
 
 const SERVER = "http://127.0.0.1:23858";
+function _wpsAuthHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  if (window.__SWIFTLIB_TOKEN) h["Authorization"] = "Bearer " + window.__SWIFTLIB_TOKEN;
+  return h;
+}
 
 // ── State ──
 
@@ -84,7 +89,9 @@ async function fetchJSON(path) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 8000);
   try {
-    const res = await fetch(SERVER + path, { signal: ctrl.signal });
+    const headers = {};
+    if (window.__SWIFTLIB_TOKEN) headers["Authorization"] = "Bearer " + window.__SWIFTLIB_TOKEN;
+    const res = await fetch(SERVER + path, { signal: ctrl.signal, headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   } finally {
@@ -120,7 +127,7 @@ function triggerFocusBounce() {
   _focusBounceInFlight = true;
   fetch(`${SERVER}/api/wps/focus-bounce`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: _wpsAuthHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ delayMs: 150 }),
   })
     .catch((error) => {
@@ -572,7 +579,7 @@ async function refreshAllCitations(styleOverride, isStyleSwitch, selectionBookma
     _perf.start("fetch /api/render-document");
     const resp = await fetch(SERVER + "/api/render-document", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: _wpsAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         style,
         citations: citPayload,
@@ -703,7 +710,7 @@ async function insertBibliography() {
 
     const resp = await fetch(SERVER + "/api/render-document", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: _wpsAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ style, citations: citPayload, items: meta.items || {} }),
     });
     const data = await resp.json();

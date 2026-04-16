@@ -5,6 +5,7 @@ import Placeholder from '@tiptap/extension-placeholder'
 import BubbleMenu from '@tiptap/extension-bubble-menu'
 import TurndownService from 'turndown'
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 
 import './editor.css'
 
@@ -30,7 +31,19 @@ function htmlToMarkdown(html) {
 
 function markdownToHtml(md) {
   if (!md) return '<p></p>'
-  return marked.parse(md, { breaks: false, gfm: true })
+  const raw = marked.parse(md, { breaks: false, gfm: true })
+  return DOMPurify.sanitize(raw, {
+    ALLOWED_TAGS: [
+      'p', 'br', 'hr',
+      'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+      'ul', 'ol', 'li',
+      'blockquote', 'pre', 'code',
+      'em', 'strong', 'del', 's',
+      'a', 'span',
+    ],
+    ALLOWED_ATTR: ['href', 'target', 'rel'],
+    ALLOWED_URI_REGEXP: /^(?:https?|mailto):/i,
+  })
 }
 
 // --- Editor setup ---
@@ -111,6 +124,7 @@ function updateBubbleMenuActive() {
 // --- Content height reporting ---
 
 let lastReportedHeight = 0
+let _noteDebounceTimer = null
 
 function reportContentHeight() {
   const el = editor?.view?.dom
@@ -163,10 +177,13 @@ function initEditor() {
     },
     onUpdate: ({ editor: e }) => {
       updateBubbleMenuActive()
-      try {
-        const md = htmlToMarkdown(e.getHTML())
-        window.webkit?.messageHandlers?.noteContentChanged?.postMessage({ markdown: md })
-      } catch (_) {}
+      clearTimeout(_noteDebounceTimer)
+      _noteDebounceTimer = setTimeout(() => {
+        try {
+          const md = htmlToMarkdown(e.getHTML())
+          window.webkit?.messageHandlers?.noteContentChanged?.postMessage({ markdown: md })
+        } catch (_) {}
+      }, 200)
       reportContentHeight()
     },
     onSelectionUpdate: () => {
@@ -178,6 +195,7 @@ function initEditor() {
       } catch (_) {}
     },
     onBlur: () => {
+      clearTimeout(_noteDebounceTimer)
       try {
         const md = htmlToMarkdown(editor.getHTML())
         window.webkit?.messageHandlers?.noteEditorBlurred?.postMessage({ markdown: md })

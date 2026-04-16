@@ -1,6 +1,11 @@
 /* global Office, Word, SwiftLibCiteproc, SwiftLibShared, swiftLibApplyParagraphFontFromCitation, swiftLibTryDeleteLightweightGuardAfterCitationCC, swiftLibSyncTypingFormatAfterCitationGuard */
 
 const CMD_SERVER = "http://127.0.0.1:23858";
+function _cmdAuthHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  if (window.__SWIFTLIB_TOKEN) h["Authorization"] = "Bearer " + window.__SWIFTLIB_TOKEN;
+  return h;
+}
 const CMD_TAG_PREFIX = "swiftlib:v3:";
 const CMD_CITE_TAG_PREFIX = "swiftlib:v3:cite:";
 const CMD_BIB_TAG_PREFIX = "swiftlib:v3:bib:";
@@ -341,7 +346,9 @@ function cmdRangeAfter() {
 }
 
 async function cmdFetchJSON(path, options) {
-  const resp = options ? await fetch(CMD_SERVER + path, options) : await fetch(CMD_SERVER + path);
+  const opts = options ? { ...options } : {};
+  opts.headers = _cmdAuthHeaders(opts.headers);
+  const resp = await fetch(CMD_SERVER + path, opts);
   if (!resp.ok) {
     const fallback = await resp.text();
     let message = fallback || `HTTP ${resp.status}`;

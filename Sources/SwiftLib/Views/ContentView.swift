@@ -55,8 +55,10 @@ struct SearchQuery {
 
 @MainActor
 final class LibraryViewModel: ObservableObject {
-    /// The current page of references returned by the database-level query.
-    @Published var references: [Reference] = []
+    /// The current page of lightweight list rows returned by the database query.
+    @Published var references: [ReferenceListRow] = []
+    /// Total count of references matching the current scope + filter (for status bar).
+    @Published var totalReferenceCount: Int = 0
     @Published var pendingMetadataIntakes: [MetadataIntake] = []
     @Published var collections: [Collection] = []
     @Published var tags: [Tag] = []
@@ -72,16 +74,33 @@ final class LibraryViewModel: ObservableObject {
     @Published var errorMessage: String?
     /// All reference titles for smart keyword extraction (unaffected by filters).
     @Published private(set) var allReferenceTitles: [String] = []
+    /// Precomputed smart title keywords so view refreshes do not rescan the entire library.
+    @Published private(set) var titleKeywords: [(word: String, count: Int)] = []
+
+    /// Whether all matching rows have been loaded (pagination exhausted).
+    private(set) var allLoaded = false
 
     // MARK: - Private state
     let db: AppDatabase
     private var cancellables = Set<AnyCancellable>()
     /// Cancellable for the active reference ValueObservation subscription.
     private var referenceObserverCancellable: AnyCancellable?
+    /// Cancellable for the reference count observation.
+    private var countObserverCancellable: AnyCancellable?
     /// Timer-based debounce task for search input.
     private var searchDebounceTask: Task<Void, Never>?
+    /// Background task that rebuilds smart title keywords from title snapshots.
+    private var titleKeywordTask: Task<Void, Never>?
+    /// Background task used to fetch the next page of rows off the main actor.
+    private var loadMoreTask: Task<Void, Never>?
     /// The filter currently applied to the database query.
     private var activeFilter = ReferenceFilter()
+    /// Page size for list pagination.
+    private let pageSize = 200
+    /// Guards against duplicate pagination requests for the same query.
+    private var isLoadingMore = false
+    /// Identifies the active list query so stale pagination results can be discarded.
+    private var currentQueryToken = UUID()
 
     init(db: AppDatabase = .shared) {
         self.db = db
@@ -134,12 +153,13 @@ final class LibraryViewModel: ObservableObject {
             .store(in: &cancellables)
 
         // Observe all reference titles for smart keyword extraction.
-        db.observeReferences()
+        db.observeReferenceTitles()
             .receive(on: DispatchQueue.main)
             .sink(
                 receiveCompletion: { _ in },
-                receiveValue: { [weak self] refs in
-                    self?.allReferenceTitles = refs.map(\.title)
+                receiveValue: { [weak self] titles in
+                    self?.allReferenceTitles = titles
+                    self?.scheduleTitleKeywordRebuild(for: titles)
                 }
             )
             .store(in: &cancellables)
@@ -152,6 +172,12 @@ final class LibraryViewModel: ObservableObject {
     /// Called whenever the sidebar selection or the debounced filter changes.
     private func rebuildReferenceObserver() {
         referenceObserverCancellable?.cancel()
+        countObserverCancellable?.cancel()
+        loadMoreTask?.cancel()
+        loadMoreTask = nil
+        allLoaded = false
+        isLoadingMore = false
+        currentQueryToken = UUID()
 
         let scope = currentReferenceScope
         var filter = activeFilter
@@ -161,16 +187,29 @@ final class LibraryViewModel: ObservableObject {
             filter.titleOnly = true
         }
 
+        // Observe lightweight list rows (first page).
         referenceObserverCancellable = db
-            .observeReferences(scope: scope, filter: filter, limit: 0)
+            .observeReferenceListRows(scope: scope, filter: filter, limit: pageSize)
             .sink(
                 receiveCompletion: { [weak self] completion in
                     if case .failure(let error) = completion {
                         self?.errorMessage = "References refresh failed: \(error.localizedDescription)"
                     }
                 },
-                receiveValue: { [weak self] refs in
-                    self?.references = refs
+                receiveValue: { [weak self] rows in
+                    guard let self else { return }
+                    self.references = rows
+                    self.allLoaded = rows.count < self.pageSize
+                }
+            )
+
+        // Observe total count separately (cheap COUNT(*) query).
+        countObserverCancellable = db
+            .observeReferenceCount(scope: scope, filter: filter)
+            .sink(
+                receiveCompletion: { _ in },
+                receiveValue: { [weak self] count in
+                    self?.totalReferenceCount = count
                 }
             )
     }
@@ -208,38 +247,91 @@ final class LibraryViewModel: ObservableObject {
     }
 
     /// Convenience accessor — references are already filtered by the DB query.
-    var filteredReferences: [Reference] { references }
+    var filteredReferences: [ReferenceListRow] { references }
 
-    /// Top title keywords extracted from all reference titles.
-    var titleKeywords: [(word: String, count: Int)] {
-        let stopWords: Set<String> = [
-            // English
-            "the", "and", "for", "with", "from", "that", "this", "are", "was",
-            "were", "been", "being", "have", "has", "had", "not", "but", "its",
-            "can", "may", "will", "should", "could", "would", "into", "than",
-            "also", "where", "when", "how", "what", "which", "who", "whom",
-            "why", "all", "any", "each", "every", "both", "few", "more",
-            "most", "other", "some", "such", "only", "own", "same", "then",
-            "too", "very", "just", "about", "above", "after", "again",
-            "below", "between", "during", "further", "here", "once", "there",
-            "these", "those", "through", "under", "until", "while",
-            "over", "out", "off", "down", "before", "our", "your", "his",
-            "her", "their", "its", "does", "did", "doing",
-            "using", "based", "via", "new", "one", "two", "study", "analysis",
-            "case", "approach", "method", "model", "data", "results", "review",
-            "research", "paper", "effect", "effects", "use",
-            // Chinese
-            "的", "了", "在", "是", "我", "有", "和", "就", "不", "人",
-            "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去",
-            "你", "会", "着", "没有", "看", "好", "自己", "这", "他", "她",
-            "对", "中", "与", "及", "或", "等", "基于", "研究", "分析",
-        ]
+    /// Load the next page of list rows when the user scrolls near the bottom.
+    func loadMoreIfNeeded(currentItem: ReferenceListRow) {
+        guard !allLoaded, !isLoadingMore else { return }
+        // Trigger when the user reaches the last 5 items.
+        let thresholdIndex = references.index(references.endIndex, offsetBy: -5, limitedBy: references.startIndex) ?? references.startIndex
+        guard let currentIndex = references.firstIndex(where: { $0.id == currentItem.id }),
+              currentIndex >= thresholdIndex else { return }
 
+        let scope = currentReferenceScope
+        var filter = activeFilter
+        if case .titleKeyword(let word) = selectedSidebar {
+            filter.keyword = word
+            filter.titleOnly = true
+        }
+
+        let expectedOffset = references.count
+        let queryToken = currentQueryToken
+        let db = self.db
+        let pageSize = self.pageSize
+        isLoadingMore = true
+
+        loadMoreTask = Task {
+            do {
+                let nextPage = try await Task.detached(priority: .utility) {
+                    try db.fetchReferenceListRows(
+                        scope: scope,
+                        filter: filter,
+                        limit: pageSize,
+                        offset: expectedOffset
+                    )
+                }.value
+
+                guard !Task.isCancelled,
+                      queryToken == currentQueryToken,
+                      references.count == expectedOffset else { return }
+
+                if nextPage.isEmpty {
+                    allLoaded = true
+                } else {
+                    references.append(contentsOf: nextPage)
+                    if nextPage.count < pageSize { allLoaded = true }
+                }
+            } catch is CancellationError {
+                // The query changed while loading the next page.
+            } catch {
+                guard queryToken == currentQueryToken else { return }
+                errorMessage = "Load more failed: \(error.localizedDescription)"
+            }
+
+            if queryToken == currentQueryToken {
+                isLoadingMore = false
+                loadMoreTask = nil
+            }
+        }
+    }
+
+    private func scheduleTitleKeywordRebuild(for titles: [String]) {
+        titleKeywordTask?.cancel()
+
+        if titles.isEmpty {
+            titleKeywords = []
+            return
+        }
+
+        titleKeywordTask = Task { [titles] in
+            let keywords = await Task.detached(priority: .utility) {
+                Self.computeTitleKeywords(from: titles)
+            }.value
+
+            guard !Task.isCancelled else { return }
+            titleKeywords = keywords
+        }
+    }
+
+    nonisolated static func computeTitleKeywords(from titles: [String]) -> [(word: String, count: Int)] {
         var freq: [String: Int] = [:]
-        for title in allReferenceTitles {
-            let lower = title.lowercased()
-            let words = lower.components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .filter { $0.count >= 2 && !stopWords.contains($0) }
+
+        for title in titles {
+            let words = title
+                .lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count >= 2 && !titleKeywordStopWords.contains($0) }
+
             for word in Set(words) {
                 freq[word, default: 0] += 1
             }
@@ -247,27 +339,32 @@ final class LibraryViewModel: ObservableObject {
 
         return freq
             .filter { $0.value >= 2 }
-            .sorted { $0.value > $1.value }
+            .sorted { lhs, rhs in
+                if lhs.value == rhs.value {
+                    return lhs.key < rhs.key
+                }
+                return lhs.value > rhs.value
+            }
             .prefix(15)
             .map { (word: $0.key, count: $0.value) }
     }
 
-    func moveReferences(_ refs: [Reference], toCollectionId: Int64?) {
-        let ids = refs.compactMap(\.id)
+    func moveReferences(ids: Set<Int64>, toCollectionId: Int64?) {
         do {
-            try db.moveReferences(ids: ids, toCollectionId: toCollectionId)
+            try db.moveReferences(ids: Array(ids), toCollectionId: toCollectionId)
         } catch {
             errorMessage = "Move failed: \(error.localizedDescription)"
         }
     }
 
-    func deleteReferences(_ refs: [Reference]) {
-        let ids = refs.compactMap(\.id)
+    func deleteReferences(ids: Set<Int64>) {
+        let idArray = Array(ids)
         do {
-            let pdfPaths = try db.deleteReferencesReturningPDFPaths(ids: ids)
+            let pdfPaths = try db.deleteReferencesReturningPDFPaths(ids: idArray)
             for path in pdfPaths {
                 PDFService.deletePDF(at: path)
             }
+            WordAddinServer.shared.invalidateRenderCache()
         } catch {
             errorMessage = "Delete failed: \(error.localizedDescription)"
         }
@@ -277,6 +374,7 @@ final class LibraryViewModel: ObservableObject {
         ref.dateModified = Date()
         do {
             try db.saveReference(&ref)
+            WordAddinServer.shared.invalidateRenderCache()
         } catch {
             errorMessage = "Save failed: \(error.localizedDescription)"
         }
@@ -325,6 +423,12 @@ final class LibraryViewModel: ObservableObject {
         } catch {
             errorMessage = "Delete failed: \(error.localizedDescription)"
         }
+    }
+
+    deinit {
+        searchDebounceTask?.cancel()
+        titleKeywordTask?.cancel()
+        loadMoreTask?.cancel()
     }
 
     func saveCollection(_ col: inout Collection) {
@@ -429,7 +533,31 @@ final class LibraryViewModel: ObservableObject {
     }
 }
 
+private let titleKeywordStopWords: Set<String> = [
+    // English
+    "the", "and", "for", "with", "from", "that", "this", "are", "was",
+    "were", "been", "being", "have", "has", "had", "not", "but", "its",
+    "can", "may", "will", "should", "could", "would", "into", "than",
+    "also", "where", "when", "how", "what", "which", "who", "whom",
+    "why", "all", "any", "each", "every", "both", "few", "more",
+    "most", "other", "some", "such", "only", "own", "same", "then",
+    "too", "very", "just", "about", "above", "after", "again",
+    "below", "between", "during", "further", "here", "once", "there",
+    "these", "those", "through", "under", "until", "while",
+    "over", "out", "off", "down", "before", "our", "your", "his",
+    "her", "their", "its", "does", "did", "doing",
+    "using", "based", "via", "new", "one", "two", "study", "analysis",
+    "case", "approach", "method", "model", "data", "results", "review",
+    "research", "paper", "effect", "effects", "use",
+    // Chinese
+    "的", "了", "在", "是", "我", "有", "和", "就", "不", "人",
+    "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去",
+    "你", "会", "着", "没有", "看", "好", "自己", "这", "他", "她",
+    "对", "中", "与", "及", "或", "等", "基于", "研究", "分析",
+]
+
 struct ContentView: View {
+    @Environment(\.openSettings) private var openSettings
     @StateObject private var viewModel = LibraryViewModel()
     @StateObject private var cnkiMetadataProvider = CNKIMetadataProvider()
     @StateObject private var onboarding = OnboardingManager.shared
@@ -459,10 +587,7 @@ struct ContentView: View {
         MetadataResolver(cnkiProvider: cnkiMetadataProvider)
     }
 
-    private var selectedReference: Reference? {
-        guard let selectedId else { return nil }
-        return viewModel.filteredReferences.first { $0.id == selectedId }
-    }
+    @State private var selectedReference: Reference?
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -471,7 +596,7 @@ struct ContentView: View {
                 tags: viewModel.tags,
                 titleKeywords: viewModel.titleKeywords,
                 selection: $viewModel.selectedSidebar,
-                referenceCount: viewModel.references.count,
+                referenceCount: viewModel.totalReferenceCount,
                 onDeleteCollection: { viewModel.deleteCollection(id: $0) },
                 onDeleteTag: { viewModel.deleteTag(id: $0) },
                 onAddCollection: { showAddCollection = true }
@@ -483,53 +608,18 @@ struct ContentView: View {
                 collections: viewModel.collections,
                 selectedId: selectedId,
                 onSelect: { selectedId = $0 },
-                onDelete: { deleteReferences($0) },
-                onMove: { refs, colId in viewModel.moveReferences(refs, toCollectionId: colId) },
-                onRefreshMetadata: { refs in refreshMetadata(for: refs) },
+                onDelete: { ids in deleteReferences(ids: ids) },
+                onMove: { ids, colId in viewModel.moveReferences(ids: ids, toCollectionId: colId) },
+                onRefreshMetadata: { ids in refreshMetadataForIDs(ids) },
                 isRefreshingMetadata: viewModel.isImporting,
                 onDoubleClick: { refId in
                     openReader(for: refId)
-                }
+                },
+                onLoadMore: { item in viewModel.loadMoreIfNeeded(currentItem: item) }
             )
             .navigationSplitViewColumnWidth(min: 280, ideal: 350, max: 500)
         } detail: {
-            if let ref = selectedReference {
-                ReferenceDetailView(
-                    reference: ref,
-                    collections: viewModel.collections,
-                    allTags: viewModel.tags,
-                    db: viewModel.db,
-                    onSave: { updated in
-                        var r = updated
-                        viewModel.saveReference(&r)
-                    },
-                    onDelete: {
-                        deleteReferences([ref])
-                    },
-                    onOpenPDFReader: { r in
-                        ReaderWindowManager.shared.openPDFReader(for: r)
-                    },
-                    onOpenWebReader: { r in
-                        ReaderWindowManager.shared.openWebReader(for: r)
-                    }
-                )
-            } else if selectedId != nil {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "books.vertical")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("选择一篇文献")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                    Text("共 \(viewModel.references.count) 篇文献")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-                .coachMarkAnchor(.citationStyle)
-            }
+            detailSection
         }
         .toolbar(content: {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -541,64 +631,57 @@ struct ContentView: View {
                 .help("搜索文献")
                 .keyboardShortcut("f", modifiers: .command)
 
-                ControlGroup {
-                    Button(action: {
-                        addReferenceInitialType = .journalArticle
-                        showAddReference = true
-                    }) {
-                        Label("手动新建", systemImage: "square.and.pencil")
-                    }
-                    .help("新建一个空白条目并手动填写信息")
+                Button(action: {
+                    addReferenceInitialType = .journalArticle
+                    showAddReference = true
+                }) {
+                    Label("手动新建", systemImage: "square.and.pencil")
+                }
+                .help("新建一个空白条目并手动填写信息")
 
-                    Button(action: {
-                        showWebImport = true
-                    }) {
+                Menu {
+                    Button(action: { showWebImport = true }) {
                         Label("网页剪藏", systemImage: "globe")
                     }
-                    .help("输入网页链接，使用内置 Obsidian Clipper 抓取标题、摘要和正文")
+                    Button(action: { showAddByIdentifier = true }) {
+                        Label("按标识导入…", systemImage: "text.magnifyingglass")
+                    }
+                    Button(action: { importPDFWithMetadata() }) {
+                        Label("导入 PDF…", systemImage: "doc.badge.plus")
+                    }
+                    Divider()
+                    Button("批量按标识导入…") { showBatchImport = true }
+                    Button("导入 BibTeX (.bib)…") { importBibTeX() }
+                    Button("导入 RIS (.ris)…") { importRIS() }
+                    Divider()
+                    Button("导入引文样式 (.csl)…") { importCitationStyles() }
+                } label: {
+                    Label("导入", systemImage: "tray.and.arrow.down")
                 }
+                .help("导入文献或文件")
+                .disabled(viewModel.isImporting)
+                .coachMarkAnchor(.toolbarImport)
 
-                ControlGroup {
-                    Button(action: { showPendingMetadataQueue = true }) {
-                        HStack(spacing: 6) {
-                            Label("待确认队列", systemImage: "clock.badge.exclamationmark")
-                            if !viewModel.pendingMetadataIntakes.isEmpty {
-                                Text("\(viewModel.pendingMetadataIntakes.count)")
-                                    .font(.caption2.weight(.semibold))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.orange.opacity(0.18), in: Capsule())
-                                    .foregroundStyle(.orange)
-                            }
+                Button(action: { showPendingMetadataQueue = true }) {
+                    HStack(spacing: 6) {
+                        Label("待确认队列", systemImage: "clock.badge.exclamationmark")
+                        if !viewModel.pendingMetadataIntakes.isEmpty {
+                            Text("\(viewModel.pendingMetadataIntakes.count)")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.orange.opacity(0.18), in: Capsule())
+                                .foregroundStyle(.orange)
                         }
                     }
-                    .help("打开待确认元数据队列，继续选候选、处理验证码或人工确认")
-                    .disabled(viewModel.pendingMetadataIntakes.isEmpty)
-
-                    Button(action: { showAddByIdentifier = true }) {
-                        Label("按标识导入", systemImage: "text.magnifyingglass")
-                    }
-                    .help("输入 DOI、PMID 或 arXiv ID，自动导入条目元数据")
-
-                    Button(action: { importPDFWithMetadata() }) {
-                        Label("导入 PDF", systemImage: "doc.badge.plus")
-                    }
-                    .help("导入 PDF，并尽量自动补全文献信息")
-
-                    Menu {
-                        Button("批量按标识导入…") { showBatchImport = true }
-                        Divider()
-                        Button("导入 BibTeX (.bib)…") { importBibTeX() }
-                        Button("导入 RIS (.ris)…") { importRIS() }
-                        Divider()
-                        Button("导入引文样式 (.csl)…") { importCitationStyles() }
-                    } label: {
-                        Label("更多导入", systemImage: "tray.and.arrow.down")
-                    }
-                    .help("打开更多导入方式")
-                    .disabled(viewModel.isImporting)
                 }
-                .coachMarkAnchor(.toolbarImport)
+                .help("打开待确认元数据队列，继续选候选、处理验证码或人工确认")
+                .disabled(viewModel.pendingMetadataIntakes.isEmpty)
+
+                Button(action: { openSettings() }) {
+                    Label("设置", systemImage: "gearshape")
+                }
+                .help("打开设置 (⌘,)")
             }
 
         })
@@ -655,7 +738,8 @@ struct ContentView: View {
                         selectedId = ref.id
                     },
                     onDeleteMultiple: { refs in
-                        deleteReferences(refs)
+                        let ids = Set(refs.compactMap(\.id))
+                        deleteReferences(ids: ids)
                     }
                 )
             }
@@ -800,10 +884,10 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: cslImportMessage)
         .animation(.easeInOut(duration: 0.2), value: pendingQueueNotice)
         .onChange(of: viewModel.references) { _, newRefs in
-            guard let selectedId else { return }
-            if !newRefs.contains(where: { $0.id == selectedId }) {
-                self.selectedId = nil
-            }
+            syncSelectedReference(visibleRows: newRefs)
+        }
+        .onChange(of: selectedId) { _, newId in
+            loadSelectedReference(for: newId)
         }
 
         .onReceive(NotificationCenter.default.publisher(for: .swiftLibClipImported)) { note in
@@ -1180,12 +1264,79 @@ struct ContentView: View {
         }
     }
 
-    private func deleteReferences(_ references: [Reference]) {
-        let ids = references.compactMap(\.id)
+    private func deleteReferences(ids: Set<Int64>) {
         if let selectedId, ids.contains(selectedId) {
             self.selectedId = nil
+            self.selectedReference = nil
         }
-        viewModel.deleteReferences(references)
+        viewModel.deleteReferences(ids: ids)
+    }
+
+    @ViewBuilder
+    private var detailSection: some View {
+        if let ref = selectedReference {
+            ReferenceDetailView(
+                reference: ref,
+                collections: viewModel.collections,
+                allTags: viewModel.tags,
+                db: viewModel.db,
+                onSave: { updated in
+                    var r = updated
+                    viewModel.saveReference(&r)
+                    selectedReference = r
+                },
+                onDelete: {
+                    if let id = ref.id {
+                        deleteReferences(ids: Set([id]))
+                    }
+                },
+                onOpenPDFReader: { r in
+                    ReaderWindowManager.shared.openPDFReader(for: r)
+                },
+                onOpenWebReader: { r in
+                    ReaderWindowManager.shared.openWebReader(for: r)
+                }
+            )
+        } else if selectedId != nil {
+            ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            VStack(spacing: 12) {
+                Image(systemName: "books.vertical")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.tertiary)
+                Text("选择一篇文献")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                Text("共 \(viewModel.totalReferenceCount) 篇文献")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .coachMarkAnchor(.citationStyle)
+        }
+    }
+
+    private func syncSelectedReference(visibleRows refs: [ReferenceListRow]) {
+        guard let selectedId else { return }
+        if !refs.contains(where: { $0.id == selectedId }) {
+            self.selectedId = nil
+            self.selectedReference = nil
+        } else {
+            selectedReference = try? viewModel.db.fetchReference(id: selectedId)
+        }
+    }
+
+    private func loadSelectedReference(for id: Int64?) {
+        if let id {
+            selectedReference = try? viewModel.db.fetchReference(id: id)
+        } else {
+            selectedReference = nil
+        }
+    }
+
+    private func refreshMetadataForIDs(_ ids: Set<Int64>) {
+        guard let refs = try? viewModel.db.fetchReferences(ids: Array(ids)) else { return }
+        refreshMetadata(for: refs)
     }
 
     private func openReader(for referenceID: Int64) {

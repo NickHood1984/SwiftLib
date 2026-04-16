@@ -39,6 +39,32 @@ public enum MetadataFetcher {
         responseCache.setObject(CachedReference(ref), forKey: key as NSString)
     }
 
+    // MARK: - In-flight Request Coalescing
+
+    /// Actor that ensures concurrent requests for the same identifier share a single
+    /// in-flight network call instead of duplicating API traffic.
+    private actor InFlightCoalescer {
+        static let shared = InFlightCoalescer()
+        private var tasks: [String: Task<Reference, Error>] = [:]
+        private var optionalTasks: [String: Task<Reference?, Error>] = [:]
+
+        func dedupedFetch(key: String, fetch: @Sendable @escaping () async throws -> Reference) async throws -> Reference {
+            if let existing = tasks[key] { return try await existing.value }
+            let task = Task<Reference, Error> { try await fetch() }
+            tasks[key] = task
+            defer { tasks[key] = nil }
+            return try await task.value
+        }
+
+        func dedupedOptionalFetch(key: String, fetch: @Sendable @escaping () async throws -> Reference?) async throws -> Reference? {
+            if let existing = optionalTasks[key] { return try await existing.value }
+            let task = Task<Reference?, Error> { try await fetch() }
+            optionalTasks[key] = task
+            defer { optionalTasks[key] = nil }
+            return try await task.value
+        }
+    }
+
     /// User-Agent header value. Includes mailto when a contact email is configured.
     private static var userAgent: String {
         let email = contactEmail.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -127,36 +153,38 @@ public enum MetadataFetcher {
         let cacheKey = "doi:\(doi)"
         if let cached = cachedReference(for: cacheKey) { return cached }
 
-        let encoded = doi.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? doi
-        let urlString = "https://api.crossref.org/works/\(encoded)"
-        guard let url = URL(string: urlString) else {
-            throw FetchError.invalidURL
-        }
-
-        var ref = try await withRetry {
-            var request = URLRequest(url: url)
-            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-            request.timeoutInterval = 15
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                throw FetchError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
+        return try await InFlightCoalescer.shared.dedupedFetch(key: cacheKey) {
+            let encoded = doi.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? doi
+            let urlString = "https://api.crossref.org/works/\(encoded)"
+            guard let url = URL(string: urlString) else {
+                throw FetchError.invalidURL
             }
-            return try parseCrossrefResponse(data, doi: doi)
+
+            var ref = try await withRetry {
+                var request = URLRequest(url: url)
+                request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                request.timeoutInterval = 15
+
+                let (data, response) = try await NetworkClient.session.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                    throw FetchError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
+                }
+                return try parseCrossrefResponse(data, doi: doi)
+            }
+
+            // Crossref often lacks abstract (Nature, etc.) — fetch from S2 and OpenAlex in parallel, take first success
+            if ref.abstract == nil || ref.abstract?.isEmpty == true {
+                async let s2Abstract = try? fetchAbstractFromSemanticScholar(doi: doi)
+                async let oaAbstract = try? fetchAbstractFromOpenAlex(doi: doi)
+
+                let (s2, oa) = await (s2Abstract, oaAbstract)
+                // Prefer Semantic Scholar (tends to be higher quality for STEM)
+                ref.abstract = s2 ?? oa
+            }
+
+            cacheReference(ref, for: cacheKey)
+            return ref
         }
-
-        // Crossref often lacks abstract (Nature, etc.) — fetch from S2 and OpenAlex in parallel, take first success
-        if ref.abstract == nil || ref.abstract?.isEmpty == true {
-            async let s2Abstract = try? fetchAbstractFromSemanticScholar(doi: doi)
-            async let oaAbstract = try? fetchAbstractFromOpenAlex(doi: doi)
-
-            let (s2, oa) = await (s2Abstract, oaAbstract)
-            // Prefer Semantic Scholar (tends to be higher quality for STEM)
-            ref.abstract = s2 ?? oa
-        }
-
-        cacheReference(ref, for: cacheKey)
-        return ref
     }
 
     // MARK: - OpenAlex Abstract Fallback
@@ -171,7 +199,7 @@ public enum MetadataFetcher {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 10
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await NetworkClient.session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             return nil
         }
@@ -204,7 +232,7 @@ public enum MetadataFetcher {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 10
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await NetworkClient.session.data(for: request)
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
@@ -338,25 +366,27 @@ public enum MetadataFetcher {
         let cacheKey = "pmid:\(pmid)"
         if let cached = cachedReference(for: cacheKey) { return cached }
 
-        let urlString = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=\(pmid)&retmode=json"
-        guard let url = URL(string: urlString) else {
-            throw FetchError.invalidURL
-        }
-
-        let ref = try await withRetry {
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 15
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                throw FetchError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
+        return try await InFlightCoalescer.shared.dedupedFetch(key: cacheKey) {
+            let urlString = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=\(pmid)&retmode=json"
+            guard let url = URL(string: urlString) else {
+                throw FetchError.invalidURL
             }
 
-            return try parsePubMedResponse(data, pmid: pmid)
-        }
+            let ref = try await withRetry {
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 15
 
-        cacheReference(ref, for: cacheKey)
-        return ref
+                let (data, response) = try await NetworkClient.session.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                    throw FetchError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
+                }
+
+                return try parsePubMedResponse(data, pmid: pmid)
+            }
+
+            cacheReference(ref, for: cacheKey)
+            return ref
+        }
     }
 
     static func parsePubMedResponse(_ data: Data, pmid: String) throws -> Reference {
@@ -416,25 +446,27 @@ public enum MetadataFetcher {
         let cacheKey = "arxiv:\(arxivId)"
         if let cached = cachedReference(for: cacheKey) { return cached }
 
-        let urlString = "https://export.arxiv.org/api/query?id_list=\(arxivId)&max_results=1"
-        guard let url = URL(string: urlString) else {
-            throw FetchError.invalidURL
-        }
-
-        let ref = try await withRetry {
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 15
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                throw FetchError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
+        return try await InFlightCoalescer.shared.dedupedFetch(key: cacheKey) {
+            let urlString = "https://export.arxiv.org/api/query?id_list=\(arxivId)&max_results=1"
+            guard let url = URL(string: urlString) else {
+                throw FetchError.invalidURL
             }
 
-            return try parseArXivResponse(data, arxivId: arxivId)
-        }
+            let ref = try await withRetry {
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 15
 
-        cacheReference(ref, for: cacheKey)
-        return ref
+                let (data, response) = try await NetworkClient.session.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                    throw FetchError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
+                }
+
+                return try parseArXivResponse(data, arxivId: arxivId)
+            }
+
+            cacheReference(ref, for: cacheKey)
+            return ref
+        }
     }
 
     static func parseArXivResponse(_ data: Data, arxivId: String) throws -> Reference {
@@ -458,7 +490,7 @@ public enum MetadataFetcher {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 10
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await NetworkClient.session.data(for: request)
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let results = json["results"] as? [[String: Any]],
               let work = results.first else {
@@ -552,19 +584,21 @@ public enum MetadataFetcher {
         let cacheKey = "isbn:\(isbn)"
         if let cached = cachedReference(for: cacheKey) { return cached }
 
-        // Open Library: free, no API key, dedicated book database
-        if let ref = try? await fetchFromOpenLibrary(isbn: isbn) {
-            cacheReference(ref, for: cacheKey)
-            return ref
-        }
+        return try await InFlightCoalescer.shared.dedupedFetch(key: cacheKey) {
+            // Open Library: free, no API key, dedicated book database
+            if let ref = try? await fetchFromOpenLibrary(isbn: isbn) {
+                cacheReference(ref, for: cacheKey)
+                return ref
+            }
 
-        // Fallback: Google Books (1000 req/day unauthenticated)
-        if let ref = try? await fetchFromGoogleBooks(isbn: isbn) {
-            cacheReference(ref, for: cacheKey)
-            return ref
-        }
+            // Fallback: Google Books (1000 req/day unauthenticated)
+            if let ref = try? await fetchFromGoogleBooks(isbn: isbn) {
+                cacheReference(ref, for: cacheKey)
+                return ref
+            }
 
-        throw FetchError.httpError(404)
+            throw FetchError.httpError(404)
+        }
     }
 
     private static func fetchFromOpenLibrary(isbn: String) async throws -> Reference? {
@@ -575,7 +609,7 @@ public enum MetadataFetcher {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 15
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await NetworkClient.session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else { return nil }
 
@@ -629,7 +663,7 @@ public enum MetadataFetcher {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 15
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await NetworkClient.session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else { return nil }
 
@@ -678,17 +712,19 @@ public enum MetadataFetcher {
         let cacheKey = "book-title:\(normalized.lowercased())"
         if let cached = cachedReference(for: cacheKey) { return cached }
 
-        if let ref = try? await searchOpenLibraryByTitle(normalized) {
-            cacheReference(ref, for: cacheKey)
-            return ref
-        }
+        return try await InFlightCoalescer.shared.dedupedOptionalFetch(key: cacheKey) {
+            if let ref = try? await searchOpenLibraryByTitle(normalized) {
+                cacheReference(ref, for: cacheKey)
+                return ref
+            }
 
-        if let ref = try? await searchGoogleBooksByTitle(normalized) {
-            cacheReference(ref, for: cacheKey)
-            return ref
-        }
+            if let ref = try? await searchGoogleBooksByTitle(normalized) {
+                cacheReference(ref, for: cacheKey)
+                return ref
+            }
 
-        return nil
+            return nil
+        }
     }
 
     private static func searchOpenLibraryByTitle(_ title: String) async throws -> Reference? {
@@ -699,7 +735,7 @@ public enum MetadataFetcher {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 15
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await NetworkClient.session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else { return nil }
 
@@ -742,7 +778,7 @@ public enum MetadataFetcher {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 15
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await NetworkClient.session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else { return nil }
 
@@ -892,11 +928,13 @@ public enum MetadataFetcher {
                     return 1_000_000_000 // 1s base for server errors
                 }()
                 let delay = baseDelay * UInt64(1 << attempt) // exponential: 1s, 2s, 4s or 3s, 6s, 12s
-                try await Task.sleep(nanoseconds: delay)
+                let jitteredDelay = UInt64(Double(delay) * Double.random(in: 0.5...1.5))
+                try await Task.sleep(nanoseconds: jitteredDelay)
             } catch let error as URLError where error.code == .timedOut || error.code == .networkConnectionLost {
                 lastError = error
                 let delay: UInt64 = 1_000_000_000 * UInt64(1 << attempt)
-                try await Task.sleep(nanoseconds: delay)
+                let jitteredDelay = UInt64(Double(delay) * Double.random(in: 0.5...1.5))
+                try await Task.sleep(nanoseconds: jitteredDelay)
             }
         }
         throw lastError!
