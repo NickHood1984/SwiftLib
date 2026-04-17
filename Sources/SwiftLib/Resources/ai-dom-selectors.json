@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "lastUpdated": "2026-04-13",
+  "lastUpdated": "2026-04-16",
   "services": [
     {
       "id": "chatgpt",
@@ -11,7 +11,7 @@
       "responseSelector": "div.agent-turn",
       "contentSelector": "div.markdown",
       "streamingSelector": "div[class*='stream']",
-      "notes": "已验证 2026-04-13"
+      "notes": "已验证 2026-04-16（ChatGPT 网页新 DOM）"
     },
     {
       "id": "deepseek",
@@ -22,7 +22,7 @@
       "responseSelector": "div.ds-message",
       "contentSelector": "div.ds-markdown",
       "streamingSelector": "div[class*='loading']",
-      "notes": "已验证 2026-04-13"
+      "notes": "已验证 2026-04-16（DeepSeek 网页新 DOM）"
     },
     {
       "id": "doubao",
@@ -33,18 +33,18 @@
       "responseSelector": "div[class*='flow-markdown-body']",
       "contentSelector": "div[class*='flow-markdown-body']",
       "streamingSelector": "div[class*='loading']",
-      "notes": "已验证 2026-04-13"
+      "notes": "已验证 2026-04-16（豆包网页新 DOM）"
     },
     {
       "id": "kimi",
       "name": "Kimi",
-      "urlPattern": "kimi",
-      "inputSelector": "div[contenteditable='true']",
+      "urlPattern": "kimi.com",
+      "inputSelector": "div[role='textbox']",
       "sendSelector": "Enter",
       "responseSelector": "div.chat-content-item.chat-content-item-assistant",
       "contentSelector": "div.markdown",
       "streamingSelector": "",
-      "notes": "已验证 2026-04-13；kimi.moonshot.cn 和 kimi.com 均匹配"
+      "notes": "已验证 2026-04-16；主站已切到 kimi.com，输入框为 div.chat-input-editor[role='textbox']；弹窗视频可能短暂拦截点击"
     }
   ]
 }
