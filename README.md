@@ -216,14 +216,14 @@ swift run SwiftLib
 ./scripts/sparkle-tools.sh generate-keys
 
 # 2. 构建 release 包
-APP_VERSION=1.2.0 ./scripts/build-app.sh release
+APP_VERSION=1.2.1 ./scripts/build-app.sh release
 
 # 3. 生成 GitHub Pages 用的 appcast.xml
-APP_VERSION=1.2.0 ./scripts/publish-appcast.sh
+APP_VERSION=1.2.1 ./scripts/publish-appcast.sh
 ```
 
 之后需要：
-- 将 `build/SwiftLib-1.2.0.dmg` 上传到 GitHub Release `v1.2.0`
+- 将 `build/SwiftLib-1.2.1.dmg` 上传到 GitHub Release `v1.2.1`
 - 将 GitHub Pages 的发布源设为仓库根目录（`main / root`）
 - 把 `Docs/appcast.xml` 推到仓库
 - 如果你提供了发布说明文件，再把 `Docs/releases/` 一并推上去
