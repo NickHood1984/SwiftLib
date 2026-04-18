@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "lastUpdated": "2026-04-16",
+  "version": 4,
+  "lastUpdated": "2026-04-18",
   "services": [
     {
       "id": "chatgpt",
@@ -39,12 +39,12 @@
       "id": "kimi",
       "name": "Kimi",
       "urlPattern": "kimi.com",
-      "inputSelector": "div[role='textbox']",
+      "inputSelector": "div.chat-input-editor[role='textbox']",
       "sendSelector": "Enter",
       "responseSelector": "div.chat-content-item.chat-content-item-assistant",
-      "contentSelector": "div.markdown",
+      "contentSelector": "div.markdown-container",
       "streamingSelector": "",
-      "notes": "已验证 2026-04-16；主站已切到 kimi.com，输入框为 div.chat-input-editor[role='textbox']；弹窗视频可能短暂拦截点击"
+      "notes": "已验证 2026-04-18；主站为 kimi.com，输入框稳定命中 div.chat-input-editor[role='textbox']；助手回复命中 div.chat-content-item.chat-content-item-assistant > div.markdown-container；未确认稳定 streaming selector，继续使用文本稳定回退；首页视频/活动浮层可能短暂拦截点击"
     }
   ]
 }
