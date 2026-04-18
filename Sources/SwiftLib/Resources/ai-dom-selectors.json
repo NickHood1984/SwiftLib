@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "lastUpdated": "2026-04-18",
   "services": [
     {
@@ -10,8 +10,8 @@
       "sendSelector": "button[data-testid='send-button']",
       "responseSelector": "div.agent-turn",
       "contentSelector": "div.markdown",
-      "streamingSelector": "div[class*='stream']",
-      "notes": "已验证 2026-04-16（ChatGPT 网页新 DOM）"
+      "streamingSelector": "",
+      "notes": "已验证 2026-04-18（ChatGPT 网页新 DOM）；输入框稳定命中 #prompt-textarea，发送按钮稳定命中 button[data-testid='send-button']；div[class*='stream'] 会长期命中非流式容器，已改为留空并回退到文本稳定策略"
     },
     {
       "id": "deepseek",
