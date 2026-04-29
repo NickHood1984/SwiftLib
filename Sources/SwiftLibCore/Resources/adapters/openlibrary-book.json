@@ -1,0 +1,61 @@
+{
+  "id": "openlibrary-book",
+  "schemaVersion": 1,
+  "displayName": "Open Library",
+  "description": "Open Library has two relevant endpoints. `byIsbn` uses `/api/books?bibkeys=ISBN:<isbn>` which returns an object keyed by the input ISBN (`ISBN:9780132350884`) — this is why `itemsPath` itself is templated. `byTitle` uses `/search.json?title=...` which returns `{docs: [...]}`.",
+
+  "routes": {
+    "byIsbn": {
+      "url": "https://openlibrary.org/api/books?bibkeys=ISBN:{isbn}&format=json&jscmd=data",
+      "timeoutSeconds": 15,
+      "extract": {
+        "kind": "json",
+        "itemsPath": "ISBN:{isbn}",
+        "fields": {
+          "title":       { "paths": ["title"] },
+          "subtitle":    { "paths": ["subtitle"] },
+          "authors":     { "paths": ["authors[*].name"], "separator": "|" },
+          "publisher":   { "paths": ["publishers[*].name"], "separator": "|" },
+          "publishDate": { "paths": ["publish_date"] },
+          "year":        { "paths": ["publish_date"], "transform": "prefix4Int" },
+          "pageCount":   { "paths": ["number_of_pages"] },
+          "url":         { "paths": ["url"] },
+          "isbn10":      { "paths": ["identifiers.isbn_10[0]"] },
+          "isbn13":      { "paths": ["identifiers.isbn_13[0]"] },
+          "description": { "paths": ["excerpts[0].text", "notes"] }
+        }
+      }
+    },
+
+    "byTitle": {
+      "url": "https://openlibrary.org/search.json?title={title}&limit=3&fields=key,title,author_name,first_publish_year,isbn,publisher,number_of_pages_median",
+      "timeoutSeconds": 15,
+      "extract": {
+        "kind": "json",
+        "itemsPath": "docs",
+        "fields": {
+          "title":            { "paths": ["title"] },
+          "authors":          { "paths": ["author_name[*]"], "separator": "|" },
+          "year":             { "paths": ["first_publish_year"] },
+          "publisher":        { "paths": ["publisher[0]"] },
+          "pageCount":        { "paths": ["number_of_pages_median"] },
+          "isbnCandidates":   { "paths": ["isbn[*]"], "separator": "|" },
+          "key":              { "paths": ["key"] }
+        }
+      }
+    }
+  },
+
+  "canary": [
+    {
+      "name": "Clean Code (9780132350884) — byIsbn via dynamic root key",
+      "route": "byIsbn",
+      "context": { "isbn": "9780132350884" },
+      "expectSearch": {
+        "title": "Clean Code",
+        "publisher": "Prentice Hall",
+        "pageCount": "431"
+      }
+    }
+  ]
+}

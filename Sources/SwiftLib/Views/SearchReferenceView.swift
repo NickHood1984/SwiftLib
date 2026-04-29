@@ -206,6 +206,7 @@ struct SearchOverlay: View {
                             }
                             .padding(.vertical, 4)
                         }
+                        .swiftLibElegantScrollers()
                         .frame(maxHeight: 360)
                         .onChange(of: selectedIndex) { _, newValue in
                             if keyboardNavigated, let idx = newValue {

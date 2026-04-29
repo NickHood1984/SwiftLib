@@ -8,12 +8,13 @@ public enum VerificationStatus: String, Codable, CaseIterable, DatabaseValueConv
     case candidate
     case blocked
     case rejectedAmbiguous
+    case metadataEnriching
     case verifiedAuto
     case verifiedManual
 
     public var isLibraryReady: Bool {
         switch self {
-        case .verifiedAuto, .verifiedManual:
+        case .metadataEnriching, .verifiedAuto, .verifiedManual:
             return true
         case .legacy, .seedOnly, .candidate, .blocked, .rejectedAmbiguous:
             return false
@@ -24,7 +25,7 @@ public enum VerificationStatus: String, Codable, CaseIterable, DatabaseValueConv
         switch self {
         case .seedOnly, .candidate, .blocked, .rejectedAmbiguous:
             return true
-        case .legacy, .verifiedAuto, .verifiedManual:
+        case .legacy, .metadataEnriching, .verifiedAuto, .verifiedManual:
             return false
         }
     }
@@ -41,6 +42,8 @@ public enum VerificationStatus: String, Codable, CaseIterable, DatabaseValueConv
             return "抓取受阻"
         case .rejectedAmbiguous:
             return "验证未通过"
+        case .metadataEnriching:
+            return "补全中"
         case .verifiedAuto:
             return "自动验证"
         case .verifiedManual:
@@ -55,6 +58,15 @@ public enum AcceptedRuleID: String, Codable, CaseIterable, DatabaseValueConverti
     case j3CNKINoDOI = "J3_CNKI_NO_DOI"
     case t1ThesisSourceKey = "T1_THESIS_SOURCE_KEY"
     case b1ISBNOrRecordKey = "B1_ISBN_OR_RECORD_KEY"
+    /// B2: Book title search w/ strong title+author+year+publisher consensus,
+    /// no ISBN required. Designed for older Chinese books (Douban / Open Library)
+    /// where extra_attrs.isbn is missing but all bibliographic fields agree.
+    case b2BookTitleConsensus = "B2_BOOK_TITLE_CONSENSUS"
+    // v12 extended rules
+    case p1PreprintArxiv = "P1_PREPRINT_ARXIV"
+    case c1ConferenceRecordKey = "C1_CONFERENCE_RECORD_KEY"
+    case r1ReportRecordKey = "R1_REPORT_RECORD_KEY"
+    case d1DatasetDOI = "D1_DATASET_DOI"
 }
 
 public enum FetchMode: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
@@ -64,6 +76,8 @@ public enum FetchMode: String, Codable, CaseIterable, DatabaseValueConvertible, 
     case export
     case translator
     case manual
+    // v12: for parsed import data
+    case structured
 }
 
 public enum EvidenceOrigin: String, Codable, CaseIterable, Sendable {
@@ -158,6 +172,11 @@ public struct VerificationHints: Codable, Hashable, Sendable {
     public var usedIdentifierFetch: Bool
     public var exactIdentifierMatch: Bool
     public var competingCandidateCount: Int
+    // v12 enrichment hints
+    public var hasFundingInfo: Bool
+    public var hasKeywords: Bool
+    public var hasOaStatus: Bool
+    public var hasTopics: Bool
 
     public init(
         hasStructuredTitle: Bool = false,
@@ -171,7 +190,11 @@ public struct VerificationHints: Codable, Hashable, Sendable {
         usedStructuredDetail: Bool = false,
         usedIdentifierFetch: Bool = false,
         exactIdentifierMatch: Bool = false,
-        competingCandidateCount: Int = 0
+        competingCandidateCount: Int = 0,
+        hasFundingInfo: Bool = false,
+        hasKeywords: Bool = false,
+        hasOaStatus: Bool = false,
+        hasTopics: Bool = false
     ) {
         self.hasStructuredTitle = hasStructuredTitle
         self.hasStructuredAuthors = hasStructuredAuthors
@@ -185,6 +208,31 @@ public struct VerificationHints: Codable, Hashable, Sendable {
         self.usedIdentifierFetch = usedIdentifierFetch
         self.exactIdentifierMatch = exactIdentifierMatch
         self.competingCandidateCount = competingCandidateCount
+        self.hasFundingInfo = hasFundingInfo
+        self.hasKeywords = hasKeywords
+        self.hasOaStatus = hasOaStatus
+        self.hasTopics = hasTopics
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hasStructuredTitle = try container.decode(Bool.self, forKey: .hasStructuredTitle)
+        hasStructuredAuthors = try container.decode(Bool.self, forKey: .hasStructuredAuthors)
+        hasStructuredJournal = try container.decode(Bool.self, forKey: .hasStructuredJournal)
+        hasStructuredInstitution = try container.decode(Bool.self, forKey: .hasStructuredInstitution)
+        hasStructuredPages = try container.decode(Bool.self, forKey: .hasStructuredPages)
+        hasStructuredThesisType = try container.decode(Bool.self, forKey: .hasStructuredThesisType)
+        hasStableRecordKey = try container.decode(Bool.self, forKey: .hasStableRecordKey)
+        usedStructuredExport = try container.decode(Bool.self, forKey: .usedStructuredExport)
+        usedStructuredDetail = try container.decode(Bool.self, forKey: .usedStructuredDetail)
+        usedIdentifierFetch = try container.decode(Bool.self, forKey: .usedIdentifierFetch)
+        exactIdentifierMatch = try container.decode(Bool.self, forKey: .exactIdentifierMatch)
+        competingCandidateCount = try container.decode(Int.self, forKey: .competingCandidateCount)
+        // v12 fields default to false when absent (backward compat)
+        hasFundingInfo = try container.decodeIfPresent(Bool.self, forKey: .hasFundingInfo) ?? false
+        hasKeywords = try container.decodeIfPresent(Bool.self, forKey: .hasKeywords) ?? false
+        hasOaStatus = try container.decodeIfPresent(Bool.self, forKey: .hasOaStatus) ?? false
+        hasTopics = try container.decodeIfPresent(Bool.self, forKey: .hasTopics) ?? false
     }
 }
 
@@ -197,6 +245,15 @@ public struct EvidenceBundle: Codable, Hashable, Sendable {
     public var rawArtifacts: [RawArtifactManifest]
     public var fieldEvidence: [FieldEvidence]
     public var verificationHints: VerificationHints
+    // v12 enrichment fields
+    public var enrichmentSources: [MetadataSource]?
+    public var confidenceScore: Double?
+    public var keywords: [String]?
+    public var topics: [String]?
+    public var isOpenAccess: Bool?
+    public var oaUrl: String?
+    public var fundingInfo: [String]?
+    public var citedByCount: Int?
 
     public init(
         source: MetadataSource,
@@ -206,7 +263,15 @@ public struct EvidenceBundle: Codable, Hashable, Sendable {
         fetchMode: FetchMode,
         rawArtifacts: [RawArtifactManifest] = [],
         fieldEvidence: [FieldEvidence] = [],
-        verificationHints: VerificationHints = .init()
+        verificationHints: VerificationHints = .init(),
+        enrichmentSources: [MetadataSource]? = nil,
+        confidenceScore: Double? = nil,
+        keywords: [String]? = nil,
+        topics: [String]? = nil,
+        isOpenAccess: Bool? = nil,
+        oaUrl: String? = nil,
+        fundingInfo: [String]? = nil,
+        citedByCount: Int? = nil
     ) {
         self.source = source
         self.recordKey = recordKey?.trimmingCharacters(in: .whitespacesAndNewlines).swiftlib_nilIfBlank
@@ -216,6 +281,14 @@ public struct EvidenceBundle: Codable, Hashable, Sendable {
         self.rawArtifacts = rawArtifacts
         self.fieldEvidence = fieldEvidence
         self.verificationHints = verificationHints
+        self.enrichmentSources = enrichmentSources
+        self.confidenceScore = confidenceScore
+        self.keywords = keywords
+        self.topics = topics
+        self.isOpenAccess = isOpenAccess
+        self.oaUrl = oaUrl
+        self.fundingInfo = fundingInfo
+        self.citedByCount = citedByCount
     }
 
     public var bundleHash: String? {
@@ -389,6 +462,7 @@ public enum MetadataIntakeSourceKind: String, Codable, CaseIterable, DatabaseVal
     case manualEntry
     case refresh
     case batchIdentifier
+    case importFile
     case candidateSelection
 }
 

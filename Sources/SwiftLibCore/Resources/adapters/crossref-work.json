@@ -1,0 +1,63 @@
+{
+  "id": "crossref-work",
+  "schemaVersion": 1,
+  "displayName": "CrossRef",
+  "description": "CrossRef REST API. Root shape is `{\"status\":\"ok\",\"message\":{...}}` so `itemsPath` is `message` (root object treated as a 1-element list after wrapping). Notable quirks: title is an array (`title[0]`), subtitle is optional, date-parts is a nested array (`published-print.date-parts[0][0]`), abstract is JATS XML. Author lists can mix persons (given/family) and organizations (name) — we expose parallel arrays and let the Swift mapper zip+interleave.",
+
+  "routes": {
+    "byDoi": {
+      "url": "https://api.crossref.org/works/{doi}",
+      "timeoutSeconds": 15,
+      "extract": {
+        "kind": "json",
+        "itemsPath": "message",
+        "fields": {
+          "title":     { "paths": ["title[0]"] },
+          "subtitle":  { "paths": ["subtitle[0]"] },
+          "titleWithSubtitle": {
+            "template": "{title[0]}: {subtitle[0]}",
+            "elideIfMissing": ["subtitle[0]"]
+          },
+
+          "doi":       { "paths": ["DOI"], "transform": "lower" },
+          "type":      { "paths": ["type"] },
+          "journal":   { "paths": ["container-title[0]"] },
+          "publisher": { "paths": ["publisher"] },
+          "volume":    { "paths": ["volume"] },
+          "issue":     { "paths": ["issue"] },
+          "pages":     { "paths": ["page", "article-number"] },
+          "url":       { "paths": ["resource.primary.URL"] },
+
+          "authorsGiven":  { "paths": ["author[*].given"],  "separator": "||" },
+          "authorsFamily": { "paths": ["author[*].family"], "separator": "||" },
+          "authorsName":   { "paths": ["author[*].name"],   "separator": "||" },
+
+          "yearPrint":   { "paths": ["published-print.date-parts[0][0]"] },
+          "yearOnline":  { "paths": ["published-online.date-parts[0][0]"] },
+          "yearIssued":  { "paths": ["issued.date-parts[0][0]"] },
+          "yearCreated": { "paths": ["created.date-parts[0][0]"] },
+
+          "abstract":  { "paths": ["abstract"], "transform": "stripHtmlTags" }
+        }
+      }
+    }
+  },
+
+  "canary": [
+    {
+      "name": "Deep learning (10.1038/nature14539) — byDoi",
+      "route": "byDoi",
+      "context": { "doi": "10.1038/nature14539" },
+      "expectSearch": {
+        "title": "Deep learning",
+        "doi": "10.1038/nature14539",
+        "type": "journal-article",
+        "journal": "Nature",
+        "volume": "521",
+        "issue": "7553",
+        "pages": "436-444",
+        "yearPrint": "2015"
+      }
+    }
+  ]
+}

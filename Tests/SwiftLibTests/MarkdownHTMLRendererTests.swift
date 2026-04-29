@@ -93,4 +93,41 @@ final class MarkdownHTMLRendererTests: XCTestCase {
         XCTAssertTrue(html.contains("Filter feeder: pico- and nanoplankton <sup>a,b</sup>"))
         XCTAssertTrue(html.contains("Limited avoidance, adaptive tolerance <sup>1</sup>"))
     }
+
+    func testRenderPreservesMultilineRawHTMLTableBlock() {
+        let markdown = """
+        <table>
+        <tr><td>Taxon Group</td><td>Species</td></tr>
+        <tr><td>Daphniidae</td><td>Daphnia mendotae</td></tr>
+        </table>
+        """
+
+        let html = MarkdownHTMLRenderer.render(markdown: markdown, baseURL: nil)
+
+        XCTAssertTrue(html.contains("<table>"))
+        XCTAssertTrue(html.contains("<tr><td>Taxon Group</td><td>Species</td></tr>"))
+        XCTAssertFalse(html.contains("&lt;table&gt;"))
+    }
+
+    func testRenderWrapsTableRowFragmentsAsHTMLTable() {
+        let markdown = """
+        <tr><td>Taxon Group</td><td>Species</td></tr>
+        <tr><td>Daphniidae</td><td>Daphnia mendotae</td></tr>
+        """
+
+        let html = MarkdownHTMLRenderer.render(markdown: markdown, baseURL: nil)
+
+        XCTAssertTrue(html.contains("<table><tbody>"))
+        XCTAssertTrue(html.contains("<tr><td>Taxon Group</td><td>Species</td></tr>"))
+        XCTAssertFalse(html.contains("&lt;tr&gt;"))
+    }
+
+    func testRenderRecognizesRawHTMLPrefixedByZeroWidthSpace() {
+        let markdown = "\u{200B}<table><tr><td>A</td><td>B</td></tr></table>"
+
+        let html = MarkdownHTMLRenderer.render(markdown: markdown, baseURL: nil)
+
+        XCTAssertTrue(html.contains("<table>"))
+        XCTAssertFalse(html.contains("&lt;table&gt;"))
+    }
 }

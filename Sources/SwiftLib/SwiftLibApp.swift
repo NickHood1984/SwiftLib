@@ -142,6 +142,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Configure API contact email for CrossRef/OpenAlex polite pool
         MetadataFetcher.contactEmail = SwiftLibPreferences.apiContactEmail
 
+        // Register the WebView executor so that adapter routes with `kind: webView`
+        // (subscription-gated sources that need cookie-authenticated sessions)
+        // are handled by a hidden WKWebView instead of raw URLSession.
+        MetadataFetcher.webViewExecutor = WebViewAdapterExecutorImpl()
+
         // Pre-warm the JSCore engine for the style used in the last session,
         // so the first Word Add-in render request doesn't pay the cold-start cost.
         CiteprocJSCorePool.shared.warmUpLastUsed()
@@ -150,17 +155,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         try? WordAddinInstaller.install()
         try? WPSAddinInstaller.install()
         WordAddinServer.shared.start()
-
-        // Pre-warm translation backend so the first metadata resolve doesn't pay cold-start cost
-        Task.detached(priority: .utility) {
-            _ = try? await TranslationBackendProcessManager.shared.currentConnection()
-        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         WordAddinServer.shared.stop()
         ReaderWindowManager.shared.closeAll()
-        TranslationBackendProcessManager.shared.shutdownSync()
     }
 }
 

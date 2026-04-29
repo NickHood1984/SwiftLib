@@ -150,6 +150,55 @@ final class MetadataFetcherTests: XCTestCase {
         XCTAssertEqual(reference.authors[1].family, "Author")
     }
 
+    // MARK: - Douban Detail Page Parser
+
+    /// Fixture mimicking the live structure of
+    /// https://book.douban.com/subject/1554675/ (《高级水生生物学》).
+    /// Ensures the parser picks up ISBN (from meta tag), publisher, year, pages,
+    /// and the author list from the `#info` block even when fields are nested
+    /// in `<a>` tags.
+    func testParseDoubanDetailExtractsCoreFields() {
+        let html = """
+        <html><head>
+        <meta property="book:isbn" content="9787030069870" />
+        </head><body>
+        <div id="info">
+          <span><span class="pl"> 作者</span>:
+            <a class="" href="/author/">刘建康</a>
+          </span><br/>
+          <span class="pl">出版社:</span>
+            <a href="/press/" class="a_publisher">科学出版社</a><br/>
+          <span class="pl">出版年:</span> 1999-3<br/>
+          <span class="pl">页数:</span> 401<br/>
+          <span class="pl">定价:</span> 45.00元<br/>
+          <span class="pl">ISBN:</span> 9787030069870<br/>
+        </div>
+        <div id="link-report">
+          <div class="intro">
+            <p>这是一本关于高级水生生物学的研究生教材。</p>
+          </div>
+        </div>
+        </body></html>
+        """
+        let detail = MetadataFetcher.parseDoubanDetailHTML(html)
+        XCTAssertEqual(detail.isbn, "9787030069870")
+        XCTAssertEqual(detail.publisher, "科学出版社")
+        XCTAssertEqual(detail.year, 1999)
+        XCTAssertEqual(detail.pages, "401")
+        XCTAssertEqual(detail.authors.map { $0.displayName.trimmingCharacters(in: .whitespaces) }.first, "刘建康")
+        XCTAssertEqual(detail.abstract, "这是一本关于高级水生生物学的研究生教材。")
+    }
+
+    func testParseDoubanDetailReturnsEmptyWhenInfoBlockMissing() {
+        let html = "<html><body><h1>404 Not Found</h1></body></html>"
+        let detail = MetadataFetcher.parseDoubanDetailHTML(html)
+        XCTAssertNil(detail.isbn)
+        XCTAssertNil(detail.publisher)
+        XCTAssertNil(detail.year)
+        XCTAssertNil(detail.pages)
+        XCTAssertTrue(detail.authors.isEmpty)
+    }
+
     // MARK: - Retry/Error Classification
 
     func testHTTP429IsRetryable() {

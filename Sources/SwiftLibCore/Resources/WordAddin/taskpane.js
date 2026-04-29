@@ -99,6 +99,48 @@ function yieldToPaint() {
   });
 }
 
+function setDocumentSummaryText(text) {
+  const el = document.getElementById("docSummary");
+  if (el) el.textContent = text;
+}
+
+function timeoutError(label, timeoutMs) {
+  return new Error(`${label} timed out after ${timeoutMs}ms`);
+}
+
+function withStartupTimeout(promise, label, timeoutMs) {
+  if (!timeoutMs || timeoutMs <= 0) return promise;
+  let timer = null;
+  promise.catch(() => {
+    /* keep late rejections handled after a timeout race */
+  });
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(timeoutError(label, timeoutMs)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function runStartupStep(label, operation, options = {}) {
+  const timeoutMs = options.timeoutMs || 0;
+  try {
+    const promise = Promise.resolve().then(operation);
+    return await withStartupTimeout(promise, label, timeoutMs);
+  } catch (error) {
+    console.warn(`SwiftLib startup ${label}:`, error);
+    if (options.summaryOnError) setDocumentSummaryText(options.summaryOnError);
+    if (options.statusOnError) setStatus(options.statusOnError(error));
+    return options.fallback ?? null;
+  }
+}
+
+function runStartupStepInBackground(label, operation, options = {}) {
+  window.setTimeout(() => {
+    runStartupStep(label, operation, options);
+  }, options.delayMs || 0);
+}
+
 function showLoadingOverlay(text) {
   const overlay = document.getElementById("loadingOverlay");
   const label = document.getElementById("loadingOverlayText");
@@ -230,7 +272,7 @@ const debouncedHydrateFromSelection = debounce(async () => {
 async function restoreStyleFromDocument() {
   try {
     if (!isWordApi14()) return;
-    await Word.run(async (ctx) => {
+    return await Word.run(async (ctx) => {
       const snap = await readSwiftLibStorage(ctx);
       tryTrackedObjectsRemoveAll(ctx);
       // v4: preferences.style; v3 (legacy): snap.style — both are supported
@@ -238,10 +280,12 @@ async function restoreStyleFromDocument() {
       if (restoredStyle) {
         state.preferredStyle = restoredStyle;
       }
+      return restoredStyle;
     });
   } catch (e) {
     console.warn("restoreStyleFromDocument:", e);
   }
+  return null;
 }
 
 async function registerSelectionChangeHandler() {
@@ -258,19 +302,62 @@ async function registerSelectionChangeHandler() {
   }
 }
 
-Office.onReady(async () => {
-  bindEvents();
-  await restoreStyleFromDocument();
-  await loadStyles();
-  await preloadSwiftLibCiteprocForCurrentStyle();
-  await clearSwiftLibCitationCannotDeleteLocks();
-  await registerSwiftLibContentControlDeletedCleanup();
-  await registerSelectionChangeHandler();
-  await refreshCitedIds();
-  await hydrateFromSelection();
-  await refreshPaneData();
-  requestSearchFocus();
+Office.onReady(() => {
+  initializeTaskpane().catch((error) => {
+    console.error("SwiftLib taskpane startup:", error);
+    setDocumentSummaryText(`加载失败：${error.message || error}`);
+    setStatus(`加载失败：${error.message || error}`);
+  });
 });
+
+async function initializeTaskpane() {
+  bindEvents();
+  setDocumentSummaryText("正在加载引用插件…");
+
+  await runStartupStep("load styles", loadStyles, {
+    timeoutMs: 6000,
+    statusOnError: (error) => `Cannot load citation styles: ${error.message || error}`,
+  });
+
+  await clearSearchResultsPlaceholder();
+  requestSearchFocus();
+  runStartupStepInBackground("initialize document state", initializeDocumentState, { delayMs: 0 });
+}
+
+async function initializeDocumentState() {
+  setDocumentSummaryText("正在扫描文档…");
+  const restoredStyle = await runStartupStep("restore document style", restoreStyleFromDocument, {
+    timeoutMs: 2500,
+  });
+  if (restoredStyle) {
+    const styleSelect = document.getElementById("styleSelect");
+    if (styleSelect && styleSelect.options.length) styleSelect.value = restoredStyle;
+  }
+
+  runStartupStepInBackground("preload citeproc", preloadSwiftLibCiteprocForCurrentStyle, {
+    timeoutMs: 5000,
+  });
+
+  await runStartupStep("refresh pane data", refreshPaneData, {
+    timeoutMs: 9000,
+    summaryOnError: "文档扫描较慢，可先搜索插入，或点“刷新与修复引文”重试",
+    statusOnError: (error) => `自动扫描超时：${error.message || error}`,
+  });
+
+  await runStartupStep("hydrate selection", hydrateFromSelection, {
+    timeoutMs: 3500,
+  });
+
+  runStartupStepInBackground("deferred Word maintenance", runDeferredWordMaintenance, {
+    delayMs: 250,
+  });
+}
+
+async function runDeferredWordMaintenance() {
+  await runStartupStep("register selection change", registerSelectionChangeHandler, { timeoutMs: 2500 });
+  await runStartupStep("register content-control cleanup", registerSwiftLibContentControlDeletedCleanup, { timeoutMs: 2500 });
+  await runStartupStep("clear citation delete locks", clearSwiftLibCitationCannotDeleteLocks, { timeoutMs: 8000 });
+}
 
 function bindEvents() {
   const searchInput = document.getElementById("searchInput");
@@ -457,6 +544,26 @@ function buildStorageXml(payload) {
   return `<swiftlib xmlns="${SWIFTLIB_XML_NS}" version="1"><payload encoding="base64">${b64}</payload></swiftlib>`;
 }
 
+async function loadSwiftLibCustomXmlParts(ctx) {
+  const parts = ctx.document.customXmlParts;
+  if (parts && typeof parts.getByNamespace === "function") {
+    try {
+      const scoped = parts.getByNamespace(SWIFTLIB_XML_NS);
+      scoped.load("items");
+      await ctx.sync();
+      return scoped.items || [];
+    } catch (error) {
+      console.warn("SwiftLib CustomXmlPart getByNamespace fallback:", error);
+    }
+  }
+
+  parts.load("items");
+  await ctx.sync();
+  for (const p of parts.items) p.load("namespaceUri");
+  await ctx.sync();
+  return parts.items.filter((p) => p.namespaceUri === SWIFTLIB_XML_NS);
+}
+
 /**
  * Writes the SwiftLib snapshot into a CustomXmlPart (single part per document, namespace SWIFTLIB_XML_NS).
  * Must run inside an existing Word.run(ctx) — queues setXml/add; caller syncs.
@@ -474,24 +581,16 @@ async function persistSwiftLibStorageInContext(ctx, scan, style, rawPayload) {
   }
 
   const xml = buildStorageXml(storagePayload);
-  const parts = ctx.document.customXmlParts;
-  parts.load("items");
-  await ctx.sync();
+  const items = await loadSwiftLibCustomXmlParts(ctx);
 
-  const items = parts.items;
-  for (let i = 0; i < items.length; i++) {
-    items[i].load("namespaceUri");
-  }
-  await ctx.sync();
-
+  let didUpdate = false;
   for (const p of items) {
-    if (p.namespaceUri === SWIFTLIB_XML_NS) {
-      p.setXml(xml);
-      // Let the outer ctx.sync() flush this write instead of an extra sync here
-      break;
-    }
+    p.setXml(xml);
+    didUpdate = true;
+    // Let the outer ctx.sync() flush this write instead of an extra sync here.
+    break;
   }
-  if (!items.length || !Array.from(items).some(p => p.namespaceUri === SWIFTLIB_XML_NS)) {
+  if (!didUpdate) {
     ctx.document.customXmlParts.add(xml);
   }
 
@@ -521,13 +620,8 @@ function base64ToUtf8(b64) {
 async function readSwiftLibStorage(ctx) {
   if (!isWordApi14()) return null;
   try {
-    const parts = ctx.document.customXmlParts;
-    parts.load("items");
-    await ctx.sync();
-    for (const p of parts.items) p.load("namespaceUri");
-    await ctx.sync();
-    for (const p of parts.items) {
-      if (p.namespaceUri !== SWIFTLIB_XML_NS) continue;
+    const items = await loadSwiftLibCustomXmlParts(ctx);
+    for (const p of items) {
       const xmlProxy = p.getXml();
       await ctx.sync();
       const xml = xmlProxy.value;
@@ -1229,7 +1323,6 @@ function scanStructuralSignature(scan) {
 
 async function scanDocument() {
   return Word.run(async (ctx) => {
-    const snapMap = await buildSnapshotCitationMap(ctx);
     const controls = ctx.document.contentControls;
     controls.load("items");
     await ctx.sync();
@@ -1243,6 +1336,12 @@ async function scanDocument() {
     for (const cc of items) cc.load("tag,id,placeholderText");
     await ctx.sync();
 
+    if (!items.some((cc) => (cc.tag || "").startsWith(TAG_PREFIX))) {
+      tryTrackedObjectsRemoveAll(ctx);
+      return { citations: [], bibControls: [] };
+    }
+
+    const snapMap = await buildSnapshotCitationMap(ctx);
     const scan = collectScanFromItems(items, snapMap);
     tryTrackedObjectsRemoveAll(ctx);
     return scan;
@@ -1843,7 +1942,6 @@ async function refreshDocumentOnce(options) {
         await deleteSwiftLibGhostContentControlsInContext(ctx);
       }
 
-      const snapMap = await buildSnapshotCitationMap(ctx);
       const controls = ctx.document.contentControls;
       controls.load("items");
       await ctx.sync();
@@ -1857,6 +1955,12 @@ async function refreshDocumentOnce(options) {
       for (const cc of items) cc.load("tag,id,placeholderText");
       await ctx.sync();
 
+      if (!items.some((cc) => (cc.tag || "").startsWith(TAG_PREFIX))) {
+        tryTrackedObjectsRemoveAll(ctx);
+        return { kind: "noSwiftLib" };
+      }
+
+      const snapMap = await buildSnapshotCitationMap(ctx);
       const scan = collectScanFromItems(items, snapMap);
       if (!scan.citations.length && !scan.bibControls.length) {
         tryTrackedObjectsRemoveAll(ctx);
@@ -2252,6 +2356,7 @@ async function refreshBibliographySummary() {
     }
 
     state.citedCount = uniqueIds.size;
+    state.citedIds = uniqueIds;
     state.hasBibliography = scan.bibControls.length > 0;
 
     const el = document.getElementById("docSummary");

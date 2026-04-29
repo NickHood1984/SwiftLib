@@ -1,0 +1,95 @@
+{
+  "id": "semantic-scholar-paper",
+  "schemaVersion": 1,
+  "displayName": "Semantic Scholar",
+  "description": "Semantic Scholar Graph API. `byDoi` returns a single paper object (root is the paper). `byTitleMatch` hits /paper/search/match which wraps results in `{data: [...]}`. `abstractByDoi` is a lightweight lookup used to fill in abstracts when CrossRef lacks them.",
+
+  "routes": {
+    "byDoi": {
+      "url": "https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=paperId,title,abstract,tldr,year,venue,journal,authors,citationCount,influentialCitationCount,isOpenAccess,openAccessPdf,externalIds,publicationDate",
+      "timeoutSeconds": 10,
+      "extract": {
+        "kind": "json",
+        "itemsPath": "$",
+        "fields": {
+          "paperId":                   { "paths": ["paperId"] },
+          "title":                     { "paths": ["title"] },
+          "abstract":                  { "paths": ["abstract"] },
+          "tldr":                      { "paths": ["tldr.text"] },
+          "year":                      { "paths": ["year"] },
+          "venue":                     { "paths": ["venue"] },
+          "journalName":               { "paths": ["journal.name"] },
+          "journalVolume":             { "paths": ["journal.volume"] },
+          "journalPages":              { "paths": ["journal.pages"] },
+          "authors":                   { "paths": ["authors[*].name"], "separator": "|" },
+          "citationCount":             { "paths": ["citationCount"] },
+          "influentialCitationCount":  { "paths": ["influentialCitationCount"] },
+          "isOpenAccess":              { "paths": ["isOpenAccess"] },
+          "openAccessPdfUrl":          { "paths": ["openAccessPdf.url"] },
+          "doi":                       { "paths": ["externalIds.DOI"], "transform": "lower" },
+          "arxivId":                   { "paths": ["externalIds.ArXiv"] },
+          "pmid":                      { "paths": ["externalIds.PubMed"] },
+          "pmcid":                     { "paths": ["externalIds.PubMedCentral"] },
+          "publicationDate":           { "paths": ["publicationDate"] }
+        }
+      }
+    },
+
+    "byTitleMatch": {
+      "url": "https://api.semanticscholar.org/graph/v1/paper/search/match?query={title}&fields=paperId,title,abstract,tldr,year,venue,journal,authors,citationCount,influentialCitationCount,isOpenAccess,openAccessPdf,externalIds,publicationDate",
+      "timeoutSeconds": 10,
+      "extract": {
+        "kind": "json",
+        "itemsPath": "data",
+        "fields": {
+          "paperId":                   { "paths": ["paperId"] },
+          "title":                     { "paths": ["title"] },
+          "abstract":                  { "paths": ["abstract"] },
+          "tldr":                      { "paths": ["tldr.text"] },
+          "year":                      { "paths": ["year"] },
+          "venue":                     { "paths": ["venue"] },
+          "journalName":               { "paths": ["journal.name"] },
+          "journalVolume":             { "paths": ["journal.volume"] },
+          "journalPages":              { "paths": ["journal.pages"] },
+          "authors":                   { "paths": ["authors[*].name"], "separator": "|" },
+          "citationCount":             { "paths": ["citationCount"] },
+          "influentialCitationCount":  { "paths": ["influentialCitationCount"] },
+          "isOpenAccess":              { "paths": ["isOpenAccess"] },
+          "openAccessPdfUrl":          { "paths": ["openAccessPdf.url"] },
+          "doi":                       { "paths": ["externalIds.DOI"], "transform": "lower" },
+          "arxivId":                   { "paths": ["externalIds.ArXiv"] },
+          "pmid":                      { "paths": ["externalIds.PubMed"] },
+          "pmcid":                     { "paths": ["externalIds.PubMedCentral"] },
+          "publicationDate":           { "paths": ["publicationDate"] }
+        }
+      }
+    },
+
+    "abstractByDoi": {
+      "url": "https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=abstract",
+      "timeoutSeconds": 10,
+      "extract": {
+        "kind": "json",
+        "itemsPath": "$",
+        "fields": {
+          "abstract": { "paths": ["abstract"] }
+        }
+      }
+    }
+  },
+
+  "canary": [
+    {
+      "name": "Towards spike-based machine intelligence (10.1038/s41586-019-1677-2) — byDoi",
+      "route": "byDoi",
+      "context": { "doi": "10.1038/s41586-019-1677-2" },
+      "expectSearch": {
+        "title": "Towards spike-based machine intelligence with neuromorphic computing",
+        "year": "2019",
+        "venue": "Nature",
+        "journalName": "Nature",
+        "doi": "10.1038/s41586-019-1677-2"
+      }
+    }
+  ]
+}

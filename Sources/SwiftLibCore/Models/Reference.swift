@@ -76,7 +76,9 @@ public struct AuthorName: Codable, Hashable, Sendable {
     }
 
     /// Parse a free-text name like "John Smith" → AuthorName(given: "John", family: "Smith")
-    /// Also handles "Smith, John" (comma-separated family-first)
+    /// Also handles:
+    /// - "Smith, John"  (comma-separated family-first)
+    /// - "Smith JA" / "Wang R" / "Heink U" (scholarly "Family Initials" form)
     public static func parse(_ text: String) -> AuthorName {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         if let commaIdx = trimmed.firstIndex(of: ",") {
@@ -86,9 +88,23 @@ public struct AuthorName: Codable, Hashable, Sendable {
         }
         let parts = trimmed.components(separatedBy: " ").filter { !$0.isEmpty }
         if parts.count >= 2 {
-            return AuthorName(given: parts.dropLast().joined(separator: " "), family: parts.last!)
+            let last = parts.last!
+            let rest = parts.dropLast().joined(separator: " ")
+            // "Family Initials" 形式：末尾 token 是缩写（全大写、≤4 字符），
+            // 其余部分不是缩写 → 把末尾当 given 初始化，其余当 family。
+            if looksLikeInitials(last), !looksLikeInitials(rest) {
+                return AuthorName(given: last, family: rest)
+            }
+            return AuthorName(given: rest, family: last)
         }
         return AuthorName(given: "", family: trimmed)
+    }
+
+    /// 粗略识别「作者姓名初始缩写」：全大写 / 带点 / 带短横，且长度 ≤ 4。
+    private static func looksLikeInitials(_ s: String) -> Bool {
+        guard !s.isEmpty, s.count <= 4 else { return false }
+        let allowed: Set<Character> = [".", "-", " "]
+        return s.allSatisfy { $0.isUppercase || allowed.contains($0) }
     }
 
     /// Parse a plain-text authors string into structured array.
@@ -172,6 +188,7 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
     public var doi: String?
     public var url: String?
     public var abstract: String?
+    public var translatedAbstract: String?
     public var dateAdded: Date
     public var dateModified: Date
     public var pdfPath: String?
@@ -222,6 +239,28 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
     public var pmid: String?
     public var pmcid: String?
 
+    // MARK: - Extended metadata (P3 — enrichment, v12)
+    /// JSON-encoded [String] — subject keywords from OpenAlex concepts
+    public var keywords: String?
+    /// JSON-encoded [String] — topic labels from OpenAlex topics
+    public var topics: String?
+    /// Whether the work is Open Access (from OpenAlex / Unpaywall)
+    public var isOpenAccess: Bool?
+    /// Direct OA full-text URL
+    public var oaUrl: String?
+    /// Citation count from OpenAlex
+    public var citedByCount: Int?
+    /// JSON-encoded [String] — funding/grant information
+    public var fundingInfo: String?
+    /// Overall metadata confidence score (0–1)
+    public var confidenceScore: Double?
+    /// JSON-encoded EasyScholar journal rank response.
+    public var journalRankJSON: String?
+
+    // MARK: - Refresh tracking (v14)
+    /// When this reference was last refreshed from external sources
+    public var lastRefreshedAt: Date?
+
     public init(
         id: Int64? = nil,
         title: String,
@@ -234,6 +273,7 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         doi: String? = nil,
         url: String? = nil,
         abstract: String? = nil,
+        translatedAbstract: String? = nil,
         dateAdded: Date = Date(),
         dateModified: Date = Date(),
         pdfPath: String? = nil,
@@ -273,7 +313,18 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         // Extended metadata (P2)
         language: String? = nil,
         pmid: String? = nil,
-        pmcid: String? = nil
+        pmcid: String? = nil,
+        // Extended metadata (P3 — enrichment)
+        keywords: String? = nil,
+        topics: String? = nil,
+        isOpenAccess: Bool? = nil,
+        oaUrl: String? = nil,
+        citedByCount: Int? = nil,
+        fundingInfo: String? = nil,
+        confidenceScore: Double? = nil,
+        journalRankJSON: String? = nil,
+        // Refresh tracking (v14)
+        lastRefreshedAt: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -286,6 +337,7 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         self.doi = doi
         self.url = url
         self.abstract = abstract
+        self.translatedAbstract = translatedAbstract
         self.dateAdded = dateAdded
         self.dateModified = dateModified
         self.pdfPath = pdfPath
@@ -326,6 +378,16 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         self.language = language
         self.pmid = pmid
         self.pmcid = pmcid
+        // Extended metadata (P3 — enrichment)
+        self.keywords = keywords
+        self.topics = topics
+        self.isOpenAccess = isOpenAccess
+        self.oaUrl = oaUrl
+        self.citedByCount = citedByCount
+        self.fundingInfo = fundingInfo
+        self.confidenceScore = confidenceScore
+        self.journalRankJSON = journalRankJSON
+        self.lastRefreshedAt = lastRefreshedAt
     }
 
     // MARK: - Parsed name helpers
@@ -375,6 +437,7 @@ extension Reference {
                   lhs.doi == rhs.doi,
                   lhs.url == rhs.url,
                   lhs.abstract == rhs.abstract,
+                  lhs.translatedAbstract == rhs.translatedAbstract,
                   lhs.dateAdded == rhs.dateAdded,
                   lhs.dateModified == rhs.dateModified,
                   lhs.pdfPath == rhs.pdfPath,
@@ -418,6 +481,17 @@ extension Reference {
                 return false
             }
 
+            guard lhs.keywords == rhs.keywords,
+                  lhs.topics == rhs.topics,
+                  lhs.isOpenAccess == rhs.isOpenAccess,
+                  lhs.oaUrl == rhs.oaUrl,
+                  lhs.citedByCount == rhs.citedByCount,
+                  lhs.fundingInfo == rhs.fundingInfo,
+                  lhs.confidenceScore == rhs.confidenceScore,
+                  lhs.journalRankJSON == rhs.journalRankJSON else {
+                return false
+            }
+
             return true
         default:
             return false
@@ -440,6 +514,7 @@ extension Reference {
         hasher.combine(doi)
         hasher.combine(url)
         hasher.combine(abstract)
+        hasher.combine(translatedAbstract)
         hasher.combine(dateAdded)
         hasher.combine(dateModified)
         hasher.combine(pdfPath)
@@ -477,6 +552,14 @@ extension Reference {
         hasher.combine(language)
         hasher.combine(pmid)
         hasher.combine(pmcid)
+        hasher.combine(keywords)
+        hasher.combine(topics)
+        hasher.combine(isOpenAccess)
+        hasher.combine(oaUrl)
+        hasher.combine(citedByCount)
+        hasher.combine(fundingInfo)
+        hasher.combine(confidenceScore)
+        hasher.combine(journalRankJSON)
     }
 }
 
@@ -592,7 +675,7 @@ extension Reference {
     }
 
     public var canEnterFeedback: Bool {
-        verificationStatus == .verifiedAuto || verificationStatus == .verifiedManual
+        verificationStatus.isLibraryReady
     }
 
     public var canAutoFeedback: Bool {
@@ -732,6 +815,7 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         doi = row["doi"]
         url = row["url"]
         abstract = row["abstract"]
+        translatedAbstract = row["translatedAbstract"]
         dateAdded = row["dateAdded"]
         dateModified = row["dateModified"]
         pdfPath = row["pdfPath"]
@@ -775,6 +859,16 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         language = row["language"]
         pmid = row["pmid"]
         pmcid = row["pmcid"]
+
+        // Extended metadata (P3 — enrichment, v12)
+        keywords = row["keywords"]
+        topics = row["topics"]
+        isOpenAccess = row["isOpenAccess"]
+        oaUrl = row["oaUrl"]
+        citedByCount = row["citedByCount"]
+        fundingInfo = row["fundingInfo"]
+        confidenceScore = row["confidenceScore"]
+        journalRankJSON = row["journalRankJSON"]
     }
 
     public func encode(to container: inout PersistenceContainer) {
@@ -796,6 +890,7 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         container["doi"] = doi
         container["url"] = url
         container["abstract"] = abstract
+        container["translatedAbstract"] = translatedAbstract
         container["dateAdded"] = dateAdded
         container["dateModified"] = dateModified
         container["pdfPath"] = pdfPath
@@ -840,6 +935,16 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         container["pmid"] = pmid
         container["pmcid"] = pmcid
 
+        // Extended metadata (P3 — enrichment, v12)
+        container["keywords"] = keywords
+        container["topics"] = topics
+        container["isOpenAccess"] = isOpenAccess
+        container["oaUrl"] = oaUrl
+        container["citedByCount"] = citedByCount
+        container["fundingInfo"] = fundingInfo
+        container["confidenceScore"] = confidenceScore
+        container["journalRankJSON"] = journalRankJSON
+
         // Normalized dedup columns (v11) — written on every save so the
         // persisted values stay in sync with the source fields.
         container["doiNormalized"] = Self.normalizeForDedupDOI(doi)
@@ -876,7 +981,7 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
 
     public enum Columns: String, ColumnExpression {
         case id, title, authors, authorsNormalized, year, journal, volume, issue, pages
-        case doi, url, abstract, dateAdded, dateModified
+        case doi, url, abstract, translatedAbstract, dateAdded, dateModified
         case pdfPath, notes, webContent, siteName, favicon, referenceType, metadataSource
         case verificationStatus, acceptedByRuleID, recordKey, verificationSourceURL, evidenceBundleHash, verifiedAt, reviewedBy
         case collectionId
@@ -886,6 +991,8 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         case translators, eventTitle, eventPlace, genre, institution, number
         case collectionTitle, numberOfPages
         case language, pmid, pmcid
+        // Enrichment metadata (P3, v12)
+        case keywords, topics, isOpenAccess, oaUrl, citedByCount, fundingInfo, confidenceScore, journalRankJSON
         // Normalized dedup columns (v11)
         case doiNormalized, isbnNormalized, issnNormalized, pmcidNormalized
     }
@@ -908,6 +1015,11 @@ public struct ReferenceListRow: Identifiable, Hashable, Sendable, FetchableRecor
     public var dateAdded: Date
     public var dateModified: Date
     public var collectionId: Int64?
+    public var journalRankJSON: String?
+    /// DOI 与 metadataSource 供列表直接根据「事实」判断验证颜色，
+    /// 不依赖可能过期的 verificationStatus。
+    public var doi: String?
+    public var metadataSource: MetadataSource?
 
     /// The subset of columns required for list rendering.
     public static let listColumns: [any SQLSelectable] = [
@@ -922,6 +1034,9 @@ public struct ReferenceListRow: Identifiable, Hashable, Sendable, FetchableRecor
         Reference.Columns.dateAdded,
         Reference.Columns.dateModified,
         Reference.Columns.collectionId,
+        Reference.Columns.journalRankJSON,
+        Reference.Columns.doi,
+        Reference.Columns.metadataSource,
     ]
 
     public init(row: Row) {
@@ -946,5 +1061,8 @@ public struct ReferenceListRow: Identifiable, Hashable, Sendable, FetchableRecor
         dateAdded = row["dateAdded"]
         dateModified = row["dateModified"]
         collectionId = row["collectionId"]
+        journalRankJSON = row["journalRankJSON"]
+        doi = row["doi"]
+        metadataSource = row["metadataSource"]
     }
 }

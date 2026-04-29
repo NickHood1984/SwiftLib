@@ -235,6 +235,35 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertTrue(try db.fetchPendingMetadataIntakes().isEmpty)
     }
 
+    func testPersistMetadataEnrichingResolutionWritesReferenceWithoutQueue() throws {
+        let db = try makeDatabase()
+        let evidence = makeEvidence(source: .webMeta, sourceURL: "https://example.com/article")
+        var enriching = Reference(
+            title: "Needs Enrichment",
+            authors: [AuthorName(given: "Ada", family: "Lovelace")],
+            year: 2024,
+            journal: "Structured Web Journal",
+            url: "https://example.com/article"
+        )
+        enriching.verificationStatus = .metadataEnriching
+        enriching.metadataSource = .webMeta
+        enriching.verificationSourceURL = evidence.sourceURL
+        enriching.evidenceBundleHash = evidence.bundleHash
+        enriching.verifiedAt = Date()
+
+        let result = try db.persistMetadataResolution(
+            .verified(VerifiedEnvelope(reference: enriching, evidence: evidence)),
+            options: MetadataPersistenceOptions(sourceKind: .manualEntry, originalInput: "https://example.com/article")
+        )
+
+        guard case .verified(let stored) = result else {
+            return XCTFail("metadataEnriching 结果应当直接写入资料库")
+        }
+        XCTAssertEqual(stored.verificationStatus, .metadataEnriching)
+        XCTAssertEqual(try db.referenceCount(), 1)
+        XCTAssertTrue(try db.fetchPendingMetadataIntakes().isEmpty)
+    }
+
     func testPersistVerifiedResolutionUpdatesLinkedReferenceInsteadOfCreatingDuplicate() throws {
         let db = try makeDatabase()
 

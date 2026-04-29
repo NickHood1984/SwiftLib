@@ -74,26 +74,54 @@ final class AIDOMSelectorService: ObservableObject {
     }
 
     private static func loadConfig() -> AIDOMConfig {
-        // Try cached version first
         let cachedURL = cachedConfigURL()
-        if let data = try? Data(contentsOf: cachedURL),
-           let config = try? JSONDecoder().decode(AIDOMConfig.self, from: data) {
-            return config
-        }
+        let cachedConfig = loadCachedConfig(from: cachedURL)
+        let bundledConfig = loadBundledConfig()
 
-        // Fall back to bundled
+        switch (cachedConfig, bundledConfig) {
+        case let (cached?, bundled?):
+            if isBundledConfigNewer(bundled, than: cached) {
+                try? bundledConfigData()?.write(to: cachedURL, options: .atomic)
+                return bundled
+            }
+            return cached
+        case let (cached?, nil):
+            return cached
+        case let (nil, bundled?):
+            try? bundledConfigData()?.write(to: cachedURL, options: .atomic)
+            return bundled
+        default:
+            return AIDOMConfig(version: 0, lastUpdated: "", services: [])
+        }
+    }
+
+    private static func loadCachedConfig(from url: URL) -> AIDOMConfig? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(AIDOMConfig.self, from: data)
+    }
+
+    private static func loadBundledConfig() -> AIDOMConfig? {
+        guard let data = bundledConfigData() else { return nil }
+        return try? JSONDecoder().decode(AIDOMConfig.self, from: data)
+    }
+
+    private static func bundledConfigData() -> Data? {
         if let url = Bundle.module.url(forResource: "ai-dom-selectors", withExtension: "json", subdirectory: "Resources"),
-           let data = try? Data(contentsOf: url),
-           let config = try? JSONDecoder().decode(AIDOMConfig.self, from: data) {
-            return config
+           let data = try? Data(contentsOf: url) {
+            return data
         }
         if let url = Bundle.module.url(forResource: "ai-dom-selectors", withExtension: "json"),
-           let data = try? Data(contentsOf: url),
-           let config = try? JSONDecoder().decode(AIDOMConfig.self, from: data) {
-            return config
+           let data = try? Data(contentsOf: url) {
+            return data
         }
+        return nil
+    }
 
-        return AIDOMConfig(version: 0, lastUpdated: "", services: [])
+    private static func isBundledConfigNewer(_ bundled: AIDOMConfig, than cached: AIDOMConfig) -> Bool {
+        if bundled.version != cached.version {
+            return bundled.version > cached.version
+        }
+        return compareLastUpdated(bundled.lastUpdated, cached.lastUpdated) == .orderedDescending
     }
 
     private func validate(candidate: AIDOMConfig, current: AIDOMConfig) -> String? {

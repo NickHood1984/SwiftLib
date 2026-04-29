@@ -203,6 +203,82 @@ final class ImporterAndMetadataTests: XCTestCase {
         )
     }
 
+    func testCNKISearchExpressionsSanitizeBrokenAuthorAndRetryTitleOnly() {
+        let seed = MetadataResolutionSeed(
+            fileName: "热带亚热带水库浮游动物群落结构与水质的关系",
+            title: "热带亚热带水库浮游动物群落结构与水质的关系",
+            firstAuthor: "林秋奇 韩博平",
+            year: 2003,
+            journal: "生态学报",
+            languageHint: .chinese,
+            workKindHint: .journalArticle
+        )
+
+        XCTAssertEqual(
+            CNKIMetadataProvider.searchExpressions(for: seed),
+            [
+                "(TI %= '热带亚热带水库浮游动物群落结构与水质的关系') AND AU='林秋奇'",
+                "TI %= '热带亚热带水库浮游动物群落结构与水质的关系'",
+            ]
+        )
+    }
+
+    func testCNKISearchExpressionsDropObviousNonAuthorTokens() {
+        let seed = MetadataResolutionSeed(
+            fileName: "热带亚热带水库浮游动物群落结构与水质的关系",
+            title: "热带亚热带水库浮游动物群落结构与水质的关系",
+            firstAuthor: "编辑部",
+            year: 2003,
+            journal: "生态学报",
+            languageHint: .chinese,
+            workKindHint: .journalArticle
+        )
+
+        XCTAssertEqual(
+            CNKIMetadataProvider.searchExpressions(for: seed),
+            ["TI %= '热带亚热带水库浮游动物群落结构与水质的关系'"]
+        )
+    }
+
+    func testNormalizeCNKIExportAuthors() {
+        // 知网紧凑格式：前几位作者空格拼接，"等"作为 et al.，最后是通讯作者
+        XCTAssertEqual(
+            CNKIMetadataProvider.normalizeCNKIExportAuthors("匡晨亿 王森洋, 等 梁智策"),
+            "匡晨亿;王森洋;梁智策"
+        )
+        // 只有两位作者，无"等"
+        XCTAssertEqual(
+            CNKIMetadataProvider.normalizeCNKIExportAuthors("吴浩云 刘敏"),
+            "吴浩云;刘敏"
+        )
+        // 已经是分号分隔
+        XCTAssertEqual(
+            CNKIMetadataProvider.normalizeCNKIExportAuthors("吴浩云；刘敏；金科"),
+            "吴浩云;刘敏;金科"
+        )
+        // 已经是逗号分隔（无空格拼接的汉字）
+        XCTAssertEqual(
+            CNKIMetadataProvider.normalizeCNKIExportAuthors("Smith, John"),
+            "Smith, John"
+        )
+        // 单独一位
+        XCTAssertEqual(
+            CNKIMetadataProvider.normalizeCNKIExportAuthors("梁智策"),
+            "梁智策"
+        )
+    }
+
+    func testNormalizeCNKIExportAuthorsResultsInCorrectAuthorNames() {
+        let authors = AuthorName.parseList(
+            CNKIMetadataProvider.normalizeCNKIExportAuthors("匡晨亿 王森洋, 等 梁智策")
+        )
+        XCTAssertEqual(authors.count, 3)
+        XCTAssertEqual(authors[0], AuthorName(given: "", family: "匡晨亿"))
+        XCTAssertEqual(authors[1], AuthorName(given: "", family: "王森洋"))
+        XCTAssertEqual(authors[2], AuthorName(given: "", family: "梁智策"))
+        XCTAssertEqual(authors.displayString, "匡晨亿, 王森洋, 梁智策")
+    }
+
     func testCNKIDetailResolutionAcceptsStructuredDetailWithoutAuthors() {
         XCTAssertTrue(
             CNKIMetadataProvider.shouldAcceptResolvedDetail(
@@ -275,6 +351,22 @@ final class ImporterAndMetadataTests: XCTestCase {
         XCTAssertEqual(
             CNKIMetadataProvider.pageResolutionState(from: payload),
             .blocked
+        )
+    }
+
+    func testCNKIPageResolutionTreatsEmptySearchStateAsResolvedSearch() {
+        let payload = CNKIMetadataProvider.PageAssessmentPayload(
+            markerBlocked: false,
+            searchRowCount: 0,
+            hasSearchEmptyState: true,
+            hasDetailTitle: false,
+            hasDetailAuthors: false,
+            hasDetailSummary: false
+        )
+
+        XCTAssertEqual(
+            CNKIMetadataProvider.pageResolutionState(from: payload),
+            .resolvedSearch
         )
     }
 

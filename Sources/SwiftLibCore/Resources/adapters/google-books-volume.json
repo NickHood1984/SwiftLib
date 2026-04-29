@@ -1,0 +1,69 @@
+{
+  "id": "google-books-volume",
+  "schemaVersion": 1,
+  "displayName": "Google Books",
+  "description": "Google Books Volumes API. Root is `{items: [{volumeInfo: {...}}]}`. ISBNs come as a list of `{type, identifier}` pairs — we expose parallel arrays and let the Swift mapper pick the best.",
+
+  "routes": {
+    "byIsbn": {
+      "url": "https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}&maxResults=1",
+      "timeoutSeconds": 15,
+      "extract": {
+        "kind": "json",
+        "itemsPath": "items",
+        "fields": {
+          "title":       { "paths": ["volumeInfo.title"] },
+          "subtitle":    { "paths": ["volumeInfo.subtitle"] },
+          "titleWithSubtitle": {
+            "template": "{volumeInfo.title}: {volumeInfo.subtitle}",
+            "elideIfMissing": ["volumeInfo.subtitle"]
+          },
+          "authors":     { "paths": ["volumeInfo.authors[*]"], "separator": "|" },
+          "publisher":   { "paths": ["volumeInfo.publisher"] },
+          "publishedDate": { "paths": ["volumeInfo.publishedDate"] },
+          "year":        { "paths": ["volumeInfo.publishedDate"], "transform": "prefix4Int" },
+          "pageCount":   { "paths": ["volumeInfo.pageCount"] },
+          "description": { "paths": ["volumeInfo.description"] },
+          "language":    { "paths": ["volumeInfo.language"] },
+          "identifierTypes": { "paths": ["volumeInfo.industryIdentifiers[*].type"], "separator": "||" },
+          "identifierValues": { "paths": ["volumeInfo.industryIdentifiers[*].identifier"], "separator": "||" },
+          "infoLink":    { "paths": ["volumeInfo.infoLink"] }
+        }
+      }
+    },
+
+    "byTitle": {
+      "url": "https://www.googleapis.com/books/v1/volumes?q=intitle:{title}&maxResults=1",
+      "timeoutSeconds": 15,
+      "extract": {
+        "kind": "json",
+        "itemsPath": "items",
+        "fields": {
+          "title":       { "paths": ["volumeInfo.title"] },
+          "authors":     { "paths": ["volumeInfo.authors[*]"], "separator": "|" },
+          "publisher":   { "paths": ["volumeInfo.publisher"] },
+          "year":        { "paths": ["volumeInfo.publishedDate"], "transform": "prefix4Int" },
+          "pageCount":   { "paths": ["volumeInfo.pageCount"] },
+          "description": { "paths": ["volumeInfo.description"] },
+          "identifierTypes":  { "paths": ["volumeInfo.industryIdentifiers[*].type"],  "separator": "||" },
+          "identifierValues": { "paths": ["volumeInfo.industryIdentifiers[*].identifier"], "separator": "||" }
+        }
+      }
+    }
+  },
+
+  "canary": [
+    {
+      "name": "Clean Code (9780132350884) — Robert C. Martin / Pearson",
+      "route": "byIsbn",
+      "context": { "isbn": "9780132350884" },
+      "expectSearch": {
+        "title": "Clean Code",
+        "subtitle": "A Handbook of Agile Software Craftsmanship",
+        "year": "2009",
+        "publisher": "Pearson Education",
+        "pageCount": "464"
+      }
+    }
+  ]
+}

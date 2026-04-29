@@ -602,7 +602,7 @@ struct Cite: ParsableCommand {
     }
 }
 
-struct Import: ParsableCommand {
+struct Import: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "import",
         abstract: "从 BibTeX 或 RIS 文件导入文献（用 '-' 表示标准输入）"
@@ -617,7 +617,13 @@ struct Import: ParsableCommand {
     @Option(name: .long, help: "从标准输入读取时指定格式：bib、ris")
     var format: String?
 
-    func run() throws {
+    @Flag(name: .long, help: "跳过验证，直接导入（兼容旧版行为）")
+    var skipVerify = false
+
+    @Flag(name: .long, help: "禁用 OpenAlex 丰富（加速导入）")
+    var noEnrich = false
+
+    func run() async throws {
         let content: String
         let ext: String
 
@@ -661,8 +667,13 @@ struct Import: ParsableCommand {
             for i in refs.indices { refs[i].collectionId = cid }
         }
 
-        let count = try AppDatabase.shared.batchImportReferences(refs)
-        printJSON(["imported": "\(count)", "file": file])
+        let result = try await ImportIntakeService.batchImport(
+            references: refs,
+            collectionId: collection,
+            skipVerify: skipVerify,
+            enrichWithOpenAlex: !noEnrich
+        )
+        printJSON(result)
     }
 }
 

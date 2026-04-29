@@ -586,9 +586,10 @@ final class WordAddinServer {
 
     private func serveStaticFile(_ conn: NWConnection, path: String) {
         let cleanPath = path == "/" ? "/taskpane.html" : path
+        let shouldCache = shouldCacheStaticFile(cleanPath)
 
         // Check cache first
-        if let cached = staticFileCache[cleanPath] {
+        if shouldCache, let cached = staticFileCache[cleanPath] {
             sendRawResponse(conn, status: 200, contentType: cached.contentType, body: cached.body)
             return
         }
@@ -656,8 +657,18 @@ final class WordAddinServer {
         }
 
         let contentType = mimeType(for: cleanPath)
-        staticFileCache[cleanPath] = (contentType: contentType, body: fileData)
-        sendRawResponse(conn, status: 200, contentType: contentType, body: fileData)
+        if shouldCache {
+            staticFileCache[cleanPath] = (contentType: contentType, body: fileData)
+            sendRawResponse(conn, status: 200, contentType: contentType, body: fileData)
+        } else {
+            sendRawResponse(
+                conn,
+                status: 200,
+                contentType: contentType,
+                body: fileData,
+                cacheControl: "no-store, no-cache, must-revalidate, max-age=0"
+            )
+        }
     }
 
     // MARK: - Response helpers
@@ -688,18 +699,31 @@ final class WordAddinServer {
         sendRawResponse(conn, status: 200, contentType: "application/json; charset=utf-8", body: data)
     }
 
-    private func sendRawResponse(_ conn: NWConnection, status: Int, contentType: String, body: Data) {
+    private func sendRawResponse(
+        _ conn: NWConnection,
+        status: Int,
+        contentType: String,
+        body: Data,
+        cacheControl: String? = nil
+    ) {
         let statusText: String
         switch status {
         case 200: statusText = "OK"
+        case 401: statusText = "Unauthorized"
         case 400: statusText = "Bad Request"
         case 404: statusText = "Not Found"
+        case 422: statusText = "Unprocessable Entity"
         case 500: statusText = "Internal Server Error"
         default: statusText = "Unknown"
         }
         var header = "HTTP/1.1 \(status) \(statusText)\r\n"
         header += "Content-Type: \(contentType)\r\n"
         header += "Content-Length: \(body.count)\r\n"
+        if let cacheControl {
+            header += "Cache-Control: \(cacheControl)\r\n"
+            header += "Pragma: no-cache\r\n"
+            header += "Expires: 0\r\n"
+        }
         header += "Access-Control-Allow-Origin: \(allowedOrigin)\r\n"
         header += "Connection: close\r\n"
         header += "\r\n"
@@ -761,6 +785,16 @@ final class WordAddinServer {
         if path.hasSuffix(".png") { return "image/png" }
         if path.hasSuffix(".svg") { return "image/svg+xml" }
         return "application/octet-stream"
+    }
+
+    private func shouldCacheStaticFile(_ path: String) -> Bool {
+        // Word's WebView can keep taskpane JS/HTML alive aggressively. Avoid
+        // server-side and HTTP caching for executable add-in resources so a
+        // reload actually picks up the latest bundled files.
+        if path.hasSuffix(".html") || path.hasSuffix(".js") {
+            return false
+        }
+        return true
     }
 
     /// Generates a minimal valid PNG with a colored circle as a placeholder icon.

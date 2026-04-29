@@ -10,6 +10,12 @@ struct SidebarView: View {
     let onDeleteCollection: (Int64) -> Void
     let onDeleteTag: (Int64) -> Void
     let onAddCollection: () -> Void
+    let onRenameCollection: (Collection, String) -> Void
+
+    // Inline rename state
+    @State private var renamingCollectionID: Int64?
+    @State private var renameDraft: String = ""
+    @FocusState private var renameFieldFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,16 +56,23 @@ struct SidebarView: View {
                             .padding(.vertical, 4)
                     } else {
                         ForEach(collections) { collection in
-                            SidebarRow(
-                                icon: collection.icon,
-                                label: collection.name,
-                                isSelected: selection == .collection(collection.id!)
-                            ) {
-                                selection = .collection(collection.id!)
-                            }
-                            .contextMenu {
-                                Button("删除", role: .destructive) {
-                                    onDeleteCollection(collection.id!)
+                            if renamingCollectionID == collection.id {
+                                renameField(for: collection)
+                            } else {
+                                SidebarRow(
+                                    icon: collection.icon,
+                                    label: collection.name,
+                                    isSelected: selection == .collection(collection.id!)
+                                ) {
+                                    selection = .collection(collection.id!)
+                                }
+                                .contextMenu {
+                                    Button("重命名") {
+                                        beginRename(collection)
+                                    }
+                                    Button("删除", role: .destructive) {
+                                        onDeleteCollection(collection.id!)
+                                    }
                                 }
                             }
                         }
@@ -150,6 +163,62 @@ struct SidebarView: View {
         }
         .background(Color(nsColor: .controlBackgroundColor))
         .navigationTitle("SwiftLib")
+    }
+
+    // MARK: - Rename
+
+    private func beginRename(_ collection: Collection) {
+        renameDraft = collection.name
+        renamingCollectionID = collection.id
+        renameFieldFocused = true
+    }
+
+    private func commitRename(_ collection: Collection) {
+        let trimmed = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, trimmed != collection.name {
+            onRenameCollection(collection, trimmed)
+        }
+        renamingCollectionID = nil
+        renameDraft = ""
+    }
+
+    private func cancelRename() {
+        renamingCollectionID = nil
+        renameDraft = ""
+    }
+
+    @ViewBuilder
+    private func renameField(for collection: Collection) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: collection.icon)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 16, alignment: .center)
+
+            TextField("收藏集名称", text: $renameDraft)
+                .font(.system(size: 13))
+                .textFieldStyle(.plain)
+                .focused($renameFieldFocused)
+                .onSubmit {
+                    commitRename(collection)
+                }
+                .onAppear {
+                    renameFieldFocused = true
+                }
+                .onChange(of: renameFieldFocused) { _, focused in
+                    if !focused {
+                        commitRename(collection)
+                    }
+                }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.accentColor.opacity(0.10))
+        )
     }
 
     // MARK: - Building Blocks

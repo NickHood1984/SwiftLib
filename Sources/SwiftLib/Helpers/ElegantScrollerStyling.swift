@@ -13,6 +13,35 @@ extension NSScrollView {
 
         verticalScroller?.applySwiftLibElegantStyle()
         horizontalScroller?.applySwiftLibElegantStyle()
+
+        // SwiftUI.Table on macOS wraps an NSTableView but its custom header
+        // view lacks the native hover resize cursor. We attempt to restore it.
+        applySwiftLibTableHeaderResizeCursor()
+    }
+
+    /// SwiftUI.Table wraps an NSTableView with a custom header view that does
+    /// not show the resize cursor on hover (only after mouse-down drag).
+    /// If we can locate the underlying NSTableView we poke its AppKit-level
+    /// settings; if the header is still a native NSTableHeaderView this helps.
+    private func applySwiftLibTableHeaderResizeCursor() {
+        guard let tableView = findNSTableView(in: self) else { return }
+
+        tableView.allowsColumnResizing = true
+        tableView.columnAutoresizingStyle = .noColumnAutoresizing
+
+        // If a real NSTableHeaderView is present, force it to rebuild tracking
+        // areas so divider hover detection works.
+        if let header = tableView.headerView as? NSTableHeaderView {
+            header.updateTrackingAreas()
+        }
+    }
+
+    private func findNSTableView(in view: NSView) -> NSTableView? {
+        if let tv = view as? NSTableView { return tv }
+        for subview in view.subviews {
+            if let tv = findNSTableView(in: subview) { return tv }
+        }
+        return nil
     }
 
     private func installSwiftLibThinVerticalScrollerIfNeeded() {
@@ -34,7 +63,6 @@ extension NSScroller {
         scrollerStyle = .overlay
         controlSize = .mini
         knobStyle = .default
-        alphaValue = 0.42
     }
 }
 
@@ -91,10 +119,22 @@ struct SwiftUIScrollViewScrollerConfigurator: NSViewRepresentable {
         DispatchQueue.main.async {
             view.attachToNearestScrollView()
         }
+        // SwiftUI.Table instantiates its NSScrollView later than List, so
+        // retry a few frames later to catch it.
+        for delay in [0.05, 0.15, 0.4] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak view] in
+                view?.attachToNearestScrollView()
+            }
+        }
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let watcher = nsView as? _ScrollerWatcherNSView else { return }
+        DispatchQueue.main.async {
+            watcher.attachToNearestScrollView()
+        }
+    }
 }
 
 /// An NSView that locates its enclosing NSScrollView and uses KVO to apply
@@ -133,11 +173,38 @@ private final class _ScrollerWatcherNSView: NSView {
     }
 
     private func findEnclosingScrollView(from view: NSView) -> NSScrollView? {
+        // 1. Walk up the superview chain — works for ScrollView + LazyVStack.
         var current: NSView? = view
         while let v = current {
             if let sv = v.enclosingScrollView { return sv }
             if let sv = v as? NSScrollView { return sv }
             current = v.superview
+        }
+
+        // 2. Search siblings and their descendants.
+        // SwiftUI List / Table places the background NSView and the
+        // underlying NSOutlineView/NSTableView as *siblings* under the same
+        // NSHostingView, so the scroll view is never reachable by walking up.
+        // Walk outward a few superview levels, scanning each parent's subtree
+        // for an NSScrollView. Table's NSScrollView tends to live a couple of
+        // levels up vs List, so we try multiple ancestors.
+        var ancestor: NSView? = view.superview
+        for _ in 0..<6 {
+            guard let parent = ancestor else { break }
+            for subview in parent.subviews where subview !== view {
+                if let sv = subview as? NSScrollView { return sv }
+                if let sv = findScrollViewInSubviews(of: subview) { return sv }
+            }
+            ancestor = parent.superview
+        }
+
+        return nil
+    }
+
+    private func findScrollViewInSubviews(of view: NSView) -> NSScrollView? {
+        if let sv = view as? NSScrollView { return sv }
+        for subview in view.subviews {
+            if let sv = findScrollViewInSubviews(of: subview) { return sv }
         }
         return nil
     }

@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://swiftlib.local/schema/adapter-v1.json",
+  "title": "SwiftLib Site Adapter",
+  "description": "Machine-readable contract for Resources/adapters/*.json. AI repair agents MUST stay within this schema: the runtime has a fixed set of transforms / postProcess / kinds, and invented names silently degrade to identity functions. If you need a capability that isn't here, the fix must be in Swift (runtime extension) first, not in adapter JSON.",
+
+  "type": "object",
+  "required": ["id", "schemaVersion", "routes"],
+  "additionalProperties": false,
+
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Unique adapter identifier, lowercase kebab-case. File name must match: <id>.json."
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Bump on every schema drift fix so we can trace who changed what."
+    },
+    "displayName": { "type": "string" },
+    "description": { "type": "string" },
+
+    "routes": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Route name → definition. Conventional names: search, byDoi, byTitle, byTitleMatch, byIsbn, byPmid, byArxiv, abstractByDoi, detail. Swift callers hardcode these names.",
+      "additionalProperties": { "$ref": "#/$defs/route" }
+    },
+
+    "canary": {
+      "type": "array",
+      "description": "Live-URL verification fixtures. ≥1 per adapter is STRONGLY recommended; canary failures are the primary drift signal.",
+      "items": { "$ref": "#/$defs/canaryCase" }
+    }
+  },
+
+  "$defs": {
+    "route": {
+      "type": "object",
+      "required": ["url", "extract"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL template. {placeholder} substrings are filled from caller context via expandURL(_:context:). Keys ending in Url/URL are substituted verbatim (no percent-encoding); other keys are URL-query-encoded. Empty &key= query params get auto-scrubbed."
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "timeoutSeconds": { "type": "number", "minimum": 1, "maximum": 60 },
+        "kind": {
+          "enum": ["http", "webView"],
+          "default": "http",
+          "description": "Transport executor. `http` uses URLSession + SiteAdapterRuntime. `webView` loads the URL in a hidden WKWebView (reusing existing browser cookies via WebSessionBroker) and returns the rendered page source for extraction. Both are implemented; default is `http` for backward compatibility."
+        },
+        "requiresAuthenticatedSession": {
+          "type": "boolean",
+          "description": "Meaningful only for kind=webView. Unused today."
+        },
+        "extract": { "$ref": "#/$defs/extract" }
+      }
+    },
+
+    "extract": {
+      "type": "object",
+      "required": ["kind", "fields"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": ["json", "html"],
+          "description": "ONLY json and html are implemented. xml is NOT yet supported — do not emit it."
+        },
+        "itemsPath": {
+          "type": "string",
+          "description": "Dot-path to the array/object to iterate. '$' means root. Supports {placeholder} expansion against caller context (required for Open Library's dynamic ISBN root). Defaults to '$'."
+        },
+        "itemFilter": {
+          "type": "object",
+          "required": ["field"],
+          "additionalProperties": false,
+          "properties": {
+            "field": { "type": "string" },
+            "equals": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+          }
+        },
+        "fields": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/field" }
+        }
+      }
+    },
+
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "anyOf": [
+        { "required": ["paths"] },
+        { "required": ["strategies"] },
+        { "required": ["template"] }
+      ],
+      "properties": {
+        "paths": {
+          "type": "array",
+          "description": "JSON-mode: ordered candidate paths; first non-empty wins. Supported syntax: $ | $.foo | foo.bar | foo[0] | foo[*] | foo[*].bar (array flattens to string array, joined by `separator`).",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "strategies": {
+          "type": "array",
+          "description": "HTML-mode: ordered extraction strategies; first match wins. Only regex strategy implemented.",
+          "items": { "$ref": "#/$defs/htmlStrategy" },
+          "minItems": 1
+        },
+        "template": {
+          "type": "string",
+          "description": "Computed-mode: render {json.path} placeholders against the current item. Example: '{biblio.first_page}-{biblio.last_page}'."
+        },
+        "elideIfMissing": {
+          "type": "array",
+          "description": "Only for template mode: if ANY listed path is absent in the item, the whole field resolves to null (prevents half-rendered strings like '101-').",
+          "items": { "type": "string" }
+        },
+        "separator": {
+          "type": "string",
+          "description": "Join separator when a resolved path yields an array. Defaults to '|'."
+        },
+        "transform": {
+          "enum": ["prefix4Int", "upper", "lower", "trim", "stripDoiOrgPrefix", "stripHtmlTags"],
+          "description": "STRING-level post-processor applied after stringify. These are the ONLY valid values. Inventing names silently returns identity. To add a transform, edit SiteAdapterRuntime.applyTransform() in Swift FIRST."
+        },
+        "postProcess": {
+          "enum": ["reconstructInvertedIndex"],
+          "description": "RAW-VALUE post-processor applied to the Any resolved from paths, before stringify. These are the ONLY valid values. Currently only OpenAlex's inverted-index abstract is supported. To add, edit SiteAdapterRuntime.applyPostProcess() in Swift FIRST."
+        }
+      }
+    },
+
+    "htmlStrategy": {
+      "type": "object",
+      "required": ["kind", "pattern", "group"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": ["regex"],
+          "description": "Only regex is implemented."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "NSRegularExpression with .dotMatchesLineSeparators + .caseInsensitive options preset. MUST anchor via nearby HTML landmarks (class=, id=, meta property=) to avoid false matches in long bodies."
+        },
+        "group": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based capture group index."
+        },
+        "stripTags": {
+          "type": "boolean",
+          "description": "When true, strips <...> tags and collapses whitespace before returning."
+        }
+      }
+    },
+
+    "canaryCase": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "route": {
+          "type": "string",
+          "description": "Explicit route name to exercise. REQUIRED when the adapter defines multiple search-like routes (e.g. byDoi AND byTitle)."
+        },
+        "searchQuery": {
+          "type": "string",
+          "description": "Shorthand: populates {query}, {doi}, {title}, {isbn}, {pmid}, {arxivId} all at once. Good for single-placeholder URLs. Prefer explicit `context` for clarity."
+        },
+        "subjectUrl": { "type": "string", "format": "uri" },
+        "context": {
+          "type": "object",
+          "description": "Explicit placeholder → value map passed to BOTH expandURL AND extractJSON. Required for routes whose URL or itemsPath uses non-`{query}` placeholders.",
+          "additionalProperties": { "type": "string" }
+        },
+        "expectSearch": {
+          "type": "object",
+          "description": "Expected subset of the extracted first row. Keys must be field names declared in the route's `extract.fields`. Values are STRING matches (adapter rows are always stringified).",
+          "additionalProperties": { "type": "string" }
+        },
+        "expectDetail": {
+          "type": "object",
+          "description": "Expected subset of the detail route output, when subjectUrl is set.",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    }
+  }
+}

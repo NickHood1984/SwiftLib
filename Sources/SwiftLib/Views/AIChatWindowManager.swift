@@ -37,17 +37,57 @@ private struct AIChatSendScriptPayload: Encodable {
     let sendSel: String
 }
 
+private struct AIChatResponseTrackerScriptPayload: Encodable {
+    let selectors: [String]
+}
+
 private struct AIChatResponseScriptPayload: Encodable {
     let responseSel: String
     let contentSel: String
     let streamingSel: String
     let beforeCount: Int
+    let beforeText: String
 }
 
 private struct AIChatResponseSnapshot: Decodable, Equatable {
     let status: String
     let text: String
     let responseCount: Int
+    let pendingRequests: Int
+    let requestsStartedSinceMark: Int
+    let responseIdleMs: Int
+    let networkIdleMs: Int
+}
+
+private extension AIChatResponseSnapshot {
+    var hasTrackedNetworkCompletion: Bool {
+        requestsStartedSinceMark > 0
+            && pendingRequests == 0
+            && responseIdleMs >= 900
+            && networkIdleMs >= 300
+    }
+}
+
+struct AIChatResponseStabilityTracker {
+    private(set) var lastText = ""
+    private(set) var stablePollCount = 0
+
+    mutating func ingest(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if trimmed == lastText {
+            stablePollCount += 1
+        } else {
+            lastText = trimmed
+            stablePollCount = 0
+        }
+    }
+
+    func hasSettled(for status: String) -> Bool {
+        let requiredStablePolls = status == "done" ? 2 : 4
+        return !lastText.isEmpty && stablePollCount >= requiredStablePolls
+    }
 }
 
 private extension AIDOMServiceConfig {
@@ -189,11 +229,22 @@ final class AIChatWindowManager: ObservableObject {
             let (wv, sel) = try await prepareChatOperation()
 
             _ = try await waitForInputReady(wv, selectors: sel)
-            let beforeCount = try await countResponses(wv, selector: sel.responseSelector)
+            let beforeResponse = try await captureResponseSnapshot(
+                on: wv,
+                selectors: sel,
+                beforeCount: -1,
+                beforeText: ""
+            )
             try await injectText(text, into: wv, inputSelector: sel.inputSelector)
             try await waitForInjectedText(wv, selectors: sel)
+            try await armResponseTracker(on: wv, selectors: sel)
             try await triggerSend(on: wv, selectors: sel)
-            let response = try await pollForResponse(wv, selectors: sel, beforeCount: beforeCount)
+            let response = try await pollForResponse(
+                wv,
+                selectors: sel,
+                beforeCount: beforeResponse.responseCount,
+                beforeText: beforeResponse.text
+            )
             lastOperationErrorMessage = nil
             return response
         } catch {
@@ -313,31 +364,75 @@ final class AIChatWindowManager: ObservableObject {
         throw AIChatError.inputNotFound(selectors.inputSelector)
     }
 
-    private func countResponses(_ wv: WKWebView, selector: String) async throws -> Int {
-        let payload = try jsonLiteral(for: ["selector": selector])
-        let result = try await evaluateJavaScript(
-            "(() => { const args = \(payload); return document.querySelectorAll(args.selector).length; })();",
-            on: wv
-        )
-        return intValue(from: result) ?? 0
-    }
-
     private func injectText(_ text: String, into wv: WKWebView, inputSelector: String) async throws {
         let payload = try jsonLiteral(for: AIChatInjectScriptPayload(inputSel: inputSelector, text: text))
         let result = try await evaluateJavaScript(
             """
             (() => {
                 const args = \(payload);
-                const el = document.querySelector(args.inputSel);
+                function isVisible(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }
+
+                function isEnabled(el) {
+                    return !!el
+                        && !el.disabled
+                        && el.getAttribute('aria-disabled') !== 'true'
+                        && !el.readOnly;
+                }
+
+                const inputs = Array.from(document.querySelectorAll(args.inputSel));
+                const el = inputs.find(input => isVisible(input) && isEnabled(input))
+                    || inputs.find(input => isEnabled(input))
+                    || inputs[0];
                 if (!el) return { ok: false, reason: 'no_input' };
 
                 if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-                    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
-                        || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-                    if (setter) setter.call(el, args.text);
-                    else el.value = args.text;
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    const prototype = el.tagName === 'TEXTAREA'
+                        ? window.HTMLTextAreaElement.prototype
+                        : window.HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+
+                    const fireInput = (inputType, data) => {
+                        try {
+                            el.dispatchEvent(new InputEvent('input', {
+                                bubbles: true,
+                                cancelable: false,
+                                inputType,
+                                data
+                            }));
+                        } catch (_) {
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                        }
+                    };
+
+                    el.focus();
+                    if (typeof el.select === 'function') {
+                        el.select();
+                    }
+                    if (typeof el.setSelectionRange === 'function') {
+                        try { el.setSelectionRange(0, (el.value || '').length); } catch (_) {}
+                    }
+
+                    let insertedByCommand = false;
+                    if (document.execCommand) {
+                        try {
+                            insertedByCommand = document.execCommand('insertText', false, args.text);
+                        } catch (_) {
+                            insertedByCommand = false;
+                        }
+                    }
+
+                    if (!insertedByCommand || (el.value || '').trim() !== args.text.trim()) {
+                        if (setter) setter.call(el, args.text);
+                        else el.value = args.text;
+                        fireInput('insertText', args.text);
+                    }
+
                 } else {
                     el.focus();
                     if (document.execCommand) {
@@ -349,8 +444,10 @@ final class AIChatWindowManager: ObservableObject {
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                 }
 
+                el.dispatchEvent(new Event('change', { bubbles: true }));
                 el.focus();
-                return { ok: true };
+                const value = el.value || el.innerText || el.textContent || '';
+                return { ok: value.trim().length > 0, valueLength: value.trim().length };
             })();
             """,
             on: wv
@@ -391,6 +488,190 @@ final class AIChatWindowManager: ObservableObject {
         throw AIChatError.inputUnavailable("\(selectors.name) 的输入框没有接受文本，请确认页面已经准备好。")
     }
 
+    private func armResponseTracker(on wv: WKWebView, selectors: AIDOMServiceConfig) async throws {
+        let selectorList = [
+            selectors.responseSelector,
+            selectors.contentSelector,
+            "[data-testid*='assistant']",
+            "[data-testid*='message']",
+            "div[class*='assistant']",
+            "div[class*='message']",
+            "div[class*='markdown']",
+            "div[class*='rich-text']",
+            "article",
+            "main"
+        ]
+        .flatMap { raw in
+            raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        }
+        .filter { !$0.isEmpty }
+
+        let payload = try jsonLiteral(for: AIChatResponseTrackerScriptPayload(selectors: selectorList))
+        _ = try await evaluateJavaScript(
+            """
+            (() => {
+                const args = \(payload);
+                const responseSelectors = Array.from(new Set(args.selectors || []));
+                const tracker = window.__swiftlibAIChatTracker || (window.__swiftlibAIChatTracker = {
+                    installed: false,
+                    activeRequests: new Set(),
+                    totalRequestCount: 0,
+                    pendingRequests: 0,
+                    requestsAtMark: 0,
+                    lastNetworkActivityAt: Date.now(),
+                    lastResponseMutationAt: Date.now(),
+                    responseMutationCount: 0,
+                    armed: false
+                });
+
+                tracker.responseSelectors = responseSelectors;
+
+                function matchesResponseRegion(node) {
+                    const element = node?.nodeType === Node.ELEMENT_NODE
+                        ? node
+                        : node?.parentElement;
+                    if (!element) return false;
+
+                    return responseSelectors.some(selector => {
+                        try {
+                            return element.matches(selector) || !!element.closest(selector);
+                        } catch (_) {
+                            return false;
+                        }
+                    });
+                }
+
+                function markResponseMutation() {
+                    tracker.lastResponseMutationAt = Date.now();
+                    tracker.responseMutationCount += 1;
+                }
+
+                function finalizeRequest(requestID) {
+                    if (!tracker.activeRequests.has(requestID)) return;
+                    tracker.activeRequests.delete(requestID);
+                    tracker.pendingRequests = tracker.activeRequests.size;
+                    tracker.lastNetworkActivityAt = Date.now();
+                }
+
+                function installFetchTracking() {
+                    if (tracker.fetchTrackingInstalled || typeof window.fetch !== 'function') return;
+                    tracker.fetchTrackingInstalled = true;
+                    const originalFetch = window.fetch.bind(window);
+
+                    window.fetch = (...fetchArgs) => {
+                        const requestID = ++tracker.totalRequestCount;
+                        tracker.activeRequests.add(requestID);
+                        tracker.pendingRequests = tracker.activeRequests.size;
+                        tracker.lastNetworkActivityAt = Date.now();
+
+                        return originalFetch(...fetchArgs).then(response => {
+                            try {
+                                const cloned = response.clone();
+                                const body = cloned.body;
+                                if (!body || typeof body.getReader !== 'function') {
+                                    finalizeRequest(requestID);
+                                    return response;
+                                }
+
+                                const reader = body.getReader();
+                                const pump = () => reader.read().then(({ done, value }) => {
+                                    tracker.lastNetworkActivityAt = Date.now();
+                                    if (value && value.byteLength) {
+                                        tracker.lastNetworkActivityAt = Date.now();
+                                    }
+                                    if (done) {
+                                        finalizeRequest(requestID);
+                                        return;
+                                    }
+                                    return pump();
+                                }).catch(() => {
+                                    finalizeRequest(requestID);
+                                });
+                                pump();
+                            } catch (_) {
+                                finalizeRequest(requestID);
+                            }
+
+                            return response;
+                        }).catch(error => {
+                            finalizeRequest(requestID);
+                            throw error;
+                        });
+                    };
+                }
+
+                function installXHRTracking() {
+                    if (tracker.xhrTrackingInstalled || !window.XMLHttpRequest) return;
+                    tracker.xhrTrackingInstalled = true;
+
+                    const originalOpen = window.XMLHttpRequest.prototype.open;
+                    const originalSend = window.XMLHttpRequest.prototype.send;
+
+                    window.XMLHttpRequest.prototype.open = function(...openArgs) {
+                        this.__swiftlibTrackerRequestID = null;
+                        return originalOpen.apply(this, openArgs);
+                    };
+
+                    window.XMLHttpRequest.prototype.send = function(...sendArgs) {
+                        const requestID = ++tracker.totalRequestCount;
+                        this.__swiftlibTrackerRequestID = requestID;
+                        tracker.activeRequests.add(requestID);
+                        tracker.pendingRequests = tracker.activeRequests.size;
+                        tracker.lastNetworkActivityAt = Date.now();
+
+                        this.addEventListener('progress', () => {
+                            tracker.lastNetworkActivityAt = Date.now();
+                        });
+
+                        this.addEventListener('loadend', () => {
+                            finalizeRequest(requestID);
+                        }, { once: true });
+
+                        return originalSend.apply(this, sendArgs);
+                    };
+                }
+
+                function installMutationTracking() {
+                    if (tracker.mutationTrackingInstalled || !document.body) return;
+                    tracker.mutationTrackingInstalled = true;
+                    const observer = new MutationObserver(mutations => {
+                        if (!tracker.armed) return;
+                        const touchedResponse = mutations.some(mutation => {
+                            if (matchesResponseRegion(mutation.target)) return true;
+                            return Array.from(mutation.addedNodes || []).some(matchesResponseRegion)
+                                || Array.from(mutation.removedNodes || []).some(matchesResponseRegion);
+                        });
+
+                        if (touchedResponse) {
+                            markResponseMutation();
+                        }
+                    });
+
+                    observer.observe(document.body, {
+                        subtree: true,
+                        childList: true,
+                        characterData: true
+                    });
+                }
+
+                if (!tracker.installed) {
+                    tracker.installed = true;
+                    installFetchTracking();
+                    installXHRTracking();
+                    installMutationTracking();
+                }
+
+                tracker.armed = true;
+                tracker.requestsAtMark = tracker.totalRequestCount;
+                tracker.lastNetworkActivityAt = Date.now();
+                tracker.lastResponseMutationAt = Date.now();
+                return { ok: true };
+            })();
+            """,
+            on: wv
+        )
+    }
+
     private func triggerSend(on wv: WKWebView, selectors: AIDOMServiceConfig) async throws {
         let snapshot = try await capturePageSnapshot(on: wv, selectors: selectors)
         if let diagnostic = diagnoseAIChatPage(
@@ -407,30 +688,77 @@ final class AIChatWindowManager: ObservableObject {
             """
             (() => {
                 const args = \(payload);
-                const el = document.querySelector(args.inputSel);
+
+                function isVisible(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }
+
+                function isEnabled(el) {
+                    return !!el
+                        && !el.disabled
+                        && el.getAttribute('aria-disabled') !== 'true'
+                        && !el.readOnly;
+                }
+
+                const inputs = Array.from(document.querySelectorAll(args.inputSel));
+                const el = inputs.find(input => isVisible(input) && isEnabled(input))
+                    || inputs.find(input => isEnabled(input))
+                    || inputs[0];
                 if (!el) return { ok: false, reason: 'no_input' };
 
-                if (!args.sendSel || args.sendSel === 'Enter') {
+                const dispatchEnter = () => {
+                    el.focus();
                     ['keydown', 'keypress', 'keyup'].forEach(type => {
                         el.dispatchEvent(new KeyboardEvent(type, {
                             key: 'Enter',
                             code: 'Enter',
                             keyCode: 13,
                             which: 13,
-                            bubbles: true
+                            bubbles: true,
+                            cancelable: true
                         }));
                     });
-                    return { ok: true };
+                    const form = el.closest('form');
+                    if (form && typeof form.requestSubmit === 'function') {
+                        try { form.requestSubmit(); } catch (_) {}
+                    }
+                    return true;
+                };
+
+                const clickSendButton = button => {
+                    if (!button) return false;
+                    button.focus?.();
+                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(type => {
+                        button.dispatchEvent(new MouseEvent(type, {
+                            bubbles: true,
+                            cancelable: true,
+                            view: window
+                        }));
+                    });
+                    if (typeof button.click === 'function') {
+                        button.click();
+                    }
+                    return true;
+                };
+
+                if (!args.sendSel || args.sendSel === 'Enter') {
+                    return { ok: dispatchEnter(), method: 'enter' };
                 }
 
                 const button = document.querySelector(args.sendSel);
-                if (!button) return { ok: false, reason: 'no_send' };
-                if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
-                    return { ok: false, reason: 'send_disabled' };
+                if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+                    return { ok: clickSendButton(button), method: 'button' };
                 }
 
-                button.click();
-                return { ok: true };
+                return {
+                    ok: dispatchEnter(),
+                    reason: button ? 'send_disabled_fallback' : 'no_send_fallback',
+                    method: 'enter_fallback'
+                };
             })();
             """,
             on: wv
@@ -455,12 +783,17 @@ final class AIChatWindowManager: ObservableObject {
         }
     }
 
-    private func pollForResponse(_ wv: WKWebView, selectors: AIDOMServiceConfig, beforeCount: Int) async throws -> String {
-        var lastText = ""
-        var stableCount = 0
+    private func pollForResponse(
+        _ wv: WKWebView,
+        selectors: AIDOMServiceConfig,
+        beforeCount: Int,
+        beforeText: String
+    ) async throws -> String {
         var responseStarted = false
+        let normalizedBeforeText = beforeText.trimmingCharacters(in: .whitespacesAndNewlines)
         let responseStartDeadline = Date().addingTimeInterval(15)
         let completionDeadline = Date().addingTimeInterval(90)
+        var stabilityTracker = AIChatResponseStabilityTracker()
 
         while Date() < completionDeadline {
             try Task.checkCancellation()
@@ -470,26 +803,37 @@ final class AIChatWindowManager: ObservableObject {
 
             try await Task.sleep(nanoseconds: 700_000_000)
 
-            let response = try await captureResponseSnapshot(on: wv, selectors: selectors, beforeCount: beforeCount)
+            let response = try await captureResponseSnapshot(
+                on: wv,
+                selectors: selectors,
+                beforeCount: beforeCount,
+                beforeText: normalizedBeforeText
+            )
             let status = response.status
             let text = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            if response.responseCount > beforeCount {
+            let textChanged = !text.isEmpty && text != normalizedBeforeText
+            if response.responseCount > beforeCount || textChanged {
                 responseStarted = true
             }
 
-            if status == "done" {
-                if text.isEmpty { throw AIChatError.emptyResponse }
-                return text
-            }
-
             if responseStarted && !text.isEmpty {
-                if text == lastText && !text.isEmpty {
-                    stableCount += 1
-                    if stableCount >= 4 { return text }
-                } else {
-                    lastText = text
-                    stableCount = 0
+                stabilityTracker.ingest(text)
+                let stableText = stabilityTracker.lastText.isEmpty ? text : stabilityTracker.lastText
+                let structuredState = StructuredJSONCandidateExtractor.candidateState(
+                    in: stableText,
+                    requireStructuredPrefix: true
+                )
+
+                if case .incomplete = structuredState {
+                    continue
+                }
+
+                if response.hasTrackedNetworkCompletion {
+                    return stableText
+                }
+                if stabilityTracker.hasSettled(for: status) {
+                    return stableText
                 }
             }
 
@@ -508,8 +852,8 @@ final class AIChatWindowManager: ObservableObject {
             }
         }
 
-        if responseStarted, !lastText.isEmpty {
-            return lastText
+        if responseStarted, !stabilityTracker.lastText.isEmpty {
+            return stabilityTracker.lastText
         }
 
         throw AIChatError.timeout
@@ -530,7 +874,17 @@ final class AIChatWindowManager: ObservableObject {
                     return rect.width > 0 && rect.height > 0;
                 }
 
-                const input = document.querySelector(args.inputSel);
+                function isEnabled(el) {
+                    return !!el
+                        && !el.disabled
+                        && el.getAttribute('aria-disabled') !== 'true'
+                        && !el.readOnly;
+                }
+
+                const inputs = Array.from(document.querySelectorAll(args.inputSel));
+                const input = inputs.find(candidate => isVisible(candidate) && isEnabled(candidate))
+                    || inputs.find(candidate => isEnabled(candidate))
+                    || inputs[0];
                 const sendButton = args.sendSel && args.sendSel !== 'Enter'
                     ? document.querySelector(args.sendSel)
                     : null;
@@ -561,10 +915,7 @@ final class AIChatWindowManager: ObservableObject {
                     readyState: document.readyState || '',
                     hasInput: !!input,
                     inputVisible: isVisible(input),
-                    inputEnabled: !!input
-                        && !input.disabled
-                        && input.getAttribute('aria-disabled') !== 'true'
-                        && !input.readOnly,
+                    inputEnabled: isEnabled(input),
                     inputValueLength: inputValue.trim().length,
                     hasSendButton: !!sendButton || !args.sendSel || args.sendSel === 'Enter',
                     sendButtonVisible: !args.sendSel || args.sendSel === 'Enter' ? true : isVisible(sendButton),
@@ -585,37 +936,143 @@ final class AIChatWindowManager: ObservableObject {
         return try decodeJSONObject(result, as: AIChatPageSnapshot.self)
     }
 
-    private func captureResponseSnapshot(on wv: WKWebView, selectors: AIDOMServiceConfig, beforeCount: Int) async throws -> AIChatResponseSnapshot {
+    private func captureResponseSnapshot(
+        on wv: WKWebView,
+        selectors: AIDOMServiceConfig,
+        beforeCount: Int,
+        beforeText: String
+    ) async throws -> AIChatResponseSnapshot {
         let payload = try jsonLiteral(for: AIChatResponseScriptPayload(
             responseSel: selectors.responseSelector,
             contentSel: selectors.contentSelector,
             streamingSel: selectors.streamingSelector,
-            beforeCount: beforeCount
+            beforeCount: beforeCount,
+            beforeText: beforeText
         ))
 
         let result = try await evaluateJavaScript(
             """
             (() => {
                 const args = \(payload);
-                const responses = document.querySelectorAll(args.responseSel);
-                if (responses.length <= args.beforeCount) {
-                    return { status: 'waiting', text: '', responseCount: responses.length };
+
+                function isVisible(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
                 }
 
-                const last = responses[responses.length - 1];
-                const content = args.contentSel ? (last.querySelector(args.contentSel) || last) : last;
-                const text = (content?.innerText || '').trim();
+                function collectResponses() {
+                    const selectorCandidates = [
+                        args.contentSel,
+                        args.responseSel,
+                        '[data-testid*="assistant"] [data-testid*="message"]',
+                        '[data-testid*="message-content"]',
+                        'div[class*="assistant"] div[class*="markdown"]',
+                        'div[class*="message-content"]',
+                        'div[class*="rich-text"]',
+                        'div[class*="markdown"]',
+                        'article'
+                    ].filter(Boolean);
 
-                if (args.streamingSel) {
-                    const streaming = document.querySelector(args.streamingSel);
+                    function isSuggestionNode(node) {
+                        const element = node?.nodeType === Node.ELEMENT_NODE
+                            ? node
+                            : node?.parentElement;
+                        if (!element) return false;
+
+                        const suggestionHost = element.closest('[class*="suggest"], [data-testid*="suggest"]');
+                        if (!suggestionHost) return false;
+
+                        const className = String(suggestionHost.className || '').toLowerCase();
+                        const testID = String(suggestionHost.getAttribute?.('data-testid') || '').toLowerCase();
+                        return className.includes('suggest') || testID.includes('suggest');
+                    }
+
+                    for (const selector of selectorCandidates) {
+                        const nodes = Array.from(document.querySelectorAll(selector))
+                            .filter(node =>
+                                isVisible(node)
+                                && !isSuggestionNode(node)
+                                && (node.innerText || '').trim().length > 0
+                            );
+                        if (nodes.length > 0) {
+                            return nodes;
+                        }
+                    }
+
+                    return [];
+                }
+
+                const responses = collectResponses();
+                const last = responses[responses.length - 1] || null;
+                const content = args.contentSel && last ? (last.querySelector(args.contentSel) || last) : last;
+                const text = (content?.innerText || '').trim();
+                const textChanged = !!text && text !== (args.beforeText || '');
+
+                if (args.beforeCount < 0) {
                     return {
-                        status: streaming ? 'streaming' : 'done',
+                        status: 'baseline',
                         text,
-                        responseCount: responses.length
+                        responseCount: responses.length,
+                        pendingRequests: 0,
+                        requestsStartedSinceMark: 0,
+                        responseIdleMs: 0,
+                        networkIdleMs: 0
                     };
                 }
 
-                return { status: 'check', text, responseCount: responses.length };
+                const tracker = window.__swiftlibAIChatTracker || null;
+                const pendingRequests = tracker ? (tracker.pendingRequests || 0) : 0;
+                const requestsStartedSinceMark = tracker
+                    ? Math.max(0, (tracker.totalRequestCount || 0) - (tracker.requestsAtMark || 0))
+                    : 0;
+                const responseIdleMs = tracker
+                    ? Math.max(0, Date.now() - (tracker.lastResponseMutationAt || Date.now()))
+                    : 0;
+                const networkIdleMs = tracker
+                    ? Math.max(0, Date.now() - (tracker.lastNetworkActivityAt || Date.now()))
+                    : 0;
+
+                if (responses.length <= args.beforeCount && !textChanged) {
+                    return {
+                        status: 'waiting',
+                        text,
+                        responseCount: responses.length,
+                        pendingRequests,
+                        requestsStartedSinceMark,
+                        responseIdleMs,
+                        networkIdleMs
+                    };
+                }
+
+                if (args.streamingSel) {
+                    const streamingSelectors = args.streamingSel
+                        .split(',')
+                        .map(item => item.trim())
+                        .filter(Boolean);
+                    const streaming = streamingSelectors.some(selector => document.querySelector(selector));
+                    return {
+                        status: streaming ? 'streaming' : 'done',
+                        text,
+                        responseCount: responses.length,
+                        pendingRequests,
+                        requestsStartedSinceMark,
+                        responseIdleMs,
+                        networkIdleMs
+                    };
+                }
+
+                return {
+                    status: responses.length > args.beforeCount || textChanged ? 'check' : 'waiting',
+                    text,
+                    responseCount: responses.length,
+                    pendingRequests,
+                    requestsStartedSinceMark,
+                    responseIdleMs,
+                    networkIdleMs
+                };
             })();
             """,
             on: wv
@@ -972,6 +1429,26 @@ private struct AIChatBrowserView: NSViewRepresentable {
         var currentURL: URL?
         var backObserver: NSObjectProtocol?
         var forwardObserver: NSObjectProtocol?
+
+        /// 拦截非 http/https 的 URL scheme，避免页面里触发 `bitbrowser://` / `weixin://`
+        /// 这类自定义协议时 macOS 弹出「未设定应用程序」的系统提示。
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            guard let url = navigationAction.request.url else {
+                decisionHandler(.allow)
+                return
+            }
+            let scheme = url.scheme?.lowercased()
+            switch scheme {
+            case "http", "https", "about", "data", "blob", "file", nil:
+                decisionHandler(.allow)
+            default:
+                decisionHandler(.cancel)
+            }
+        }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             Task { @MainActor in

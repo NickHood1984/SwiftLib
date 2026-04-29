@@ -313,24 +313,30 @@ struct AnnotationCard: View {
         Color.primary.opacity(isSelected ? 0.045 : 0.022)
     }
 
-    private var cardContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 6) {
-                Circle()
-                    .fill(Color(hex: annotation.color).opacity(0.85))
-                    .frame(width: 8, height: 8)
+    // MARK: - Card Header (shadcn-style: Title + Description on left, Action on right)
 
-                Text(annotation.type.label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+    private var cardHeader: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 0) {
+                // CardTitle row
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color(hex: annotation.color).opacity(0.85))
+                        .frame(width: 8, height: 8)
 
-                Spacer(minLength: 4)
+                    Text(annotation.type.label)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
+                }
 
+                Spacer(minLength: 8)
+
+                // CardAction (top-right) — bare icons, height matches title text
                 if showsActionButtons {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 10) {
                         Button(action: onEdit) {
                             Image(systemName: "pencil")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
@@ -338,28 +344,21 @@ struct AnnotationCard: View {
 
                         Button(action: onDelete) {
                             Image(systemName: "trash")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.red.opacity(0.7))
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.red.opacity(0.65))
                         }
                         .buttonStyle(.plain)
                         .help("删除标注")
                     }
-                } else {
-                    Text("P\(annotation.pageIndex + 1)")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.tertiary)
-
-                    Text("·")
-                        .foregroundStyle(.quaternary)
-
-                    Text(annotation.dateCreated.formatted(.dateTime.month().day().hour().minute()))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
                 }
             }
-            .frame(height: 16)
+        }
+    }
 
+    // MARK: - Card Body (shadcn-style: content area below header)
+
+    private var cardBody: some View {
+        VStack(alignment: .leading, spacing: 8) {
             if let text = annotation.selectedText, !text.isEmpty {
                 Text(text)
                     .font(.callout)
@@ -407,9 +406,33 @@ struct AnnotationCard: View {
                 }
             }
         }
-        .padding(12)
+    }
+
+    // MARK: - Composed Card
+
+    private var cardContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Card Header
+            cardHeader
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, hasBody ? 0 : 14)
+
+            if hasBody {
+                cardBody
+                    .padding(.horizontal, 14)
+                    .padding(.top, 8)
+                    .padding(.bottom, 14)
+            }
+        }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var hasBody: Bool {
+        let hasText = annotation.selectedText.map { !$0.isEmpty } ?? false
+        let hasNote = normalizedNotePreview != nil
+        return hasText || hasNote
     }
 
     var body: some View {
@@ -423,7 +446,7 @@ struct AnnotationCard: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(cardStroke, lineWidth: isSelected ? 1 : 0.5)
             )
-                .shadow(color: cardShadow, radius: isSelected ? 8 : 0, y: isSelected ? 3 : 0)
+            .shadow(color: cardShadow, radius: isSelected ? 8 : 2, y: isSelected ? 3 : 1)
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .onTapGesture { onTap() }
             .onHover { isHovered = $0 }

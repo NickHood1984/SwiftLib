@@ -1,0 +1,136 @@
+{
+  "id": "douban-book",
+  "schemaVersion": 1,
+  "displayName": "豆瓣读书",
+  "description": "Chinese book metadata source. `search` hits the lightweight `/j/subject_suggest` endpoint (schema: current returns type=\"b\", legacy returned type=\"book\"; we accept both). `detail` scrapes the full subject page for ISBN, publisher, pages, and synopsis.",
+  "routes": {
+    "search": {
+      "url": "https://book.douban.com/j/subject_suggest?q={query}",
+      "headers": {
+        "Referer": "https://book.douban.com",
+        "Accept": "application/json, text/javascript, */*"
+      },
+      "timeoutSeconds": 10,
+      "extract": {
+        "kind": "json",
+        "itemsPath": "$",
+        "itemFilter": {
+          "field": "type",
+          "equals": ["b", "book"]
+        },
+        "fields": {
+          "title":      { "paths": ["title"] },
+          "subjectUrl": { "paths": ["url"] },
+          "subjectId":  { "paths": ["id"] },
+          "authorRaw":  { "paths": ["author_name", "extra_attrs.author"] },
+          "year":       { "paths": ["year", "extra_attrs.year"], "transform": "prefix4Int" },
+          "isbn":       { "paths": ["extra_attrs.isbn"] },
+          "publisher":  { "paths": ["extra_attrs.publisher"] }
+        }
+      }
+    },
+    "detail": {
+      "url": "{subjectUrl}",
+      "headers": {
+        "Referer": "https://book.douban.com",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+      },
+      "timeoutSeconds": 15,
+      "extract": {
+        "kind": "html",
+        "fields": {
+          "isbn": {
+            "strategies": [
+              {
+                "kind": "regex",
+                "pattern": "<meta[^>]+property=\"book:isbn\"[^>]+content=\"([0-9Xx]{10,13})\"",
+                "group": 1
+              },
+              {
+                "kind": "regex",
+                "pattern": "<span class=\"pl\">\\s*ISBN:?\\s*</span>\\s*([0-9Xx]{10,13})",
+                "group": 1
+              }
+            ],
+            "transform": "upper"
+          },
+          "publisher": {
+            "strategies": [
+              {
+                "kind": "regex",
+                "pattern": "<span class=\"pl\">\\s*出版社:?\\s*</span>([\\s\\S]*?)<br",
+                "group": 1,
+                "stripTags": true
+              }
+            ]
+          },
+          "year": {
+            "strategies": [
+              {
+                "kind": "regex",
+                "pattern": "<span class=\"pl\">\\s*出版年:?\\s*</span>([\\s\\S]*?)<br",
+                "group": 1,
+                "stripTags": true
+              }
+            ],
+            "transform": "prefix4Int"
+          },
+          "pages": {
+            "strategies": [
+              {
+                "kind": "regex",
+                "pattern": "<span class=\"pl\">\\s*页数:?\\s*</span>([\\s\\S]*?)<br",
+                "group": 1,
+                "stripTags": true
+              }
+            ]
+          },
+          "authorRaw": {
+            "strategies": [
+              {
+                "kind": "regex",
+                "pattern": "<span[^>]*>\\s*作 者:?\\s*</span>:?([\\s\\S]*?)<br",
+                "group": 1,
+                "stripTags": true
+              },
+              {
+                "kind": "regex",
+                "pattern": "<span class=\"pl\">\\s*作者:?\\s*</span>:?([\\s\\S]*?)<br",
+                "group": 1,
+                "stripTags": true
+              }
+            ]
+          },
+          "abstract": {
+            "strategies": [
+              {
+                "kind": "regex",
+                "pattern": "<div class=\"intro\">\\s*<p>([\\s\\S]*?)</p>",
+                "group": 1,
+                "stripTags": true
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "canary": [
+    {
+      "name": "高级水生生物学 1999 (刘建康 / 科学出版社)",
+      "route": "search",
+      "searchQuery": "高级水生生物学",
+      "subjectUrl": "https://book.douban.com/subject/1554675/",
+      "expectSearch": {
+        "subjectId": "1554675",
+        "title": "高级水生生物学"
+      },
+      "expectDetail": {
+        "isbn": "9787030069870",
+        "publisher": "科学出版社",
+        "year": "1999"
+      }
+    }
+  ]
+}

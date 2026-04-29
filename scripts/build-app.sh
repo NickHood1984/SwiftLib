@@ -43,20 +43,7 @@ else
     PRODUCTS_DIR="$DERIVED_DATA/Build/Products/$CONFIGURATION"
 fi
 
-BACKEND_DIR="$PROJECT_DIR/swiftlib-translation-backend"
-BACKEND_RESOURCE_DIR="$APP_BUNDLE/Contents/Resources/TranslationBackend"
-BACKEND_SEED_DIR="$APP_BUNDLE/Contents/Resources/TranslationBackendSeed"
-BACKEND_MANIFEST_PATH="$APP_BUNDLE/Contents/Resources/TranslationBackendManifest.json"
 HELPERS_DIR="$APP_BUNDLE/Contents/Helpers"
-
-NODE_VERSION="${NODE_VERSION:-$(node --version 2>/dev/null | sed 's/^v//' || true)}"
-NODE_VERSION="${NODE_VERSION:-25.8.1}"
-NODE_ARCH="${NODE_ARCH:-darwin-arm64}"
-NODE_DIST_BASENAME="node-v${NODE_VERSION}-${NODE_ARCH}"
-NODE_CACHE_DIR="$PROJECT_DIR/.cache/node/${NODE_DIST_BASENAME}"
-NODE_TARBALL="$NODE_CACHE_DIR/${NODE_DIST_BASENAME}.tar.gz"
-NODE_DIST_URL="${NODE_DIST_URL:-https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIST_BASENAME}.tar.gz}"
-NODE_DIST_DIR="$NODE_CACHE_DIR/${NODE_DIST_BASENAME}"
 
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 CODESIGN_ENABLED="${CODESIGN_ENABLED:-1}"
@@ -289,12 +276,10 @@ download_node_runtime() {
 }
 
 embed_helpers() {
-    echo "▸ Embedding CLI and Node runtimes..."
+    echo "▸ Embedding CLI helper..."
     mkdir -p "$HELPERS_DIR"
     cp "$PRODUCTS_DIR/$CLI_NAME" "$HELPERS_DIR/$CLI_NAME"
     chmod 755 "$HELPERS_DIR/$CLI_NAME"
-    cp "$NODE_DIST_DIR/bin/node" "$HELPERS_DIR/node"
-    chmod 755 "$HELPERS_DIR/node"
 }
 
 embed_backend_runtime() {
@@ -380,12 +365,7 @@ sign_bundle() {
     fi
 
     echo "▸ Codesigning embedded helpers and app bundle..."
-    codesign_target "$HELPERS_DIR/node"
     codesign_target "$HELPERS_DIR/$CLI_NAME"
-
-    while IFS= read -r dylib; do
-        codesign_target "$dylib"
-    done < <(find "$BACKEND_RESOURCE_DIR/vendor/translation-server/node_modules" -type f \( -name '*.node' -o -name '*.dylib' \) 2>/dev/null | sort)
 
     if [ -d "$FRAMEWORKS_DIR" ]; then
         while IFS= read -r nested_binary; do
@@ -443,10 +423,7 @@ build_cli
 assemble_app_bundle
 embed_sparkle_runtime
 embed_app_icon
-prepare_backend_overlay
-download_node_runtime
 embed_helpers
-embed_backend_runtime
 sign_bundle
 create_dmg
 

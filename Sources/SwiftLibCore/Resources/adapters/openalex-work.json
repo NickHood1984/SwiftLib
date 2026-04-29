@@ -1,0 +1,92 @@
+{
+  "id": "openalex-work",
+  "schemaVersion": 2,
+  "displayName": "OpenAlex",
+  "description": "OpenAlex Works endpoint. `byDoi` fetches a single work (root is an object). `byTitle` hits /works?search=… and produces multiple candidate rows (root object has `results`). Both routes reconstruct the abstract from OpenAlex's inverted-index format via the `reconstructInvertedIndex` postProcess. Schema v2 (2026-04): OpenAlex dropped `grants` and split funding into two top-level arrays: `awards` (per-grant: `{funder_award_id, funder_display_name, funder_id, id, display_name}`) and `funders` (per-funder: `{id, display_name, ror}`). A dedicated top-level `keywords` array was also added alongside `concepts`/`topics`.",
+
+  "routes": {
+    "byDoi": {
+      "url": "https://api.openalex.org/works/doi:{doi}?select=id,doi,title,authorships,publication_year,primary_location,biblio,abstract_inverted_index,type,concepts,topics,keywords,open_access,cited_by_count,awards,funders&mailto={mailto}",
+      "timeoutSeconds": 10,
+      "extract": {
+        "kind": "json",
+        "itemsPath": "$",
+        "fields": {
+          "openAlexId":   { "paths": ["id"] },
+          "doi":          { "paths": ["doi"], "transform": "stripDoiOrgPrefix" },
+          "title":        { "paths": ["title"] },
+          "year":         { "paths": ["publication_year"] },
+          "type":         { "paths": ["type"] },
+          "journal":      { "paths": ["primary_location.source.display_name"] },
+          "volume":       { "paths": ["biblio.volume"] },
+          "issue":        { "paths": ["biblio.issue"] },
+          "firstPage":    { "paths": ["biblio.first_page"] },
+          "lastPage":     { "paths": ["biblio.last_page"] },
+          "pagesWhenBothPresent": {
+            "template": "{biblio.first_page}-{biblio.last_page}",
+            "elideIfMissing": ["biblio.last_page"]
+          },
+          "authors":      { "paths": ["authorships[*].author.display_name"], "separator": "|" },
+          "abstract":     { "paths": ["abstract_inverted_index"], "postProcess": "reconstructInvertedIndex" },
+          "isOpenAccess": { "paths": ["open_access.is_oa"] },
+          "oaUrl":        { "paths": ["open_access.oa_url"] },
+          "citedByCount": { "paths": ["cited_by_count"] },
+          "conceptNames": { "paths": ["concepts[*].display_name"], "separator": "|" },
+          "topicNames":   { "paths": ["topics[*].display_name"], "separator": "|" },
+          "keywordNames": { "paths": ["keywords[*].display_name"], "separator": "|" },
+          "grantFunders": { "paths": ["awards[*].funder_display_name", "funders[*].display_name"], "separator": "|" },
+          "grantAwards":  { "paths": ["awards[*].funder_award_id"], "separator": "|" }
+        }
+      }
+    },
+
+    "byTitle": {
+      "url": "https://api.openalex.org/works?search={title}&select=id,doi,title,authorships,publication_year,primary_location,biblio,abstract_inverted_index,type,concepts,topics,keywords,open_access,cited_by_count,awards,funders&per-page={perPage}&mailto={mailto}",
+      "timeoutSeconds": 10,
+      "extract": {
+        "kind": "json",
+        "itemsPath": "results",
+        "fields": {
+          "openAlexId":   { "paths": ["id"] },
+          "doi":          { "paths": ["doi"], "transform": "stripDoiOrgPrefix" },
+          "title":        { "paths": ["title"] },
+          "year":         { "paths": ["publication_year"] },
+          "type":         { "paths": ["type"] },
+          "journal":      { "paths": ["primary_location.source.display_name"] },
+          "volume":       { "paths": ["biblio.volume"] },
+          "issue":        { "paths": ["biblio.issue"] },
+          "firstPage":    { "paths": ["biblio.first_page"] },
+          "lastPage":     { "paths": ["biblio.last_page"] },
+          "pagesWhenBothPresent": {
+            "template": "{biblio.first_page}-{biblio.last_page}",
+            "elideIfMissing": ["biblio.last_page"]
+          },
+          "authors":      { "paths": ["authorships[*].author.display_name"], "separator": "|" },
+          "abstract":     { "paths": ["abstract_inverted_index"], "postProcess": "reconstructInvertedIndex" },
+          "isOpenAccess": { "paths": ["open_access.is_oa"] },
+          "oaUrl":        { "paths": ["open_access.oa_url"] },
+          "citedByCount": { "paths": ["cited_by_count"] },
+          "conceptNames": { "paths": ["concepts[*].display_name"], "separator": "|" },
+          "topicNames":   { "paths": ["topics[*].display_name"], "separator": "|" },
+          "keywordNames": { "paths": ["keywords[*].display_name"], "separator": "|" },
+          "grantFunders": { "paths": ["awards[*].funder_display_name", "funders[*].display_name"], "separator": "|" },
+          "grantAwards":  { "paths": ["awards[*].funder_award_id"], "separator": "|" }
+        }
+      }
+    }
+  },
+
+  "canary": [
+    {
+      "name": "Deep learning (10.1038/nature14539) — byDoi",
+      "route": "byDoi",
+      "context": { "doi": "10.1038/nature14539" },
+      "expectSearch": {
+        "title": "Deep learning",
+        "year": "2015",
+        "journal": "Nature",
+        "doi": "10.1038/nature14539"
+      }
+    }
+  ]
+}

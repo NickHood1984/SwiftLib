@@ -435,16 +435,31 @@ function cmdBase64ToUtf8(b64) {
   return new TextDecoder().decode(bytes);
 }
 
+async function cmdLoadSwiftLibCustomXmlParts(ctx) {
+  const parts = ctx.document.customXmlParts;
+  if (parts && typeof parts.getByNamespace === "function") {
+    try {
+      const scoped = parts.getByNamespace(CMD_SWIFTLIB_XML_NS);
+      scoped.load("items");
+      await ctx.sync();
+      return scoped.items || [];
+    } catch (error) {
+      console.warn("SwiftLib commands CustomXmlPart getByNamespace fallback:", error);
+    }
+  }
+
+  parts.load("items");
+  await ctx.sync();
+  for (const p of parts.items) p.load("namespaceUri");
+  await ctx.sync();
+  return parts.items.filter((p) => p.namespaceUri === CMD_SWIFTLIB_XML_NS);
+}
+
 async function cmdReadSwiftLibStorage(ctx) {
   if (!cmdIsWordApi14()) return null;
   try {
-    const parts = ctx.document.customXmlParts;
-    parts.load("items");
-    await ctx.sync();
-    for (const p of parts.items) p.load("namespaceUri");
-    await ctx.sync();
-    for (const p of parts.items) {
-      if (p.namespaceUri !== CMD_SWIFTLIB_XML_NS) continue;
+    const items = await cmdLoadSwiftLibCustomXmlParts(ctx);
+    for (const p of items) {
       const xmlProxy = p.getXml();
       await ctx.sync();
       const xml = xmlProxy.value;
@@ -538,24 +553,17 @@ async function cmdPersistSwiftLibStorageInContext(ctx, scan, style) {
   if (!cmdIsWordApi14()) return;
 
   const xml = cmdBuildStorageXml(cmdBuildStoragePayloadFromScan(scan, style));
-  const parts = ctx.document.customXmlParts;
-  parts.load("items");
-  await ctx.sync();
+  const items = await cmdLoadSwiftLibCustomXmlParts(ctx);
 
-  const items = parts.items;
-  for (let i = 0; i < items.length; i++) {
-    items[i].load("namespaceUri");
-  }
-  await ctx.sync();
-
+  let didUpdate = false;
   for (const p of items) {
-    if (p.namespaceUri === CMD_SWIFTLIB_XML_NS) {
-      p.setXml(xml);
-      await ctx.sync();
-      return;
-    }
+    p.setXml(xml);
+    didUpdate = true;
+    break;
   }
-  ctx.document.customXmlParts.add(xml);
+  if (!didUpdate) {
+    ctx.document.customXmlParts.add(xml);
+  }
   await ctx.sync();
 }
 
@@ -566,7 +574,6 @@ function cmdScanStructuralSignature(scan) {
 
 async function cmdScanDocument() {
   return Word.run(async (ctx) => {
-    const snapMap = await cmdBuildSnapshotCitationMap(ctx);
     const controls = ctx.document.contentControls;
     controls.load("items");
     await ctx.sync();
@@ -576,6 +583,11 @@ async function cmdScanDocument() {
     }
     for (const cc of controls.items) cc.load("tag,id,placeholderText");
     await ctx.sync();
+    if (!controls.items.some((cc) => (cc.tag || "").startsWith(CMD_TAG_PREFIX))) {
+      cmdTryTrackedObjectsRemoveAll(ctx);
+      return { citations: [], bibControls: [] };
+    }
+    const snapMap = await cmdBuildSnapshotCitationMap(ctx);
     const scan = cmdCollectScanFromItems(controls.items, snapMap);
     cmdTryTrackedObjectsRemoveAll(ctx);
     return scan;
@@ -640,6 +652,23 @@ async function cmdRefreshDocumentOnce(options) {
         await cmdDeleteSwiftLibGhostContentControlsInContext(ctx);
       }
 
+      const controls = ctx.document.contentControls;
+      controls.load("items");
+      await ctx.sync();
+      const items = controls.items;
+      if (!items.length) {
+        cmdTryTrackedObjectsRemoveAll(ctx);
+        return null;
+      }
+
+      for (const cc of items) cc.load("tag,id,placeholderText");
+      await ctx.sync();
+
+      if (!items.some((cc) => (cc.tag || "").startsWith(CMD_TAG_PREFIX))) {
+        cmdTryTrackedObjectsRemoveAll(ctx);
+        return null;
+      }
+
       // Read snapshot once; used for both citation map and document preferences.style.
       const rawSnap = cmdIsWordApi14() ? await cmdReadSwiftLibStorage(ctx) : null;
       const snapMap = new Map();
@@ -656,18 +685,6 @@ async function cmdRefreshDocumentOnce(options) {
           snapMap.set(cid.toLowerCase(), { style: payload.style || "", ids: payload.ids });
         }
       }
-
-      const controls = ctx.document.contentControls;
-      controls.load("items");
-      await ctx.sync();
-      const items = controls.items;
-      if (!items.length) {
-        cmdTryTrackedObjectsRemoveAll(ctx);
-        return null;
-      }
-
-      for (const cc of items) cc.load("tag,id,placeholderText");
-      await ctx.sync();
 
       const scan = cmdCollectScanFromItems(items, snapMap);
       if (!scan.citations.length && !scan.bibControls.length) {
@@ -908,12 +925,17 @@ async function cmdUpsertCitationFromRibbon(refIds, styleId, citationItems) {
 async function cmdPerformInsertBibliography() {
   try {
     const { citations, style } = await Word.run(async (ctx) => {
-      const snapMap = await cmdBuildSnapshotCitationMap(ctx);
       const controls = ctx.document.contentControls;
       controls.load("items");
       await ctx.sync();
       for (const cc of controls.items) cc.load("tag,title,id,placeholderText");
       await ctx.sync();
+
+      if (!controls.items.some((cc) => (cc.tag || "").startsWith(CMD_TAG_PREFIX))) {
+        return { citations: [], style: null };
+      }
+
+      const snapMap = await cmdBuildSnapshotCitationMap(ctx);
       const scan = cmdCollectScanFromItems(controls.items, snapMap);
       return {
         citations: scan.citations.map((citation) => ({
@@ -1079,7 +1101,6 @@ async function insertBibliography(event) {
 async function cmdDetectCursorCitation() {
   try {
     return await Word.run(async (ctx) => {
-      const snapMap = await cmdBuildSnapshotCitationMap(ctx);
       const sel = ctx.document.getSelection();
       const parentCC = sel.parentContentControlOrNullObject;
       parentCC.load("tag,placeholderText");
@@ -1105,6 +1126,7 @@ async function cmdDetectCursorCitation() {
       }
       // Resolve from snapshot map if still missing
       if (!refIds.length) {
+        const snapMap = await cmdBuildSnapshotCitationMap(ctx);
         const row = snapMap.get(parsed.id);
         if (row?.ids?.length) {
           refIds = row.ids.slice();

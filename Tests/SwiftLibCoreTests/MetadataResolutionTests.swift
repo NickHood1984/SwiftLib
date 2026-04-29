@@ -158,7 +158,7 @@ final class MetadataResolutionTests: XCTestCase {
         XCTAssertFalse(MetadataResolution.shouldAcceptDOIReference(dirtyDOI, seed: seed))
     }
 
-    func testImportedChinesePDFPrefersCNKIWorkflowEvenWhenDOIExists() {
+    func testImportedChinesePDFWithDOIUsesIdentifierWorkflowBeforeCNKI() {
         let seed = MetadataResolutionSeed(
             fileName: "多目标驱动的太湖调度水位研究_吴浩云",
             title: "多目标驱动的太湖调度水位研究",
@@ -168,7 +168,7 @@ final class MetadataResolutionTests: XCTestCase {
             languageHint: .chinese
         )
 
-        XCTAssertTrue(MetadataResolution.shouldPreferCNKIForImportedPDF(seed: seed))
+        XCTAssertFalse(MetadataResolution.shouldPreferCNKIForImportedPDF(seed: seed))
     }
 
     func testImportedNonChinesePDFWithDOIDoesNotForceCNKIWorkflow() {
@@ -182,6 +182,102 @@ final class MetadataResolutionTests: XCTestCase {
         )
 
         XCTAssertFalse(MetadataResolution.shouldPreferCNKIForImportedPDF(seed: seed))
+    }
+
+    func testImportedChineseBookPDFDoesNotForceCNKIWorkflow() {
+        let seed = MetadataResolutionSeed(
+            fileName: "修炼_谢耘",
+            title: "修炼",
+            firstAuthor: "谢耘",
+            year: 2006,
+            publisher: "东方出版社",
+            languageHint: .chinese,
+            workKindHint: .book
+        )
+
+        XCTAssertTrue(MetadataRoutePlanner.isBookLike(seed))
+        XCTAssertFalse(MetadataResolution.shouldPreferCNKIForImportedPDF(seed: seed))
+    }
+
+    func testJournalArticleSeedDoesNotGetReclassifiedAsBookByShortChineseTitle() {
+        let seed = MetadataResolutionSeed(
+            fileName: "热带亚热带水库浮游动物群落结构与水质的关系",
+            title: "热带亚热带水库浮游动物群落结构与水质的关系",
+            firstAuthor: "韩博平",
+            year: 2003,
+            journal: "生态学报",
+            languageHint: .chinese,
+            workKindHint: .journalArticle
+        )
+
+        XCTAssertFalse(MetadataRoutePlanner.isBookLike(seed))
+        XCTAssertTrue(MetadataRoutePlanner.shouldUseBaiduScholarFallback(seed: seed))
+    }
+
+    func testChineseJournalMetadataWithoutWorkKindStillBeatsBookHeuristicWhenJournalPresent() {
+        let seed = MetadataResolutionSeed(
+            fileName: "热带亚热带水库浮游动物群落结构与水质的关系",
+            title: "热带亚热带水库浮游动物群落结构与水质的关系",
+            firstAuthor: "韩博平",
+            year: 2003,
+            journal: "生态学报",
+            issn: "1000-0933",
+            languageHint: .chinese,
+            workKindHint: .unknown
+        )
+
+        XCTAssertFalse(MetadataRoutePlanner.isBookLike(seed))
+    }
+
+    func testInferWorkKindForChineseFreeTextPrefersBookWhenTitleLooksLikeBook() {
+        XCTAssertEqual(
+            MetadataRoutePlanner.inferWorkKind(fromFreeTextTitle: "修炼"),
+            .book
+        )
+    }
+
+    func testInferWorkKindForChineseFreeTextPrefersScholarlyWhenTitleLooksLikePaper() {
+        XCTAssertEqual(
+            MetadataRoutePlanner.inferWorkKind(fromFreeTextTitle: "基于深度学习的图像分割研究"),
+            .journalArticle
+        )
+    }
+
+    func testInferWorkKindForConferenceStyleFreeTextPrefersConferencePaper() {
+        XCTAssertEqual(
+            MetadataRoutePlanner.inferWorkKind(fromFreeTextTitle: "第十届全国湖泊学术会议论文集"),
+            .conferencePaper
+        )
+    }
+
+    func testCNKIEBookURLIsDetectedAsExplicitBookPage() {
+        let url = URL(string: "https://book.oversea.cnki.net/chn/pubdetail?sysid=223&resid=6&pykm=OB200303075")
+        XCTAssertTrue(MetadataRoutePlanner.isCNKIEBookURL(url))
+        XCTAssertTrue(MetadataRoutePlanner.isExplicitBookMetadataURL(url))
+    }
+
+    func testGenericCNKIHostDoesNotTriggerBookFallbackWithoutBookURL() {
+        XCTAssertFalse(
+            MetadataRoutePlanner.shouldUseExplicitCNKIBookFallback(
+                urlString: "https://kns.cnki.net/kcms2/article/abstract?v=example",
+                verificationSourceURL: nil,
+                metadataSource: .cnki
+            )
+        )
+    }
+
+    func testChineseBookSeedSkipsBaiduScholarFallback() {
+        let seed = MetadataResolutionSeed(
+            fileName: "修炼_谢耘",
+            title: "修炼",
+            firstAuthor: "谢耘",
+            year: 2006,
+            publisher: "东方出版社",
+            languageHint: .chinese,
+            workKindHint: .book
+        )
+
+        XCTAssertFalse(MetadataRoutePlanner.shouldUseBaiduScholarFallback(seed: seed))
     }
 
     func testReferenceSeedFallsBackToPDFFileName() {
@@ -267,5 +363,33 @@ final class MetadataResolutionTests: XCTestCase {
         XCTAssertEqual(merged.journal, "湖泊科学")
         XCTAssertEqual(merged.doi, "10.18307/2023.0320")
         XCTAssertTrue(MetadataResolution.hasMeaningfulRefreshChanges(original: existing, refreshed: merged))
+    }
+
+    func testFieldLevelMergerReplacesStaleBibliographicFields() {
+        let existing = Reference(
+            title: "旧标题",
+            authors: [AuthorName(given: "Old", family: "Author")],
+            year: 2019,
+            journal: "旧期刊",
+            pages: "1-2",
+            doi: "10.1000/example"
+        )
+        let refreshed = Reference(
+            title: "新标题",
+            authors: [AuthorName(given: "New", family: "Author")],
+            year: 2024,
+            journal: "新期刊",
+            pages: "10-20",
+            doi: "10.1000/example"
+        )
+        let source = ParallelSourceFetcher.SourceResult(source: .crossRef, reference: refreshed)
+
+        let (merged, _) = FieldLevelMerger.merge(sources: [source], existing: existing)
+
+        XCTAssertEqual(merged.title, "新标题")
+        XCTAssertEqual(merged.authors, [AuthorName(given: "New", family: "Author")])
+        XCTAssertEqual(merged.year, 2024)
+        XCTAssertEqual(merged.journal, "新期刊")
+        XCTAssertEqual(merged.pages, "10-20")
     }
 }

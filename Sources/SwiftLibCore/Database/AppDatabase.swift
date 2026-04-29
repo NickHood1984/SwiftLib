@@ -563,6 +563,77 @@ public final class AppDatabase: Sendable {
             try db.execute(sql: "PRAGMA optimize")
         }
 
+        // ── v12: Enrichment columns + metadata cache ────────────────────
+        migrator.registerMigration("v12-enrichment-and-cache") { db in
+            let existingColumns = try db.columns(in: "reference").map(\.name)
+
+            try db.alter(table: "reference") { t in
+                if !existingColumns.contains("keywords") {
+                    t.add(column: "keywords", .text)          // JSON [String]
+                }
+                if !existingColumns.contains("topics") {
+                    t.add(column: "topics", .text)             // JSON [String]
+                }
+                if !existingColumns.contains("isOpenAccess") {
+                    t.add(column: "isOpenAccess", .boolean)
+                }
+                if !existingColumns.contains("oaUrl") {
+                    t.add(column: "oaUrl", .text)
+                }
+                if !existingColumns.contains("citedByCount") {
+                    t.add(column: "citedByCount", .integer)
+                }
+                if !existingColumns.contains("fundingInfo") {
+                    t.add(column: "fundingInfo", .text)        // JSON [String]
+                }
+                if !existingColumns.contains("confidenceScore") {
+                    t.add(column: "confidenceScore", .double)
+                }
+            }
+
+            // Persistent metadata cache (replaces NSCache for cross-session reuse)
+            try db.create(table: "metadataCache", ifNotExists: true) { t in
+                t.column("cacheKey", .text).primaryKey()
+                t.column("sourceAPI", .text).notNull()
+                t.column("responseJSON", .text).notNull()
+                t.column("fetchedAt", .datetime).notNull()
+                t.column("expiresAt", .datetime).notNull()
+            }
+
+            try db.create(index: "metadataCache_expiresAt", on: "metadataCache", columns: ["expiresAt"], ifNotExists: true)
+        }
+
+        // v13: Refresh tracking
+        migrator.registerMigration("v13-refresh-tracking") { db in
+            let existingColumns = try db.columns(in: "reference").map(\.name)
+
+            try db.alter(table: "reference") { t in
+                if !existingColumns.contains("lastRefreshedAt") {
+                    t.add(column: "lastRefreshedAt", .datetime)
+                }
+            }
+        }
+
+        migrator.registerMigration("v14-journal-rank") { db in
+            let existingColumns = try db.columns(in: "reference").map(\.name)
+
+            try db.alter(table: "reference") { t in
+                if !existingColumns.contains("journalRankJSON") {
+                    t.add(column: "journalRankJSON", .text)
+                }
+            }
+        }
+
+        migrator.registerMigration("v15-abstract-translation") { db in
+            let existingColumns = try db.columns(in: "reference").map(\.name)
+
+            try db.alter(table: "reference") { t in
+                if !existingColumns.contains("translatedAbstract") {
+                    t.add(column: "translatedAbstract", .text)
+                }
+            }
+        }
+
         return migrator
     }
 }
@@ -743,6 +814,24 @@ extension AppDatabase {
         }
     }
 
+    /// Asynchronous variant of `fetchReference(id:)` so the main actor
+    /// is not blocked by a synchronous SQLite read (which can stall when
+    /// the writer queue is contended).
+    public func fetchReferenceAsync(id: Int64) async throws -> Reference? {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let ref = try self.dbWriter.read { db in
+                        try Reference.fetchOne(db, id: id)
+                    }
+                    continuation.resume(returning: ref)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     public func fetchReferences(collectionId: Int64) throws -> [Reference] {
         try dbWriter.read { db in
             try Reference
@@ -913,6 +1002,11 @@ extension AppDatabase {
                 )
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
+                if let linkedId = options.linkedReferenceId,
+                   var ref = try Reference.fetchOne(db, id: linkedId) {
+                    ref.verificationStatus = .candidate
+                    try ref.save(db)
+                }
                 return .intake(intake)
 
             case .blocked(let envelope):
@@ -928,6 +1022,11 @@ extension AppDatabase {
                 )
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
+                if let linkedId = options.linkedReferenceId,
+                   var ref = try Reference.fetchOne(db, id: linkedId) {
+                    ref.verificationStatus = .blocked
+                    try ref.save(db)
+                }
                 return .intake(intake)
 
             case .seedOnly(let envelope):
@@ -943,6 +1042,11 @@ extension AppDatabase {
                 )
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
+                if let linkedId = options.linkedReferenceId,
+                   var ref = try Reference.fetchOne(db, id: linkedId) {
+                    ref.verificationStatus = .seedOnly
+                    try ref.save(db)
+                }
                 return .intake(intake)
 
             case .rejected(let envelope):
@@ -958,6 +1062,11 @@ extension AppDatabase {
                 )
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
+                if let linkedId = options.linkedReferenceId,
+                   var ref = try Reference.fetchOne(db, id: linkedId) {
+                    ref.verificationStatus = .rejectedAmbiguous
+                    try ref.save(db)
+                }
                 return .intake(intake)
             }
         }

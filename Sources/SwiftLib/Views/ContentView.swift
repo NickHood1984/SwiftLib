@@ -198,7 +198,20 @@ final class LibraryViewModel: ObservableObject {
                 },
                 receiveValue: { [weak self] rows in
                     guard let self else { return }
-                    self.references = rows
+                    // In-place merge: preserve SwiftUI Table's scroll position
+                    // and selection by mutating the same array when order/ids
+                    // are unchanged.  Only fall back to a full replace when the
+                    // membership actually shifts (add/remove/reorder).
+                    let oldIds = self.references.map(\.id)
+                    let newIds = rows.map(\.id)
+                    if oldIds == newIds {
+                        for (index, newRow) in rows.enumerated()
+                        where self.references[index] != newRow {
+                            self.references[index] = newRow
+                        }
+                    } else {
+                        self.references = rows
+                    }
                     self.allLoaded = rows.count < self.pageSize
                 }
             )
@@ -377,6 +390,39 @@ final class LibraryViewModel: ObservableObject {
             WordAddinServer.shared.invalidateRenderCache()
         } catch {
             errorMessage = "Save failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Translate a reference's abstract via the configured AI chat service
+    /// and persist the result.  Runs on a detached background task so the
+    /// caller can show a toast / progress indicator.
+    func translateAbstract(_ ref: Reference) async -> Reference? {
+        guard let abstract = ref.abstract?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !abstract.isEmpty else {
+            return nil
+        }
+
+        let langName = SwiftLibPreferences.abstractTranslationLanguageOptions
+            .first { $0.code == SwiftLibPreferences.abstractTranslationLanguage }?
+            .name ?? "中文"
+
+        let prompt = "请将以下内容翻译成\(langName)，只返回翻译结果，不要添加任何解释：\n\n\(abstract)"
+
+        do {
+            let translated = try await AIChatWindowManager.shared.sendText(prompt)
+            let trimmed = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+
+            var mutable = ref
+            mutable.translatedAbstract = trimmed
+            mutable.dateModified = Date()
+            saveReference(&mutable)
+            return mutable
+        } catch {
+            await MainActor.run {
+                errorMessage = "翻译摘要失败：\(error.localizedDescription)"
+            }
+            return nil
         }
     }
 
@@ -560,6 +606,7 @@ struct ContentView: View {
     @Environment(\.openSettings) private var openSettings
     @StateObject private var viewModel = LibraryViewModel()
     @StateObject private var cnkiMetadataProvider = CNKIMetadataProvider()
+    @StateObject private var baiduScholarEngine = BaiduScholarService.sharedEngine
     @StateObject private var onboarding = OnboardingManager.shared
     @AppStorage("hasPromptedCLIInstallation") private var hasPromptedCLIInstallation = false
     @State private var showCLIInstallPrompt = false
@@ -571,11 +618,11 @@ struct ContentView: View {
     @State private var showAddCollection = false
     @State private var showAddByIdentifier = false
     @State private var showBatchImport = false
-    @State private var showPendingMetadataQueue = false
     @State private var pendingQueueNotice: PendingQueueNotice?
     @State private var cslImportMessage: String?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var selectedId: Int64?
+    @State private var refreshTask: Task<Void, Never>?
 
     private struct PendingQueueNotice: Identifiable, Equatable {
         let id = UUID()
@@ -599,9 +646,14 @@ struct ContentView: View {
                 referenceCount: viewModel.totalReferenceCount,
                 onDeleteCollection: { viewModel.deleteCollection(id: $0) },
                 onDeleteTag: { viewModel.deleteTag(id: $0) },
-                onAddCollection: { showAddCollection = true }
+                onAddCollection: { showAddCollection = true },
+                onRenameCollection: { collection, newName in
+                    var c = collection
+                    c.name = newName
+                    viewModel.saveCollection(&c)
+                }
             )
-            .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
+            .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 260)
         } content: {
             ReferenceListView(
                 references: viewModel.filteredReferences,
@@ -615,11 +667,15 @@ struct ContentView: View {
                 onDoubleClick: { refId in
                     openReader(for: refId)
                 },
-                onLoadMore: { item in viewModel.loadMoreIfNeeded(currentItem: item) }
+                onLoadMore: { item in viewModel.loadMoreIfNeeded(currentItem: item) },
+                onTranslateAbstract: { refId in
+                    translateAbstractForID(refId)
+                }
             )
-            .navigationSplitViewColumnWidth(min: 280, ideal: 350, max: 500)
+            .navigationSplitViewColumnWidth(min: 420, ideal: 640)
         } detail: {
             detailSection
+                .navigationSplitViewColumnWidth(min: 340, ideal: 420, max: 560)
         }
         .toolbar(content: {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -662,7 +718,7 @@ struct ContentView: View {
                 .disabled(viewModel.isImporting)
                 .coachMarkAnchor(.toolbarImport)
 
-                Button(action: { showPendingMetadataQueue = true }) {
+                Button(action: { openPendingMetadataQueueWindow() }) {
                     HStack(spacing: 6) {
                         Label("待确认队列", systemImage: "clock.badge.exclamationmark")
                         if !viewModel.pendingMetadataIntakes.isEmpty {
@@ -748,8 +804,10 @@ struct ContentView: View {
             if let progress = viewModel.importProgress {
                 FloatingProgressToast(
                     message: progress,
-                    isSpinning: viewModel.isImporting
+                    isSpinning: viewModel.isImporting,
+                    onCancel: viewModel.isImporting ? cancelRefresh : nil
                 )
+                .padding(.top, 34)
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .zIndex(10)
                 .animation(.spring(response: 0.35, dampingFraction: 0.8), value: progress)
@@ -779,46 +837,6 @@ struct ContentView: View {
                 var c = col
                 viewModel.saveCollection(&c)
             }
-        }
-        .sheet(isPresented: $showPendingMetadataQueue) {
-            PendingMetadataQueueView(
-                intakes: viewModel.pendingMetadataIntakes,
-                resolver: metadataResolver,
-                onPersistResult: { result, intake in
-                    queueResolutionResult(
-                        result,
-                        options: MetadataPersistenceOptions(
-                            sourceKind: intake.sourceKind,
-                            originalInput: intake.originalInput,
-                            preferredPDFPath: intake.pdfPath,
-                            linkedReferenceId: intake.linkedReferenceId,
-                            existingIntakeId: intake.id
-                        ),
-                        successMessage: nil
-                    )
-                },
-                onConfirmManual: { intake in
-                    if let reference = viewModel.confirmPendingMetadataIntake(intake) {
-                        selectedId = reference.id
-                    }
-                },
-                onDelete: { intake in
-                    viewModel.deletePendingMetadataIntake(intake)
-                }
-            )
-        }
-        .sheet(item: Binding(
-            get: { cnkiMetadataProvider.verificationSession },
-            set: { session in
-                if session == nil, cnkiMetadataProvider.verificationSession != nil {
-                    cnkiMetadataProvider.cancelVerification()
-                }
-            }
-        )) { session in
-            CNKIVerificationSheet(
-                provider: cnkiMetadataProvider,
-                session: session
-            )
         }
         .overlay(alignment: .bottom) {
             if let msg = cslImportMessage {
@@ -861,7 +879,7 @@ struct ContentView: View {
                     HStack {
                         Button("打开待确认队列") {
                             pendingQueueNotice = nil
-                            showPendingMetadataQueue = true
+                            openPendingMetadataQueueWindow()
                         }
                         .buttonStyle(SLPrimaryButtonStyle())
 
@@ -889,7 +907,12 @@ struct ContentView: View {
         .onChange(of: selectedId) { _, newId in
             loadSelectedReference(for: newId)
         }
-
+        .onChange(of: cnkiMetadataProvider.verificationSession) { _, session in
+            presentCNKIVerificationIfNeeded(session)
+        }
+        .onChange(of: baiduScholarEngine.verificationSession) { _, session in
+            presentBaiduVerificationIfNeeded(session)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .swiftLibClipImported)) { note in
             guard let id = note.userInfo?[SwiftLibClipImportedKeys.id] as? Int64 else { return }
             selectedId = id
@@ -915,6 +938,12 @@ struct ContentView: View {
                     showCLIInstallPrompt = true
                 }
             }
+
+            syncVerificationPanels()
+        }
+        .onDisappear {
+            MetadataVerificationPanels.cnki.dismiss()
+            MetadataVerificationPanels.baidu.dismiss()
         }
         .sheet(isPresented: $onboarding.showWelcomeWizard) {
             // 向导关闭后启动 Coach Marks（如果向导已完成）
@@ -976,6 +1005,43 @@ struct ContentView: View {
             .frame(width: 1, height: 1)
             .opacity(0.001)
             .allowsHitTesting(false)
+        }
+    }
+
+    private func syncVerificationPanels() {
+        presentCNKIVerificationIfNeeded(cnkiMetadataProvider.verificationSession)
+        presentBaiduVerificationIfNeeded(baiduScholarEngine.verificationSession)
+    }
+
+    private func presentCNKIVerificationIfNeeded(_ session: CNKIMetadataProvider.VerificationSession?) {
+        guard let session else {
+            MetadataVerificationPanels.cnki.dismiss()
+            return
+        }
+
+        MetadataVerificationPanels.cnki.present(title: session.title, onClose: {
+            cnkiMetadataProvider.cancelVerification()
+        }) {
+            CNKIVerificationSheet(
+                provider: cnkiMetadataProvider,
+                session: session
+            )
+        }
+    }
+
+    private func presentBaiduVerificationIfNeeded(_ session: BaiduScholarWebEngine.VerificationSession?) {
+        guard let session else {
+            MetadataVerificationPanels.baidu.dismiss()
+            return
+        }
+
+        MetadataVerificationPanels.baidu.present(title: session.title, onClose: {
+            baiduScholarEngine.cancelVerification()
+        }) {
+            BaiduScholarVerificationSheet(
+                provider: baiduScholarEngine,
+                session: session
+            )
         }
     }
 
@@ -1049,6 +1115,38 @@ struct ContentView: View {
         }
     }
 
+    private func translateAbstractForID(_ refId: Int64) {
+        guard let reference = selectedReference, reference.id == refId else { return }
+        guard let abstract = reference.abstract?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !abstract.isEmpty else {
+            viewModel.importProgress = "该文献暂无摘要"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                if self.viewModel.importProgress == "该文献暂无摘要" {
+                    self.viewModel.importProgress = nil
+                }
+            }
+            return
+        }
+
+        viewModel.isImporting = true
+        viewModel.importProgress = "正在翻译摘要…"
+        Task { @MainActor in
+            if let updated = await viewModel.translateAbstract(reference) {
+                selectedReference = updated
+                viewModel.isImporting = false
+                viewModel.importProgress = "摘要翻译完成"
+            } else {
+                viewModel.isImporting = false
+                viewModel.importProgress = "摘要翻译失败"
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                if !self.viewModel.isImporting {
+                    self.viewModel.importProgress = nil
+                }
+            }
+        }
+    }
+
     private func refreshMetadata(for references: [Reference]) {
         let candidates = references.compactMap { reference -> Reference? in
             guard reference.id != nil else { return nil }
@@ -1101,20 +1199,52 @@ struct ContentView: View {
         }
     }
 
-    private func refreshBatchMetadata(for references: [Reference]) {
-        viewModel.isImporting = true
-        viewModel.importProgress = "准备刷新 \(references.count) 条条目…"
+    private func openPendingMetadataQueueWindow() {
+        guard !viewModel.pendingMetadataIntakes.isEmpty else { return }
+        PendingMetadataQueueWindowManager.shared.present(
+            db: viewModel.db,
+            resolver: metadataResolver,
+            onPersistResult: { result, intake in
+                queueResolutionResult(
+                    result,
+                    options: MetadataPersistenceOptions(
+                        sourceKind: intake.sourceKind,
+                        originalInput: intake.originalInput,
+                        preferredPDFPath: intake.pdfPath,
+                        linkedReferenceId: intake.linkedReferenceId,
+                        existingIntakeId: intake.id
+                    ),
+                    successMessage: nil,
+                    suppressProgressReset: true
+                )
+            },
+            onConfirmManual: { intake in
+                if let reference = viewModel.confirmPendingMetadataIntake(intake) {
+                    selectedId = reference.id
+                }
+            },
+            onDelete: { intake in
+                viewModel.deletePendingMetadataIntake(intake)
+            }
+        )
+    }
 
-        Task { @MainActor in
+    private func refreshBatchMetadata(for references: [Reference]) {
+        refreshTask?.cancel()
+
+        let task = Task { @MainActor in
+            viewModel.isImporting = true
+            viewModel.importProgress = "准备刷新 \(references.count) 条条目…"
+
             var refreshedCount = 0
             var skippedCount = 0
             var failedMessages: [String] = []
             let total = references.count
             let maxConcurrency = 3
 
-            // Process in concurrent batches to improve performance while
-            // limiting parallelism to avoid API rate-limiting.
             for batchStart in stride(from: 0, to: total, by: maxConcurrency) {
+                if Task.isCancelled { break }
+
                 let batchEnd = min(batchStart + maxConcurrency, total)
                 let batch = Array(references[batchStart..<batchEnd])
 
@@ -1137,6 +1267,15 @@ struct ContentView: View {
                     return results
                 }
 
+                // Respect cancellation after each batch
+                if Task.isCancelled {
+                    failedMessages.append(contentsOf: batch.map { "\($0.title)：已取消" })
+                    break
+                }
+
+                // Timeout guard: if a batch took longer than 30s, treat remaining as timed-out
+                // (actual timeout is per-item below; this is a coarse safety net)
+
                 for (reference, result) in batchResults {
                     switch result {
                     case .refreshed(let refreshed):
@@ -1150,7 +1289,8 @@ struct ContentView: View {
                                 originalInput: reference.doi ?? reference.pmid ?? reference.isbn ?? reference.title,
                                 linkedReferenceId: reference.id
                             ),
-                            successMessage: nil
+                            successMessage: nil,
+                            suppressProgressReset: true
                         )
                         skippedCount += 1
                     case .skipped:
@@ -1161,10 +1301,14 @@ struct ContentView: View {
                 }
             }
 
+            if Task.isCancelled {
+                viewModel.importProgress = "已取消：完成 \(refreshedCount)/\(total) 条"
+            } else {
+                viewModel.importProgress = "批量刷新完成：\(refreshedCount) 条已更新，\(skippedCount) 条跳过，\(failedMessages.count) 条失败"
+            }
             viewModel.isImporting = false
-            viewModel.importProgress = "批量刷新完成：\(refreshedCount) 条已更新，\(skippedCount) 条跳过，\(failedMessages.count) 条失败"
 
-            if !failedMessages.isEmpty {
+            if !failedMessages.isEmpty && !Task.isCancelled {
                 viewModel.errorMessage = failedMessages.prefix(5).joined(separator: "\n")
             }
 
@@ -1172,6 +1316,22 @@ struct ContentView: View {
                 if !viewModel.isImporting {
                     viewModel.importProgress = nil
                 }
+            }
+
+            refreshTask = nil
+        }
+
+        refreshTask = task
+    }
+
+    private func cancelRefresh() {
+        refreshTask?.cancel()
+        refreshTask = nil
+        viewModel.isImporting = false
+        viewModel.importProgress = "已取消"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            if !viewModel.isImporting {
+                viewModel.importProgress = nil
             }
         }
     }
@@ -1199,27 +1359,38 @@ struct ContentView: View {
     private func queueResolutionResult(
         _ result: MetadataResolutionResult,
         options: MetadataPersistenceOptions,
-        successMessage: String?
+        successMessage: String?,
+        suppressProgressReset: Bool = false
     ) -> MetadataPersistenceResult? {
         let persisted = viewModel.persistMetadataResolution(result, options: options)
         switch persisted {
         case .verified(let reference):
             selectedId = reference.id
-            viewModel.isImporting = false
-            viewModel.importProgress = successMessage ?? "已验证：\(reference.title)"
-            pendingQueueNotice = nil
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                if !viewModel.isImporting {
-                    viewModel.importProgress = nil
+            if !suppressProgressReset {
+                viewModel.isImporting = false
+                if reference.verificationStatus == .metadataEnriching {
+                    viewModel.importProgress = "已导入，元数据补全中：\(reference.title)"
+                } else {
+                    viewModel.importProgress = successMessage ?? "已验证：\(reference.title)"
+                }
+                pendingQueueNotice = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    if !viewModel.isImporting {
+                        viewModel.importProgress = nil
+                    }
                 }
             }
         case .intake(let intake):
-            viewModel.isImporting = false
-            viewModel.importProgress = nil
+            if !suppressProgressReset {
+                viewModel.isImporting = false
+                viewModel.importProgress = nil
+            }
             showPendingQueueNotice(for: intake, message: successMessage)
         case .none:
-            viewModel.isImporting = false
-            viewModel.importProgress = nil
+            if !suppressProgressReset {
+                viewModel.isImporting = false
+                viewModel.importProgress = nil
+            }
         }
 
         return persisted
@@ -1328,7 +1499,12 @@ struct ContentView: View {
 
     private func loadSelectedReference(for id: Int64?) {
         if let id {
-            selectedReference = try? viewModel.db.fetchReference(id: id)
+            Task {
+                let ref = try? await viewModel.db.fetchReferenceAsync(id: id)
+                await MainActor.run {
+                    selectedReference = ref
+                }
+            }
         } else {
             selectedReference = nil
         }
@@ -1352,13 +1528,13 @@ struct ContentView: View {
 private struct FloatingProgressToast: View {
     let message: String
     let isSpinning: Bool
+    var onCancel: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 10) {
             if isSpinning {
-                ProgressView()
-                    .controlSize(.mini)
-                    .scaleEffect(0.85)
+                NeonBreathingLoader(diameter: 20)
+                    .frame(width: 20, height: 20)
             } else {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 12, weight: .semibold))
@@ -1369,20 +1545,41 @@ private struct FloatingProgressToast: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
+
+            if isSpinning, let onCancel {
+                Divider()
+                    .frame(height: 12)
+                    .padding(.horizontal, 2)
+                Button(action: onCancel) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("取消刷新")
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
         .background {
             Capsule(style: .continuous)
-                .fill(Color(NSColor.controlBackgroundColor))
-                .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
-        }
-        .overlay {
-            Capsule(style: .continuous)
-                .strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5)
+                .fill(backgroundColor)
+                .shadow(color: isSpinning ? Color.black.opacity(0.16) : .black.opacity(0.12), radius: 10, y: 4)
+                .shadow(color: isSpinning ? Color.orange.opacity(0.08) : .clear, radius: 18, y: 0)
         }
         .padding(.top, 10)
-        .allowsHitTesting(false)
+    }
+
+    private var backgroundColor: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            if isSpinning {
+                return isDark
+                    ? NSColor(calibratedRed: 0.10, green: 0.08, blue: 0.06, alpha: 0.94)
+                    : NSColor(calibratedRed: 0.98, green: 0.95, blue: 0.90, alpha: 0.96)
+            }
+            return NSColor.controlBackgroundColor
+        })
     }
 }
 

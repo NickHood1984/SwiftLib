@@ -117,4 +117,33 @@ final class AIChatPageDiagnosticsTests: XCTestCase {
 
         XCTAssertEqual(diagnostic.issue, .responseDidNotStart)
     }
+
+    func testDetectsAuthRequiredBeforeWaitingForReplyWhenLoginModalIsVisible() throws {
+        let snapshot = AIChatPageSnapshot(
+            href: "https://www.doubao.com/chat/",
+            title: "豆包",
+            readyState: "complete",
+            hasInput: true,
+            inputVisible: true,
+            inputEnabled: true,
+            inputValueLength: 120,
+            hasSendButton: true,
+            sendButtonVisible: true,
+            sendButtonEnabled: true,
+            authHintVisible: true,
+            hasPasswordField: false,
+            bodyTextSample: "登录以解锁更多功能 请输入手机号 打开豆包 App 点击扫一扫"
+        )
+
+        let diagnostic = try XCTUnwrap(
+            diagnoseAIChatPage(
+                snapshot,
+                serviceName: "豆包",
+                stage: .waitingForResponseStart,
+                requiresClickableSendButton: false
+            )
+        )
+
+        XCTAssertEqual(diagnostic.issue, .authRequired)
+    }
 }

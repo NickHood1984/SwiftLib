@@ -63,6 +63,8 @@ private struct GeneralSettingsTab: View {
 
     @State private var apiEmail: String = SwiftLibPreferences.apiContactEmail
     @State private var paddleOCRToken: String = SwiftLibPreferences.paddleOCRToken
+    @State private var easyScholarSecretKey: String = SwiftLibPreferences.easyScholarSecretKey
+    @State private var easyScholarDisplayRank: String = SwiftLibPreferences.easyScholarDisplayRank
 
     var body: some View {
         Form {
@@ -77,6 +79,26 @@ private struct GeneralSettingsTab: View {
                         SwiftLibPreferences.apiContactEmail = newValue
                     }
                 Text("提供邮箱可接入 CrossRef polite pool，获得更高速率限制。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("期刊等级查询（easyScholar）") {
+                SecureField("Secret Key", text: $easyScholarSecretKey)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: easyScholarSecretKey) { _, newValue in
+                        SwiftLibPreferences.easyScholarSecretKey = newValue
+                    }
+                Picker("展示等级", selection: $easyScholarDisplayRank) {
+                    ForEach(SwiftLibPreferences.easyScholarDisplayRankOptions, id: \.key) { option in
+                        Text(option.name).tag(option.key as String)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: easyScholarDisplayRank) { _, newValue in
+                    SwiftLibPreferences.easyScholarDisplayRank = newValue
+                }
+                Text("填写 easyScholar  Secret Key 后，刷新元数据时会自动查询期刊等级。Key 会安全存储在系统 Keychain。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -215,6 +237,7 @@ private struct PluginsSettingsTab: View {
 private struct AISettingsTab: View {
     @State private var selectedURL: String = SwiftLibPreferences.aiChatURL
     @State private var customURL: String = ""
+    @State private var ocrPromptTemplate: String = SwiftLibPreferences.ocrDocumentTranslationPromptTemplate
 
     private var isCustom: Bool {
         !SwiftLibPreferences.aiChatPresets.contains(where: { $0.url == selectedURL })
@@ -250,6 +273,16 @@ private struct AISettingsTab: View {
                             if isCustom { customURL = selectedURL }
                         }
                 }
+
+                Picker("摘要翻译语言", selection: Binding(
+                    get: { SwiftLibPreferences.abstractTranslationLanguage },
+                    set: { SwiftLibPreferences.abstractTranslationLanguage = $0 }
+                )) {
+                    ForEach(SwiftLibPreferences.abstractTranslationLanguageOptions, id: \.code) { option in
+                        Text(option.name).tag(option.code as String)
+                    }
+                }
+                .pickerStyle(.menu)
             }
 
             Section("快捷键") {
@@ -258,6 +291,34 @@ private struct AISettingsTab: View {
                         .font(.body.monospaced())
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            Section("OCR 连续翻译") {
+                TextEditor(text: $ocrPromptTemplate)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(minHeight: 180)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.secondary.opacity(0.08))
+                    )
+                    .onChange(of: ocrPromptTemplate) { _, newValue in
+                        SwiftLibPreferences.ocrDocumentTranslationPromptTemplate = newValue
+                    }
+
+                HStack {
+                    Button("恢复默认 Prompt") {
+                        ocrPromptTemplate = SwiftLibPreferences.defaultOCRDocumentTranslationPromptTemplate
+                        SwiftLibPreferences.ocrDocumentTranslationPromptTemplate = ocrPromptTemplate
+                    }
+                    .controlSize(.small)
+
+                    Spacer()
+                }
+
+                Text("连续翻译会把整篇 OCR Markdown 分段发送到当前 AI 服务。默认每批 1 段，AI 只需返回译文；请保留 `{{target_language}}` 和 `{{batch_json}}` 两个占位符。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

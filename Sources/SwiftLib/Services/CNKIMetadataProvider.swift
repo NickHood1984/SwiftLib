@@ -98,6 +98,12 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         case resolve(AuthoritativeMetadataRecord)
     }
 
+    private enum HiddenSearchBootstrapResult {
+        case candidates([MetadataCandidate])
+        case noResult
+        case blockedByVerification
+    }
+
     private struct SearchPayload: Decodable {
         struct Candidate: Decodable {
             let title: String
@@ -110,6 +116,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         }
 
         let blocked: Bool
+        let emptyState: Bool
         let candidates: [Candidate]
     }
 
@@ -134,6 +141,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
     struct PageAssessmentPayload: Decodable {
         let markerBlocked: Bool
         let searchRowCount: Int
+        let hasSearchEmptyState: Bool
         let hasDetailTitle: Bool
         let hasDetailAuthors: Bool
         let hasDetailSummary: Bool
@@ -143,6 +151,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         init(
             markerBlocked: Bool,
             searchRowCount: Int,
+            hasSearchEmptyState: Bool = false,
             hasDetailTitle: Bool,
             hasDetailAuthors: Bool,
             hasDetailSummary: Bool,
@@ -151,6 +160,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         ) {
             self.markerBlocked = markerBlocked
             self.searchRowCount = searchRowCount
+            self.hasSearchEmptyState = hasSearchEmptyState
             self.hasDetailTitle = hasDetailTitle
             self.hasDetailAuthors = hasDetailAuthors
             self.hasDetailSummary = hasDetailSummary
@@ -219,9 +229,19 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         do {
             switch operation {
             case .search(let seed):
-                let candidates = try await extractSearchCandidates(seed: seed, in: webView)
-                if !candidates.isEmpty {
-                    verificationPreparedOutput = .search(candidates)
+                do {
+                    let candidates = try await extractSearchCandidates(seed: seed, in: webView)
+                    if !candidates.isEmpty {
+                        verificationPreparedOutput = .search(candidates)
+                    } else if await pageResolutionState(in: webView) == .resolvedSearch {
+                        verificationPreparedOutput = .search([])
+                    }
+                } catch {
+                    if await pageResolutionState(in: webView) == .resolvedSearch {
+                        verificationPreparedOutput = .search([])
+                    } else {
+                        throw error
+                    }
                 }
             case .resolve(let candidate):
                 let record = try await extractReference(candidate: candidate, in: webView)
@@ -250,7 +270,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
     }
 
     nonisolated static func pageResolutionState(from payload: PageAssessmentPayload) -> PageResolutionState {
-        if payload.searchRowCount > 0 {
+        if payload.searchRowCount > 0 || payload.hasSearchEmptyState {
             return .resolvedSearch
         }
         let hasVisibleDetailScaffold = payload.hasVisibleDetailScaffold
@@ -269,11 +289,6 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
     }
 
     func fetchAuthoritativeRecord(candidate: MetadataCandidate) async throws -> AuthoritativeMetadataRecord {
-        if candidate.cnkiExport?.hasUsableExport == true,
-           let exportRecord = try await resolveViaExportFallback(candidate: candidate) {
-            return exportRecord
-        }
-
         do {
             let result = try await runOperation(.resolve(candidate))
             guard case .resolve(let record) = result else {
@@ -364,11 +379,23 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
 
     private func searchViaGridRequest(seed: MetadataResolutionSeed) async throws -> [MetadataCandidate] {
         var verificationAttempts = 0
+        var attemptedHiddenBootstrap = false
 
         while true {
             do {
                 return try await performGridSearch(seed: seed)
             } catch CNKIError.blockedByVerification {
+                if !attemptedHiddenBootstrap {
+                    attemptedHiddenBootstrap = true
+                    switch await searchViaHiddenWebViewBootstrap(seed: seed) {
+                    case .candidates(let candidates):
+                        return candidates
+                    case .noResult:
+                        return []
+                    case .blockedByVerification:
+                        break
+                    }
+                }
                 guard verificationAttempts < 2 else { throw CNKIError.blockedByVerification }
                 verificationAttempts += 1
                 verificationOperation = .search(seed)
@@ -395,11 +422,76 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         }
     }
 
+    private func searchViaHiddenWebViewBootstrap(
+        seed: MetadataResolutionSeed
+    ) async -> HiddenSearchBootstrapResult {
+        needsWebView = true
+
+        do {
+            let webView = try await requireWebView()
+            let output = try await performOperation(.search(seed), in: webView)
+            guard case .search(let candidates) = output else {
+                return .noResult
+            }
+            if !candidates.isEmpty {
+                cnkiDebugTrace(
+                    "search hidden bootstrap resolved title=\(seed.title ?? seed.fileName) candidateCount=\(candidates.count)"
+                )
+                return .candidates(candidates)
+            }
+            cnkiDebugTrace(
+                "search hidden bootstrap finished without candidates title=\(seed.title ?? seed.fileName)"
+            )
+            return .noResult
+        } catch CNKIError.blockedByVerification {
+            cnkiDebugTrace(
+                "search hidden bootstrap blocked title=\(seed.title ?? seed.fileName)"
+            )
+            return .blockedByVerification
+        } catch {
+            cnkiDebugTrace(
+                "search hidden bootstrap failed title=\(seed.title ?? seed.fileName) error=\(error.localizedDescription)"
+            )
+            return .noResult
+        }
+    }
+
     private func performGridSearch(seed: MetadataResolutionSeed) async throws -> [MetadataCandidate] {
+        let searchExpressions = Self.searchExpressions(for: seed)
+
+        for (index, searchExpression) in searchExpressions.enumerated() {
+            let candidates = try await performGridSearchRequest(
+                seed: seed,
+                searchExpression: searchExpression
+            )
+            if !candidates.isEmpty {
+                return candidates
+            }
+
+            if index + 1 < searchExpressions.count {
+                cnkiDebugTrace(
+                    "performGridSearch 当前表达式无候选，降级重试 expression=\(searchExpression)"
+                )
+            }
+        }
+
+        throw CNKIError.parseFailed("知网搜索页没有返回可用候选。")
+    }
+
+    private func performGridSearchRequest(
+        seed: MetadataResolutionSeed,
+        searchExpression: String
+    ) async throws -> [MetadataCandidate] {
+        // 知网搜索接口需要有效的会话 Cookie。若当前没有 Cookie，交给上层先尝试
+        // 隐藏 WebView 建立会话；只有隐藏页面也明确进入拦截状态时，才会弹出可见验证。
+        guard let cookieHeader = await cnkiCookieHeader(), !cookieHeader.isEmpty else {
+            throw CNKIError.blockedByVerification
+        }
+
         var request = URLRequest(url: Self.mainlandCNKISearchURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 15
-        request.httpBody = Data(searchRequestBody(for: seed).utf8)
+        request.httpBody = Data(searchRequestBody(for: seed, searchExpression: searchExpression).utf8)
         request.setValue("kns.cnki.net", forHTTPHeaderField: "Host")
         request.setValue(ReaderExtractionManager.safariLikeUserAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("*/*", forHTTPHeaderField: "Accept")
@@ -410,9 +502,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         request.setValue(searchReferer(for: seed), forHTTPHeaderField: "Referer")
         request.setValue("empty", forHTTPHeaderField: "Sec-Fetch-Dest")
         request.setValue("cors", forHTTPHeaderField: "Sec-Fetch-Mode")
-        if let cookieHeader = await cnkiCookieHeader(), !cookieHeader.isEmpty {
-            request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
-        }
+        request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
 
         let (data, response) = try await NetworkClient.session.data(for: request)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -447,8 +537,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
                 throw CNKIError.blockedByVerification
             }
         }
-
-        throw CNKIError.parseFailed("知网搜索页没有返回可用候选。")
+        return []
     }
 
     private func runOperation(_ operation: PendingOperation) async throws -> OperationOutput {
@@ -513,7 +602,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         switch operation {
         case .search(let seed):
             var components = URLComponents(url: Self.mainlandCNKIHomeURL, resolvingAgainstBaseURL: false)!
-            let query = searchKeyword(for: seed) ?? MetadataResolution.normalizeWhitespaceAndWidth(seed.fileName)
+            let query = Self.searchKeyword(for: seed) ?? MetadataResolution.normalizeWhitespaceAndWidth(seed.fileName)
             components.queryItems = [URLQueryItem(name: "kw", value: query)]
             return components.url!
         case .resolve(let candidate):
@@ -527,7 +616,9 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         }
         switch operation {
         case .search:
-            return Self.mainlandCNKIHomeURL
+            // 使用带关键词的搜索 URL，让验证窗口直接展示搜索结果，
+            // 而不是一个没有 kw= 参数的空白页。
+            return url(for: operation)
         case .resolve(let candidate):
             return URL(string: candidate.detailURL) ?? Self.mainlandCNKIHomeURL
         }
@@ -594,6 +685,12 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
                 )
                 return enriched
             }
+            if payload.emptyState {
+                cnkiDebugTrace(
+                    "search DOM empty-state url=\(webView.url?.absoluteString ?? "nil") title=\(seed.title ?? seed.fileName)"
+                )
+                return []
+            }
             if payload.blocked {
                 cnkiDebugTrace(
                     "search DOM blocked url=\(webView.url?.absoluteString ?? "nil") title=\(seed.title ?? seed.fileName) candidateCount=0"
@@ -657,6 +754,12 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
                 "search HTML resolved baseURL=\(baseURL.absoluteString) title=\(seed.title ?? seed.fileName) candidateCount=\(candidates.count) blocked=\(payload.blocked) enrichedSnippetCount=\(enriched.filter { trimmedOrNil($0.snippet) != nil }.count)"
             )
             return enriched
+        }
+        if payload.emptyState {
+            cnkiDebugTrace(
+                "search HTML empty-state baseURL=\(baseURL.absoluteString) title=\(seed.title ?? seed.fileName)"
+            )
+            return []
         }
         if payload.blocked {
             cnkiDebugTrace(
@@ -997,6 +1100,36 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         return cleaned
     }
 
+    /// 预处理知网 NoteExpress/CAJ 导出格式的作者字符串。
+    /// 知网紧凑格式示例：`"匡晨亿 王森洋, 等 梁智策"` — 前几位作者空格分隔，"等"作为 et al. 标记，最后是通讯作者。
+    /// 转换为 `AuthorName.parseList` 可正确解析的分号分隔格式。
+    nonisolated static func normalizeCNKIExportAuthors(_ raw: String) -> String {
+        // 1. 规范化标点
+        var s = raw
+            .replacingOccurrences(of: "；", with: ";")
+            .replacingOccurrences(of: "，", with: ",")
+        // 2. 去掉"等"et al.标记，将周围的分隔符统一为分号
+        s = s.replacingOccurrences(of: #",?\s*等\s+"#, with: ";", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\s+等\s*,?"#, with: ";", options: .regularExpression)
+        // 3. 对每个分号分隔的段落，如果是多个汉字人名空格拼接（每段 2-4 个汉字），拆开为单独人名
+        let segments = s.components(separatedBy: ";")
+        let expanded = segments.flatMap { segment -> [String] in
+            let t = segment.trimmingCharacters(in: .whitespacesAndNewlines)
+            let parts = t.components(separatedBy: " ").filter { !$0.isEmpty }
+            // 每个部分都像汉字人名（2-4个字）时，视为多个独立姓名
+            let allChineseName = parts.count >= 2 && parts.allSatisfy { part in
+                guard part.count >= 2 && part.count <= 4 else { return false }
+                return part.unicodeScalars.allSatisfy { scalar in
+                    (0x4E00...0x9FFF).contains(scalar.value) ||
+                    (0x3400...0x4DBF).contains(scalar.value) ||
+                    scalar.value == 0x00B7  // 中圆点（蒙古族姓名）
+                }
+            }
+            return allChineseName ? parts : [t]
+        }
+        return expanded.filter { !$0.isEmpty }.joined(separator: ";")
+    }
+
     nonisolated static func resolveJournal(extractedJournal: String?, fallbackCandidate: MetadataCandidate) -> String? {
         MetadataResolution.normalizeJournalName(extractedJournal)
             ?? MetadataResolution.normalizeJournalName(fallbackCandidate.journal)
@@ -1106,17 +1239,21 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         return AuthoritativeMetadataRecord(reference: reference, evidence: evidence)
     }
 
-    private func trimmedOrNil(_ value: String?) -> String? {
+    private nonisolated static func trimmedOrNilValue(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func trimmedOrNil(_ value: String?) -> String? {
+        Self.trimmedOrNilValue(value)
     }
 
     private func normalizedCandidateSnippet(_ value: String?) -> String? {
         guard let value = trimmedOrNil(value) else { return nil }
         let normalized = MetadataResolution.normalizeWhitespaceAndWidth(value)
         guard !normalized.isEmpty else { return nil }
-        return String(normalized.prefix(320))
+        return normalized
     }
 
     private func shouldReplaceCandidateSnippet(current: String?, replacement: String?) -> Bool {
@@ -1369,41 +1506,69 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         )
     }
 
-    private func searchTitle(for seed: MetadataResolutionSeed) -> String? {
+    nonisolated static func searchTitle(for seed: MetadataResolutionSeed) -> String? {
         if let rawTitle = seed.title?.swiftlib_nilIfBlank {
             let title = MetadataResolution.normalizeWhitespaceAndWidth(rawTitle)
-            if let title = trimmedOrNil(title) {
+            if let title = Self.trimmedOrNilValue(title) {
                 return title
             }
         }
         let normalizedFileName = MetadataResolution.normalizeWhitespaceAndWidth(seed.fileName)
         if MetadataResolution.containsHanCharacters(normalizedFileName) {
-            return trimmedOrNil(normalizedFileName)
+            return Self.trimmedOrNilValue(normalizedFileName)
         }
         return nil
     }
 
-    private func searchAuthor(for seed: MetadataResolutionSeed) -> String? {
-        guard let author = trimmedOrNil(seed.firstAuthor) else { return nil }
-        if MetadataResolution.containsHanCharacters(author) {
-            return author
+    nonisolated static func searchAuthor(for seed: MetadataResolutionSeed) -> String? {
+        guard let author = Self.trimmedOrNilValue(seed.firstAuthor),
+              MetadataResolution.containsHanCharacters(author) else {
+            return nil
+        }
+
+        if let normalized = MetadataResolution.extractLikelyAuthorName(from: author),
+           Self.trimmedOrNilValue(normalized) != nil {
+            return normalized
         }
         return nil
     }
 
-    private func searchKeyword(for seed: MetadataResolutionSeed) -> String? {
+    nonisolated static func searchKeyword(for seed: MetadataResolutionSeed) -> String? {
         if let title = searchTitle(for: seed) {
             return title
         }
-        if let doi = trimmedOrNil(seed.doi) {
+        if let doi = Self.trimmedOrNilValue(seed.doi) {
             return doi
         }
-        return trimmedOrNil(MetadataResolution.normalizeWhitespaceAndWidth(seed.fileName))
+        return Self.trimmedOrNilValue(MetadataResolution.normalizeWhitespaceAndWidth(seed.fileName))
     }
 
-    private func searchRequestBody(for seed: MetadataResolutionSeed) -> String {
+    nonisolated static func searchExpressions(for seed: MetadataResolutionSeed) -> [String] {
         let title = searchTitle(for: seed)
-        let searchExpression = cnkiSearchExpression(title: title, author: searchAuthor(for: seed), doi: seed.doi, fileName: seed.fileName)
+        let author = searchAuthor(for: seed)
+        let withAuthor = cnkiSearchExpression(
+            title: title,
+            author: author,
+            doi: seed.doi,
+            fileName: seed.fileName
+        )
+        let titleOnly = cnkiSearchExpression(
+            title: title,
+            author: nil,
+            doi: seed.doi,
+            fileName: seed.fileName
+        )
+
+        var expressions: [String] = []
+        for expression in [withAuthor, titleOnly] where !expression.isEmpty {
+            if !expressions.contains(expression) {
+                expressions.append(expression)
+            }
+        }
+        return expressions
+    }
+
+    private func searchRequestBody(for seed: MetadataResolutionSeed, searchExpression: String) -> String {
         let searchExpressionAside = searchExpression.replacingOccurrences(of: "'", with: "&#39;")
 
         let queryJSON: [String: Any] = [
@@ -1451,8 +1616,8 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
             "QueryJson": queryJSON,
             "pageNum": "1",
             "pageSize": "20",
-            "sortField": "",
-            "sortType": "",
+            "sortField": "PT",
+            "sortType": "desc",
             "dstyle": "listmode",
             "productStr": "YSTT4HG0,LSTPFY1C,RMJLXHZ3,JQIRZIYA,JUP3MUPD,1UR4K4HZ,BPBAFJ5S,R79MZMCB,MPMFIG1A,WQ0UVIAA,NB3BWEHK,XVLO76FD,HR1YT1Z9,BLZOG7CK,PWFIRAGL,EMRPGLPA,J708GVCE,ML4DRIDX,NLBO1Z6R,NN3FJMUV,",
             "aside": "(\(searchExpressionAside))",
@@ -1462,27 +1627,31 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         return urlEncodedFormBody(form)
     }
 
-    private func cnkiSearchExpression(title: String?, author: String?, doi: String?, fileName: String) -> String {
+    nonisolated static func cnkiSearchExpression(title: String?, author: String?, doi: String?, fileName: String) -> String {
         var clauses: [String] = []
-        if let doi = trimmedOrNil(doi) {
+        if let doi = Self.trimmedOrNilValue(doi) {
             clauses.append("DOI='\(doi)'")
         }
-        if let normalizedTitle = trimmedOrNil(title) {
-            clauses.append("TI %= '\(normalizedTitle)'")
+        if let normalizedTitle = Self.trimmedOrNilValue(title) {
+            // 知网专家检索的 TI %= 对过长标题匹配效果差，截断到 60 字符
+            let truncated = normalizedTitle.count > 60
+                ? String(normalizedTitle.prefix(60))
+                : normalizedTitle
+            clauses.append("TI %= '\(truncated)'")
         }
         var expression = clauses.joined(separator: " OR ")
         if expression.isEmpty {
-            let fallback = trimmedOrNil(MetadataResolution.normalizeWhitespaceAndWidth(fileName)) ?? fileName
+            let fallback = Self.trimmedOrNilValue(MetadataResolution.normalizeWhitespaceAndWidth(fileName)) ?? fileName
             expression = "TI %= '\(fallback)'"
         }
-        if let author = trimmedOrNil(author) {
+        if let author = Self.trimmedOrNilValue(author) {
             expression = "(\(expression)) AND AU='\(author)'"
         }
         return expression
     }
 
     private func searchReferer(for seed: MetadataResolutionSeed) -> String {
-        let keyword = searchKeyword(for: seed) ?? MetadataResolution.normalizeWhitespaceAndWidth(seed.fileName)
+        let keyword = Self.searchKeyword(for: seed) ?? MetadataResolution.normalizeWhitespaceAndWidth(seed.fileName)
         let encodedTitle = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
         return "https://kns.cnki.net/kns8s/defaultresult/index?crossids=YSTT4HG0%2CLSTPFY1C%2CJUP3MUPD%2CMPMFIG1A%2CWQ0UVIAA%2CBLZOG7CK%2CPWFIRAGL%2CEMRPGLPA%2CNLBO1Z6R%2CNN3FJMUV&korder=SU&kw=\(encodedTitle)"
     }
@@ -1790,11 +1959,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
                 #"(?mi)^(?:AU|A1)\s*-\s*(.+)$"#
             ]
         ), let rawAuthors = trimmedOrNil(rawAuthors) {
-            let authors = AuthorName.parseList(
-                rawAuthors
-                    .replacingOccurrences(of: "；", with: ";")
-                    .replacingOccurrences(of: "，", with: ",")
-            )
+            let authors = AuthorName.parseList(Self.normalizeCNKIExportAuthors(rawAuthors))
             if !authors.isEmpty {
                 reference.authors = authors
             }
@@ -1991,9 +2156,13 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
           const text = normalize(el.innerText || el.textContent || "");
           const hint = normalize(`${el.className || ''} ${el.id || ''} ${el.getAttribute?.('placeholder') || ''} ${el.getAttribute?.('aria-label') || ''}`).toLowerCase();
           return (!!text && text.length <= 120 && /安全验证|请完成验证|验证码|访问异常|异常访问|验证后继续访问/.test(text))
-            || /(captcha|verify|verification)/.test(hint);
+            || /(captcha|validate)/.test(hint);
         });
-      const blockedSignals = /安全验证|请完成验证|验证码|访问异常|异常访问|验证后继续访问|机构用户登录/.test(marker) || hasVisibleVerificationUI;
+      const hasSearchEmptyState = searchRowCount === 0 && (
+        /抱歉，暂无数据|暂无数据|未找到相关文献|未检索到相关文献|没有找到相关结果|请稍后重试/.test(rawPageText.slice(0, 4000))
+        || !!document.querySelector('.nodata, .no-data, .result-none, [class*="nodata"], [class*="no-data"], [class*="noresult"], [class*="no-result"], [class*="empty-data"]')
+      );
+      const blockedSignals = /安全验证|请完成验证|验证码|访问异常|异常访问|验证后继续访问/.test(marker) || hasVisibleVerificationUI;
       const searchRowCount = document.querySelectorAll('table.result-table-list > tbody > tr, .result-table-list tbody tr, .result-table tbody tr, tr[data-dbcode]').length;
       const lines = rawPageText
         .replace(/\r/g, '')
@@ -2029,10 +2198,11 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
       const hasDetailSummary = !!document.querySelector('#ChDivSummary, .summary, .abstract, .abstract-text')
         || /(?:摘要|abstract)\s*[:：]/i.test(rawPageText.slice(0, 4000));
       const hasVisibleDetailScaffold = hasDetailTitle && (hasDetailAuthors || hasDetailSummary);
-      const markerBlocked = blockedSignals && !hasVisibleDetailScaffold;
+      const markerBlocked = blockedSignals && !hasVisibleDetailScaffold && !hasSearchEmptyState;
       return JSON.stringify({
         markerBlocked,
         searchRowCount,
+        hasSearchEmptyState,
         hasDetailTitle,
         hasDetailAuthors,
         hasDetailSummary,
@@ -2047,7 +2217,7 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
       const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
       const pageText = normalize(document.body?.innerText || "");
       const marker = normalize((document.title || "") + " " + pageText.slice(0, 4000));
-      const blocked = /安全验证|请完成验证|验证码|访问异常|异常访问|验证后继续访问|登录后可用|登录查看全文|机构用户登录/.test(marker);
+      const blocked = /安全验证|请完成验证|验证码|访问异常|异常访问|验证后继续访问/.test(marker);
       const seen = new Set();
       const candidates = [];
 
@@ -2105,8 +2275,14 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         });
       }
 
+      const emptyState = candidates.length === 0 && (
+        /抱歉，暂无数据|暂无数据|未找到相关文献|未检索到相关文献|没有找到相关结果|请稍后重试/.test(pageText)
+        || !!document.querySelector('.nodata, .no-data, .result-none, [class*="nodata"], [class*="no-data"], [class*="noresult"], [class*="no-result"], [class*="empty-data"]')
+      );
+
       return JSON.stringify({
         blocked,
+        emptyState,
         candidates: candidates.slice(0, 20)
       });
     })();
@@ -2511,7 +2687,13 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
         || firstText(['.top-tip span a', '.wxBaseinfo .top-tip a', '.source a', '.source']);
       const doi = metaValues(['citation_doi', 'dc.identifier'])[0]
         || firstText(['.doi', '.wxBaseinfo .doi']);
-      const abstractText = metaValues(['description', 'dc.description'])[0]
+      // 知网用 AbstractFilter() 把完整摘要存入隐藏 input#abstract_text，
+      // 再把 #ChDivSummary 截断为短文本；必须优先读 #abstract_text.value。
+      const cnkiFullAbstract = normalize(
+        (document.getElementById('abstract_text')?.value || '').replace(/<[^>]+>/g, '')
+      );
+      const abstractText = cnkiFullAbstract
+        || metaValues(['description', 'dc.description'])[0]
         || firstText(['#ChDivSummary', '.summary', '.abstract', '.abstract-text', '.wxBaseinfo .abstract']);
       const volume = metaValues(['citation_volume'])[0] || "";
       const issue = metaValues(['citation_issue'])[0] || "";
@@ -2525,10 +2707,10 @@ final class CNKIMetadataProvider: NSObject, ObservableObject {
           const text = normalize(el.innerText || el.textContent || "");
           const hint = normalize(`${el.className || ''} ${el.id || ''} ${el.getAttribute?.('placeholder') || ''} ${el.getAttribute?.('aria-label') || ''}`).toLowerCase();
           return (!!text && text.length <= 120 && /安全验证|请完成验证|验证码|访问异常|异常访问|验证后继续访问/.test(text))
-            || /(captcha|verify|verification)/.test(hint);
+            || /(captcha|validate)/.test(hint);
         });
       const hasVisibleDetailScaffold = !!title && (authors.length > 0 || !!abstractText || !!journal || !!doi);
-      const blockedSignals = /安全验证|请完成验证|验证码|访问异常|异常访问|验证后继续访问|机构用户登录/.test(marker)
+      const blockedSignals = /安全验证|请完成验证|验证码|访问异常|异常访问|验证后继续访问/.test(marker)
         || hasVisibleVerificationUI;
       const blockedReason = blockedSignals ? (hasVisibleVerificationUI ? 'verification-ui' : 'verification-marker') : null;
       const blocked = blockedSignals && !hasVisibleDetailScaffold;

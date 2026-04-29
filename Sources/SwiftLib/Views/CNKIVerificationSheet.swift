@@ -12,10 +12,10 @@ struct CNKIVerificationSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(session.title)
-                    .font(.title3.bold())
+                    .font(.title3.weight(.semibold))
                 Text(statusMessage)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                 Text(session.url.absoluteString)
                     .font(.caption)
                     .foregroundStyle(.tertiary)
@@ -35,7 +35,7 @@ struct CNKIVerificationSheet: View {
                 onPreparedResult: continueVerificationIfNeeded,
                 onPageStateChange: handlePageStateChange(_:)
             )
-            .frame(minWidth: 900, minHeight: 620)
+            .frame(minWidth: 720, minHeight: 460)
             .clipShape(RoundedRectangle(cornerRadius: 10))
 
             HStack {
@@ -54,7 +54,7 @@ struct CNKIVerificationSheet: View {
             }
         }
         .padding(16)
-        .frame(minWidth: 960, minHeight: 760)
+        .frame(minWidth: 760, minHeight: 560)
         .onDisappear {
             autoContinueTask?.cancel()
         }

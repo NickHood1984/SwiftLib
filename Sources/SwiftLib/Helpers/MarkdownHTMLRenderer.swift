@@ -12,7 +12,7 @@ enum MarkdownHTMLRenderer {
 
         while index < lines.count {
             let line = lines[index]
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = normalizedHTMLCandidate(line).trimmingCharacters(in: .whitespacesAndNewlines)
 
             if trimmed.isEmpty {
                 index += 1
@@ -36,7 +36,7 @@ enum MarkdownHTMLRenderer {
                 } else {
                     index += 1
                 }
-                blocks.append(replaceOCRAnnotationMarkersInRawHTML(htmlLines.joined(separator: "\n")))
+                blocks.append(renderRawHTMLBlock(htmlLines.joined(separator: "\n")))
                 continue
             }
 
@@ -166,16 +166,18 @@ enum MarkdownHTMLRenderer {
     }
 
     private static let htmlBlockTags: Set<String> = [
-        "table", "div", "p", "pre", "blockquote", "ul", "ol", "dl",
+        "table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup", "col",
+        "div", "p", "pre", "blockquote", "ul", "ol", "dl",
         "h1", "h2", "h3", "h4", "h5", "h6", "hr", "section",
         "article", "aside", "details", "figcaption", "figure",
         "header", "footer", "main", "nav", "summary",
     ]
 
     private static func parseHTMLBlockOpen(_ trimmed: String) -> String? {
-        guard trimmed.hasPrefix("<") else { return nil }
-        let scanner = Scanner(string: trimmed)
-        scanner.currentIndex = trimmed.index(after: trimmed.startIndex)
+        let candidate = normalizedHTMLCandidate(trimmed)
+        guard candidate.hasPrefix("<") else { return nil }
+        let scanner = Scanner(string: candidate)
+        scanner.currentIndex = candidate.index(after: candidate.startIndex)
         guard let tag = scanner.scanCharacters(from: .letters) else { return nil }
         let lower = tag.lowercased()
         return htmlBlockTags.contains(lower) ? lower : nil
@@ -391,6 +393,10 @@ enum MarkdownHTMLRenderer {
             return #"<div class="swiftlib-md-media-block">\#(images)</div>"#
         }
 
+        if isLikelyRawHTMLParagraph(trimmedLines) {
+            return renderRawHTMLBlock(trimmedLines.joined(separator: "\n"))
+        }
+
         let content = trimmedLines
             .map { renderInline($0, baseURL: baseURL) }
             .joined(separator: "<br>")
@@ -539,10 +545,50 @@ enum MarkdownHTMLRenderer {
         }
     }
 
+    private static func renderRawHTMLBlock(_ text: String) -> String {
+        replaceOCRAnnotationMarkersInRawHTML(normalizeRawHTMLTableFragment(text))
+    }
+
     private static func replaceOCRAnnotationMarkersInRawHTML(_ text: String) -> String {
         replaceOCRAnnotationMarkers(in: text) { content, kind in
             "<\(kind.htmlTag)>\(escapeHTML(content))</\(kind.htmlTag)>"
         }
+    }
+
+    private static func normalizedHTMLCandidate(_ text: String) -> String {
+        text.trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}\u{200B}\u{200C}\u{200D}\u{00A0}"))
+    }
+
+    private static func isLikelyRawHTMLParagraph(_ lines: [String]) -> Bool {
+        guard !lines.isEmpty else { return false }
+        let joined = lines.joined(separator: "\n")
+        let normalized = normalizedHTMLCandidate(joined).lowercased()
+
+        if parseHTMLBlockOpen(lines[0].trimmingCharacters(in: .whitespacesAndNewlines)) != nil {
+            return true
+        }
+
+        let tableTagHints = ["<table", "<thead", "<tbody", "<tfoot", "<tr", "<td", "<th", "<caption"]
+        return tableTagHints.contains(where: { normalized.contains($0) })
+    }
+
+    private static func normalizeRawHTMLTableFragment(_ text: String) -> String {
+        let normalized = normalizedHTMLCandidate(text)
+        let lower = normalized.lowercased()
+
+        if lower.contains("<table") {
+            return normalized
+        }
+
+        if lower.contains("<tr") {
+            return "<table><tbody>\(normalized)</tbody></table>"
+        }
+
+        if lower.contains("<td") || lower.contains("<th") {
+            return "<table><tbody><tr>\(normalized)</tr></tbody></table>"
+        }
+
+        return normalized
     }
 
     private static func replaceOCRAnnotationMarkers(

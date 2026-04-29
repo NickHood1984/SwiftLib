@@ -21,6 +21,7 @@ struct ReferenceDetailView: View {
     @State private var webAnnotationCount: Int = 0
     @State private var hasStoredWebContent = false
     @State private var isLoadingWebContent = false
+    @State private var showTranslatedAbstract: Bool = true
 
     init(reference: Reference, collections: [Collection], allTags: [Tag], db: AppDatabase, onSave: @escaping (Reference) -> Void, onDelete: @escaping () -> Void, onOpenPDFReader: ((Reference) -> Void)? = nil, onOpenWebReader: ((Reference) -> Void)? = nil) {
         self.reference = reference
@@ -32,6 +33,7 @@ struct ReferenceDetailView: View {
         self.onOpenPDFReader = onOpenPDFReader
         self.onOpenWebReader = onOpenWebReader
         self._editedRef = State(initialValue: reference)
+        self._showTranslatedAbstract = State(initialValue: true)
     }
 
     var body: some View {
@@ -46,6 +48,7 @@ struct ReferenceDetailView: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .swiftLibElegantScrollers()
         .background {
             if !isEditing, reference.pdfPath != nil {
                 quickPreviewShortcut
@@ -96,14 +99,6 @@ struct ReferenceDetailView: View {
                         .padding(.vertical, 4)
                         .background(.quaternary)
                         .clipShape(Capsule())
-                    if let source = reference.metadataSource {
-                        Text(source.displayName)
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(.quaternary)
-                            .clipShape(Capsule())
-                    }
                 }
 
                 Text(reference.title)
@@ -139,6 +134,20 @@ struct ReferenceDetailView: View {
                     }
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                }
+
+                // easyScholar journal rank badge (single, user-selected)
+                if let json = reference.journalRankJSON,
+                   let data = json.data(using: .utf8),
+                   let rankData = try? JSONDecoder().decode(EasyScholarRankData.self, from: data),
+                   let rank = rankData.rank(forKey: SwiftLibPreferences.easyScholarDisplayRank) {
+                    Text("\(rank.label) · \(rank.value)")
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.accentColor.opacity(0.1))
+                        .foregroundStyle(Color.accentColor)
+                        .clipShape(Capsule())
                 }
             }
             .padding(.bottom, 16)
@@ -287,11 +296,30 @@ struct ReferenceDetailView: View {
             // ── Abstract ──
             if let abstract = reference.abstract, !abstract.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("摘要")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
-                    Text(abstract)
+                    HStack(spacing: 6) {
+                        Text("摘要")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .textCase(.uppercase)
+
+                        if let translated = reference.translatedAbstract, !translated.isEmpty {
+                            Button {
+                                showTranslatedAbstract.toggle()
+                            } label: {
+                                Image(systemName: showTranslatedAbstract ? "character.book.closed" : "textformat.abc.dottedunderline")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help(showTranslatedAbstract ? "查看原文" : "查看中文翻译")
+                        }
+
+                        Spacer()
+                    }
+                    let displayText = (showTranslatedAbstract && reference.translatedAbstract != nil)
+                        ? reference.translatedAbstract!
+                        : abstract
+                    Text(displayText)
                         .font(.callout)
                         .textSelection(.enabled)
                         .lineSpacing(4)
@@ -813,6 +841,10 @@ struct ReferenceDetailView: View {
 
         if let source = reference.metadataSource?.displayName {
             rows.append(("来源", source))
+        }
+
+        if reference.verificationStatus == .metadataEnriching {
+            rows.append(("状态", "元数据补全中"))
         }
 
         switch reference.referenceType {
