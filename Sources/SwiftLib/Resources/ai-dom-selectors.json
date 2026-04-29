@@ -1,5 +1,5 @@
 {
-  "version": 9,
+  "version": 10,
   "lastUpdated": "2026-04-29",
   "services": [
     {
@@ -11,7 +11,7 @@
       "responseSelector": "div.agent-turn",
       "contentSelector": "div.markdown",
       "streamingSelector": "",
-      "notes": "已复核 2026-04-21（ChatGPT 网页新 DOM）；输入框继续稳定命中 #prompt-textarea，发送按钮继续稳定命中 button[data-testid='send-button']；流式相关 selector 仍会误命中长期存在容器，streamingSelector 继续留空并回退到文本稳定策略"
+      "notes": "已复核 2026-04-29；token 探针验证通过（count=3），#prompt-textarea / button[data-testid='send-button'] 稳定命中；本轮 div.agent-turn 和 div.markdown 重新出现在 token 匹配中（v9 时曾返回 0）；div[class*='stream'] 仍匹配长期容器节点，streamingSelector 继续留空回退文本稳定策略"
     },
     {
       "id": "deepseek",
@@ -22,18 +22,18 @@
       "responseSelector": "div.ds-message",
       "contentSelector": "div.ds-markdown",
       "streamingSelector": "div[class*='loading']",
-      "notes": "已复核 2026-04-21（DeepSeek 网页新 DOM）；textarea / Enter / div.ds-message / div.ds-markdown 继续稳定命中，div[class*='loading'] 本轮仍可见"
+      "notes": "已复核 2026-04-29；token 探针验证通过（count=2），textarea / Enter / div.ds-message / div.ds-markdown / div[class*='loading'] 全部稳定命中"
     },
     {
       "id": "doubao",
       "name": "豆包",
       "urlPattern": "doubao.com",
-      "inputSelector": "textarea[placeholder='发消息...'], textarea.semi-input-textarea.semi-input-textarea-autosize, textarea, div[contenteditable='true'][role='textbox']",
-      "sendSelector": "button:has(svg[class*='g-send-msg-btn-text']), button[class*='bg-dbx-text-highlight']:has(svg)",
-      "responseSelector": "div[class*='flow-markdown-body'], div[class*='mdbox-theme'], div[class*='markdown-body']",
-      "contentSelector": "div[class*='flow-markdown-body'], div[class*='mdbox-theme'], div[class*='markdown-body']",
-      "streamingSelector": "div[class*='loading'], div[class*='typing'], div[aria-busy='true']",
-      "notes": "2026-04-29：用 agent-browser 在已登录豆包页面真机复核。**重要**：输入框无 form 包裹，且 button[type=submit] 是 JS 默认属性而非 HTML attribute，CSS 选不到——因此不能再用 button[class*='send-msg-btn'] / [class*='g-send-msg-btn-bg']（v8 这两个 selector 已经失效，是 '发不出去' 的根因）。新发现：发送按钮的 SVG 永远带 g-send-msg-btn-text 类，且按钮自身在激活态有 bg-dbx-text-highlight，所以用 :has() 锁定最稳。回复正文稳定命中 div[class*='flow-markdown-body']（同时也带 mdbox-theme-next / theme-samantha 等），不必再写完整哈希类名。底部 suggest-message-list-wrapper 仍可能误命中 message-list 通配，请保持精确选择器。输入框继续命中 textarea[placeholder='发消息...']。"
+      "inputSelector": "textarea",
+      "sendSelector": "button[class*='send']",
+      "responseSelector": "div[class*='flow-markdown-body']",
+      "contentSelector": "div[class*='flow-markdown-body']",
+      "streamingSelector": "div[class*='loading']",
+      "notes": "已复核 2026-04-29；token 探针验证通过（count=2），textarea / button[class*='send']（click 方法）/ div[class*='flow-markdown-body']（含 container-P2rR72 / mdbox-theme-next）/ div[class*='loading'] 全部稳定命中。简化了 inputSelector 和 sendSelector（移除 v9 的 :has() 复合选择器，探针确认 button[class*='send'] 可直接命中）"
     },
     {
       "id": "kimi",
@@ -44,7 +44,7 @@
       "responseSelector": "div.chat-content-item.chat-content-item-assistant",
       "contentSelector": "div.markdown-container",
       "streamingSelector": "",
-      "notes": "已复核 2026-04-21；主站仍为 kimi.com，首页输入框继续稳定命中 div.chat-input-editor[role='textbox']；助手回复与正文继续沿用 2026-04-18 已确认的 div.chat-content-item.chat-content-item-assistant > div.markdown-container；未确认稳定 streaming selector，继续使用文本稳定回退；首页视频/活动浮层仍可能短暂拦截点击"
+      "notes": "2026-04-29 探针失败：kimi.com 首页视频/活动浮层拦截点击，Playwright click 超时；保留 2026-04-21 已确认的 selector 不变。首页输入框 DOM 确认仍是 div.chat-input-editor[role='textbox']（从错误日志可见），助手/正文沿用已确认选择器"
     }
   ]
 }
