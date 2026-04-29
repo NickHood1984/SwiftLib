@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "lastUpdated": "2026-04-29",
+  "adapters": [
+    {
+      "id": "wanfang",
+      "name": "万方数据",
+      "urlPatterns": ["d.wanfangdata.com.cn"],
+      "referenceType": "journalArticle",
+      "selectors": {
+        "title": ".detailTitleCN span",
+        "authors": ".test-detail-author",
+        "journal": "a[href*='/magazine/']:not([href*='tabId'])",
+        "year": "a[href*='issueNum']",
+        "issue": "a[href*='issueNum']",
+        "doi": ".doiStyle",
+        "abstract": ".summary",
+        "pages": ".pages",
+        "keywords": "meta[name='keywords']"
+      },
+      "transforms": {
+        "year": "match:(\\d{4})年",
+        "issue": "match:年(\\d+)期",
+        "doi": "match:10\\.\\d{4,9}/\\S+",
+        "pages": "match:\\(\\s*([^)]+)\\s*\\)",
+        "authors": "split:[;；,，]"
+      }
+    },
+    {
+      "id": "cqvip",
+      "name": "维普",
+      "urlPatterns": ["cqvip.com"],
+      "referenceType": "journalArticle",
+      "selectors": {
+        "title": "h1, .article-title, meta[name='citation_title']",
+        "authors": ".author a, meta[name='citation_author']",
+        "journal": ".journal a, meta[name='citation_journal_title']",
+        "year": ".publish-info, meta[name='citation_publication_date']",
+        "doi": "meta[name='citation_doi']",
+        "abstract": ".abstract, .summary-content",
+        "volume": "meta[name='citation_volume']",
+        "issue": "meta[name='citation_issue']",
+        "keywords": ".keywords a, .keyword-list a"
+      },
+      "transforms": {
+        "year": "match:\\d{4}",
+        "authors": "split:[;；,，]"
+      }
+    },
+    {
+      "id": "douban-book",
+      "name": "豆瓣读书",
+      "urlPatterns": ["book.douban.com/subject/"],
+      "referenceType": "book",
+      "selectors": {
+        "title": "h1 span, meta[property='og:title']",
+        "authors": "#info a[href*='/search/']",
+        "year": "#info",
+        "isbn": "#info",
+        "publisher": "#info a[href*='/press/']",
+        "abstract": "meta[property='og:description']",
+        "pages": "#info"
+      },
+      "transforms": {
+        "year": "matchLabel:出版年[：:]\\s*(\\d{4})",
+        "isbn": "matchLabel:ISBN[：:]\\s*(\\S+)",
+        "pages": "matchLabel:页数[：:]\\s*(\\d+)",
+        "authors": "split:[/／]",
+        "abstract": "match:内容介绍\\s*\\n([\\s\\S]+)"
+      }
+    },
+    {
+      "id": "cnki-ebooks",
+      "name": "CNKI e-Books",
+      "urlPatterns": ["book.oversea.cnki.net"],
+      "referenceType": "book",
+      "script": "@resource:cnki-ebook-adapter.js",
+      "selectors": {}
+    },
+    {
+      "id": "cnki-articles",
+      "name": "CNKI 期刊/学位论文",
+      "urlPatterns": ["kns.cnki.net/kcms2/article", "kns.cnki.net/kcms2/detail", "kns.cnki.net/kcms/co-journal"],
+      "referenceType": "journalArticle",
+      "script": "@resource:cnki-article-adapter.js",
+      "selectors": {}
+    },
+    {
+      "id": "nlc",
+      "name": "国家图书馆",
+      "urlPatterns": ["opac.nlc.cn", "find.nlc.cn"],
+      "referenceType": "book",
+      "selectors": {
+        "title": ".bookDetailTitle, h2.title, .detailTitle",
+        "authors": ".bookDetailItem:has(.bookDetailLabel:contains('责任者')) .bookDetailContent",
+        "isbn": ".bookDetailItem:has(.bookDetailLabel:contains('ISBN')) .bookDetailContent",
+        "publisher": ".bookDetailItem:has(.bookDetailLabel:contains('出版发行')) .bookDetailContent",
+        "year": ".bookDetailItem:has(.bookDetailLabel:contains('出版发行')) .bookDetailContent",
+        "pages": ".bookDetailItem:has(.bookDetailLabel:contains('载体形态')) .bookDetailContent"
+      },
+      "transforms": {
+        "year": "match:\\d{4}",
+        "isbn": "match:[\\d\\-X]{10,17}",
+        "pages": "match:(\\d+)页",
+        "authors": "split:[;；]"
+      }
+    }
+  ]
+}
