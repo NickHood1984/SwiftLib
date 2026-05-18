@@ -24,6 +24,9 @@ struct AIChatView: NSViewRepresentable {
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15"
         webView.allowsBackForwardNavigationGestures = true
         context.coordinator.webView = webView
+        DispatchQueue.main.async {
+            webView.applySwiftLibElegantScrollersRecursively(forceVerticalScroller: true)
+        }
         webView.load(URLRequest(url: url))
         return webView
     }
@@ -35,6 +38,9 @@ struct AIChatView: NSViewRepresentable {
         if coord.currentURL != url {
             coord.currentURL = url
             webView.load(URLRequest(url: url))
+        }
+        DispatchQueue.main.async {
+            webView.applySwiftLibElegantScrollersRecursively(forceVerticalScroller: true)
         }
 
         // Inject pending text if available
@@ -105,6 +111,10 @@ struct AIChatView: NSViewRepresentable {
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
             // Allow all navigation within the AI chat
             .allow
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.applySwiftLibElegantScrollersRecursively(forceVerticalScroller: true)
         }
     }
 }

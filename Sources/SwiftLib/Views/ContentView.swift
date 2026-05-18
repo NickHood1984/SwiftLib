@@ -1,613 +1,11 @@
 import SwiftUI
-import Combine
 import SwiftLibCore
-
-enum SidebarItem: Hashable {
-    case allReferences
-    case collection(Int64)
-    case tag(Int64)
-    case titleKeyword(String)
-}
-
-struct SearchQuery {
-    var keyword: String = ""
-    var author: String = ""
-    var yearFrom: Int?
-    var yearTo: Int?
-    var journal: String = ""
-    var type: ReferenceType?
-
-    static func parse(_ text: String) -> SearchQuery {
-        var q = SearchQuery()
-        var keywords: [String] = []
-        for part in text.components(separatedBy: " ") {
-            if part.hasPrefix("author:") {
-                q.author = String(part.dropFirst("author:".count))
-            } else if part.hasPrefix("year:") {
-                let val = String(part.dropFirst("year:".count))
-                if val.contains("-") {
-                    let comps = val.split(separator: "-", maxSplits: 1)
-                    if val.hasPrefix("-") {
-                        q.yearTo = Int(comps.last ?? "")
-                    } else if comps.count == 2 {
-                        q.yearFrom = Int(comps[0])
-                        q.yearTo = Int(comps[1])
-                    } else {
-                        q.yearFrom = Int(comps[0])
-                    }
-                } else {
-                    q.yearFrom = Int(val)
-                    q.yearTo = q.yearFrom
-                }
-            } else if part.hasPrefix("journal:") {
-                q.journal = String(part.dropFirst("journal:".count))
-            } else if part.hasPrefix("type:") {
-                let val = String(part.dropFirst("type:".count))
-                q.type = ReferenceType.allCases.first { $0.rawValue == val }
-            } else if !part.isEmpty {
-                keywords.append(part)
-            }
-        }
-        q.keyword = keywords.joined(separator: " ")
-        return q
-    }
-}
-
-@MainActor
-final class LibraryViewModel: ObservableObject {
-    /// The current page of lightweight list rows returned by the database query.
-    @Published var references: [ReferenceListRow] = []
-    /// Total count of references matching the current scope + filter (for status bar).
-    @Published var totalReferenceCount: Int = 0
-    @Published var pendingMetadataIntakes: [MetadataIntake] = []
-    @Published var collections: [Collection] = []
-    @Published var tags: [Tag] = []
-    @Published var selectedSidebar: SidebarItem = .allReferences {
-        didSet { rebuildReferenceObserver() }
-    }
-    /// Raw search text typed by the user; debounced before hitting the DB.
-    @Published var searchText = "" {
-        didSet { scheduleSearchDebounce() }
-    }
-    @Published var isImporting = false
-    @Published var importProgress: String?
-    @Published var errorMessage: String?
-    /// All reference titles for smart keyword extraction (unaffected by filters).
-    @Published private(set) var allReferenceTitles: [String] = []
-    /// Precomputed smart title keywords so view refreshes do not rescan the entire library.
-    @Published private(set) var titleKeywords: [(word: String, count: Int)] = []
-
-    /// Whether all matching rows have been loaded (pagination exhausted).
-    private(set) var allLoaded = false
-
-    // MARK: - Private state
-    let db: AppDatabase
-    private var cancellables = Set<AnyCancellable>()
-    /// Cancellable for the active reference ValueObservation subscription.
-    private var referenceObserverCancellable: AnyCancellable?
-    /// Cancellable for the reference count observation.
-    private var countObserverCancellable: AnyCancellable?
-    /// Timer-based debounce task for search input.
-    private var searchDebounceTask: Task<Void, Never>?
-    /// Background task that rebuilds smart title keywords from title snapshots.
-    private var titleKeywordTask: Task<Void, Never>?
-    /// Background task used to fetch the next page of rows off the main actor.
-    private var loadMoreTask: Task<Void, Never>?
-    /// The filter currently applied to the database query.
-    private var activeFilter = ReferenceFilter()
-    /// Page size for list pagination.
-    private let pageSize = 200
-    /// Guards against duplicate pagination requests for the same query.
-    private var isLoadingMore = false
-    /// Identifies the active list query so stale pagination results can be discarded.
-    private var currentQueryToken = UUID()
-
-    init(db: AppDatabase = .shared) {
-        self.db = db
-        setupObservation()
-    }
-
-    // MARK: - Observation setup
-
-    private func setupObservation() {
-        db.observeCollections()
-            .receive(on: DispatchQueue.main)
-            .sink(
-                receiveCompletion: { [weak self] completion in
-                    if case .failure(let error) = completion {
-                        self?.errorMessage = "Collections refresh failed: \(error.localizedDescription)"
-                    }
-                },
-                receiveValue: { [weak self] collections in
-                    self?.collections = collections
-                }
-            )
-            .store(in: &cancellables)
-
-        db.observeTags()
-            .receive(on: DispatchQueue.main)
-            .sink(
-                receiveCompletion: { [weak self] completion in
-                    if case .failure(let error) = completion {
-                        self?.errorMessage = "Tags refresh failed: \(error.localizedDescription)"
-                    }
-                },
-                receiveValue: { [weak self] tags in
-                    self?.tags = tags
-                }
-            )
-            .store(in: &cancellables)
-
-        db.observePendingMetadataIntakes()
-            .receive(on: DispatchQueue.main)
-            .sink(
-                receiveCompletion: { [weak self] completion in
-                    if case .failure(let error) = completion {
-                        self?.errorMessage = "Pending metadata refresh failed: \(error.localizedDescription)"
-                    }
-                },
-                receiveValue: { [weak self] items in
-                    self?.pendingMetadataIntakes = items
-                }
-            )
-            .store(in: &cancellables)
-
-        // Observe all reference titles for smart keyword extraction.
-        db.observeReferenceTitles()
-            .receive(on: DispatchQueue.main)
-            .sink(
-                receiveCompletion: { _ in },
-                receiveValue: { [weak self] titles in
-                    self?.allReferenceTitles = titles
-                    self?.scheduleTitleKeywordRebuild(for: titles)
-                }
-            )
-            .store(in: &cancellables)
-
-        // Start the initial reference observation with no filter.
-        rebuildReferenceObserver()
-    }
-
-    /// (Re-)subscribe to the database with the current scope + filter.
-    /// Called whenever the sidebar selection or the debounced filter changes.
-    private func rebuildReferenceObserver() {
-        referenceObserverCancellable?.cancel()
-        countObserverCancellable?.cancel()
-        loadMoreTask?.cancel()
-        loadMoreTask = nil
-        allLoaded = false
-        isLoadingMore = false
-        currentQueryToken = UUID()
-
-        let scope = currentReferenceScope
-        var filter = activeFilter
-
-        if case .titleKeyword(let word) = selectedSidebar {
-            filter.keyword = word
-            filter.titleOnly = true
-        }
-
-        // Observe lightweight list rows (first page).
-        referenceObserverCancellable = db
-            .observeReferenceListRows(scope: scope, filter: filter, limit: pageSize)
-            .sink(
-                receiveCompletion: { [weak self] completion in
-                    if case .failure(let error) = completion {
-                        self?.errorMessage = "References refresh failed: \(error.localizedDescription)"
-                    }
-                },
-                receiveValue: { [weak self] rows in
-                    guard let self else { return }
-                    // In-place merge: preserve SwiftUI Table's scroll position
-                    // and selection by mutating the same array when order/ids
-                    // are unchanged.  Only fall back to a full replace when the
-                    // membership actually shifts (add/remove/reorder).
-                    let oldIds = self.references.map(\.id)
-                    let newIds = rows.map(\.id)
-                    if oldIds == newIds {
-                        for (index, newRow) in rows.enumerated()
-                        where self.references[index] != newRow {
-                            self.references[index] = newRow
-                        }
-                    } else {
-                        self.references = rows
-                    }
-                    self.allLoaded = rows.count < self.pageSize
-                }
-            )
-
-        // Observe total count separately (cheap COUNT(*) query).
-        countObserverCancellable = db
-            .observeReferenceCount(scope: scope, filter: filter)
-            .sink(
-                receiveCompletion: { _ in },
-                receiveValue: { [weak self] count in
-                    self?.totalReferenceCount = count
-                }
-            )
-    }
-
-    var currentReferenceScope: ReferenceScope {
-        let scope: ReferenceScope
-        switch selectedSidebar {
-        case .allReferences, .titleKeyword:
-            scope = .all
-        case .collection(let id):   scope = .collection(id)
-        case .tag(let id):          scope = .tag(id)
-        }
-        return scope
-    }
-
-
-    /// Debounce raw search text by 250 ms before rebuilding the DB observer.
-    private func scheduleSearchDebounce() {
-        searchDebounceTask?.cancel()
-        searchDebounceTask = Task { [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(nanoseconds: 250_000_000) // 250 ms
-            guard !Task.isCancelled else { return }
-            let parsed = SearchQuery.parse(self.searchText)
-            var filter = ReferenceFilter()
-            filter.keyword      = parsed.keyword
-            filter.author       = parsed.author
-            filter.yearFrom     = parsed.yearFrom
-            filter.yearTo       = parsed.yearTo
-            filter.journal      = parsed.journal
-            filter.referenceType = parsed.type
-            self.activeFilter = filter
-            self.rebuildReferenceObserver()
-        }
-    }
-
-    /// Convenience accessor — references are already filtered by the DB query.
-    var filteredReferences: [ReferenceListRow] { references }
-
-    /// Load the next page of list rows when the user scrolls near the bottom.
-    func loadMoreIfNeeded(currentItem: ReferenceListRow) {
-        guard !allLoaded, !isLoadingMore else { return }
-        // Trigger when the user reaches the last 5 items.
-        let thresholdIndex = references.index(references.endIndex, offsetBy: -5, limitedBy: references.startIndex) ?? references.startIndex
-        guard let currentIndex = references.firstIndex(where: { $0.id == currentItem.id }),
-              currentIndex >= thresholdIndex else { return }
-
-        let scope = currentReferenceScope
-        var filter = activeFilter
-        if case .titleKeyword(let word) = selectedSidebar {
-            filter.keyword = word
-            filter.titleOnly = true
-        }
-
-        let expectedOffset = references.count
-        let queryToken = currentQueryToken
-        let db = self.db
-        let pageSize = self.pageSize
-        isLoadingMore = true
-
-        loadMoreTask = Task {
-            do {
-                let nextPage = try await Task.detached(priority: .utility) {
-                    try db.fetchReferenceListRows(
-                        scope: scope,
-                        filter: filter,
-                        limit: pageSize,
-                        offset: expectedOffset
-                    )
-                }.value
-
-                guard !Task.isCancelled,
-                      queryToken == currentQueryToken,
-                      references.count == expectedOffset else { return }
-
-                if nextPage.isEmpty {
-                    allLoaded = true
-                } else {
-                    references.append(contentsOf: nextPage)
-                    if nextPage.count < pageSize { allLoaded = true }
-                }
-            } catch is CancellationError {
-                // The query changed while loading the next page.
-            } catch {
-                guard queryToken == currentQueryToken else { return }
-                errorMessage = "Load more failed: \(error.localizedDescription)"
-            }
-
-            if queryToken == currentQueryToken {
-                isLoadingMore = false
-                loadMoreTask = nil
-            }
-        }
-    }
-
-    private func scheduleTitleKeywordRebuild(for titles: [String]) {
-        titleKeywordTask?.cancel()
-
-        if titles.isEmpty {
-            titleKeywords = []
-            return
-        }
-
-        titleKeywordTask = Task { [titles] in
-            let keywords = await Task.detached(priority: .utility) {
-                Self.computeTitleKeywords(from: titles)
-            }.value
-
-            guard !Task.isCancelled else { return }
-            titleKeywords = keywords
-        }
-    }
-
-    nonisolated static func computeTitleKeywords(from titles: [String]) -> [(word: String, count: Int)] {
-        var freq: [String: Int] = [:]
-
-        for title in titles {
-            let words = title
-                .lowercased()
-                .components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .filter { $0.count >= 2 && !titleKeywordStopWords.contains($0) }
-
-            for word in Set(words) {
-                freq[word, default: 0] += 1
-            }
-        }
-
-        return freq
-            .filter { $0.value >= 2 }
-            .sorted { lhs, rhs in
-                if lhs.value == rhs.value {
-                    return lhs.key < rhs.key
-                }
-                return lhs.value > rhs.value
-            }
-            .prefix(15)
-            .map { (word: $0.key, count: $0.value) }
-    }
-
-    func moveReferences(ids: Set<Int64>, toCollectionId: Int64?) {
-        do {
-            try db.moveReferences(ids: Array(ids), toCollectionId: toCollectionId)
-        } catch {
-            errorMessage = "Move failed: \(error.localizedDescription)"
-        }
-    }
-
-    func deleteReferences(ids: Set<Int64>) {
-        let idArray = Array(ids)
-        do {
-            let pdfPaths = try db.deleteReferencesReturningPDFPaths(ids: idArray)
-            for path in pdfPaths {
-                PDFService.deletePDF(at: path)
-            }
-            WordAddinServer.shared.invalidateRenderCache()
-        } catch {
-            errorMessage = "Delete failed: \(error.localizedDescription)"
-        }
-    }
-
-    func saveReference(_ ref: inout Reference) {
-        ref.dateModified = Date()
-        do {
-            try db.saveReference(&ref)
-            WordAddinServer.shared.invalidateRenderCache()
-        } catch {
-            errorMessage = "Save failed: \(error.localizedDescription)"
-        }
-    }
-
-    /// Translate a reference's abstract via the configured AI chat service
-    /// and persist the result.  Runs on a detached background task so the
-    /// caller can show a toast / progress indicator.
-    func translateAbstract(_ ref: Reference) async -> Reference? {
-        guard let abstract = ref.abstract?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !abstract.isEmpty else {
-            return nil
-        }
-
-        let langName = SwiftLibPreferences.abstractTranslationLanguageOptions
-            .first { $0.code == SwiftLibPreferences.abstractTranslationLanguage }?
-            .name ?? "中文"
-
-        let prompt = "请将以下内容翻译成\(langName)，只返回翻译结果，不要添加任何解释：\n\n\(abstract)"
-
-        do {
-            let translated = try await AIChatWindowManager.shared.sendText(prompt)
-            let trimmed = translated.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-
-            var mutable = ref
-            mutable.translatedAbstract = trimmed
-            mutable.dateModified = Date()
-            saveReference(&mutable)
-            return mutable
-        } catch {
-            await MainActor.run {
-                errorMessage = "翻译摘要失败：\(error.localizedDescription)"
-            }
-            return nil
-        }
-    }
-
-    func saveManualReference(_ ref: inout Reference, reviewedBy: String = "manual-entry") {
-        if ref.id == nil && !ref.verificationStatus.isLibraryReady {
-            ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: reviewedBy)
-        }
-        saveReference(&ref)
-    }
-
-    func batchImportReferences(_ refs: [Reference]) {
-        do {
-            _ = try db.batchImportReferences(refs)
-        } catch {
-            errorMessage = "Batch import failed: \(error.localizedDescription)"
-        }
-    }
-
-    func persistMetadataResolution(
-        _ result: MetadataResolutionResult,
-        options: MetadataPersistenceOptions
-    ) -> MetadataPersistenceResult? {
-        do {
-            return try db.persistMetadataResolution(result, options: options)
-        } catch {
-            errorMessage = "Metadata persistence failed: \(error.localizedDescription)"
-            return nil
-        }
-    }
-
-    func confirmPendingMetadataIntake(_ intake: MetadataIntake, reviewedBy: String = "manual-queue") -> Reference? {
-        do {
-            return try db.confirmMetadataIntake(intake, reviewedBy: reviewedBy)
-        } catch {
-            errorMessage = "Manual verification failed: \(error.localizedDescription)"
-            return nil
-        }
-    }
-
-    func deletePendingMetadataIntake(_ intake: MetadataIntake) {
-        guard let id = intake.id else { return }
-        do {
-            try db.deleteMetadataIntake(id: id)
-        } catch {
-            errorMessage = "Delete failed: \(error.localizedDescription)"
-        }
-    }
-
-    deinit {
-        searchDebounceTask?.cancel()
-        titleKeywordTask?.cancel()
-        loadMoreTask?.cancel()
-    }
-
-    func saveCollection(_ col: inout Collection) {
-        do {
-            try db.saveCollection(&col)
-        } catch {
-            errorMessage = "Save failed: \(error.localizedDescription)"
-        }
-    }
-
-    func deleteCollection(id: Int64) {
-        do {
-            try db.deleteCollection(id: id)
-        } catch {
-            errorMessage = "Delete failed: \(error.localizedDescription)"
-        }
-        if case .collection(let cid) = selectedSidebar, cid == id {
-            selectedSidebar = .allReferences
-        }
-    }
-
-    func saveTag(_ tag: inout Tag) {
-        do {
-            try db.saveTag(&tag)
-        } catch {
-            errorMessage = "Save failed: \(error.localizedDescription)"
-        }
-    }
-
-    func deleteTag(id: Int64) {
-        do {
-            try db.deleteTag(id: id)
-        } catch {
-            errorMessage = "Delete failed: \(error.localizedDescription)"
-        }
-    }
-
-    func importBibTeX(from url: URL) {
-        isImporting = true
-        importProgress = "正在读取文件…"
-
-        Task.detached { [weak self] in
-            guard let self else { return }
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-
-            do {
-                let content = try String(contentsOf: url, encoding: .utf8)
-                await MainActor.run { self.importProgress = "正在解析 BibTeX…" }
-
-                let refs = BibTeXImporter.parse(content)
-                await MainActor.run { self.importProgress = "正在导入 \(refs.count) 条条目…" }
-
-                let count = try self.db.batchImportReferences(refs)
-                await MainActor.run {
-                    self.importProgress = "已导入 \(count) 条条目"
-                    self.isImporting = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.importProgress = nil
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    self.importProgress = "导入失败：\(error.localizedDescription)"
-                    self.isImporting = false
-                }
-            }
-        }
-    }
-
-    func importRIS(from url: URL) {
-        isImporting = true
-        importProgress = "正在读取文件…"
-
-        Task.detached { [weak self] in
-            guard let self else { return }
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-
-            do {
-                let content = try String(contentsOf: url, encoding: .utf8)
-                await MainActor.run { self.importProgress = "正在解析 RIS…" }
-
-                let refs = RISImporter.parse(content)
-                await MainActor.run { self.importProgress = "正在导入 \(refs.count) 条条目…" }
-
-                let count = try self.db.batchImportReferences(refs)
-                await MainActor.run {
-                    self.importProgress = "已导入 \(count) 条条目"
-                    self.isImporting = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.importProgress = nil
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    self.importProgress = "导入失败：\(error.localizedDescription)"
-                    self.isImporting = false
-                }
-            }
-        }
-    }
-}
-
-private let titleKeywordStopWords: Set<String> = [
-    // English
-    "the", "and", "for", "with", "from", "that", "this", "are", "was",
-    "were", "been", "being", "have", "has", "had", "not", "but", "its",
-    "can", "may", "will", "should", "could", "would", "into", "than",
-    "also", "where", "when", "how", "what", "which", "who", "whom",
-    "why", "all", "any", "each", "every", "both", "few", "more",
-    "most", "other", "some", "such", "only", "own", "same", "then",
-    "too", "very", "just", "about", "above", "after", "again",
-    "below", "between", "during", "further", "here", "once", "there",
-    "these", "those", "through", "under", "until", "while",
-    "over", "out", "off", "down", "before", "our", "your", "his",
-    "her", "their", "its", "does", "did", "doing",
-    "using", "based", "via", "new", "one", "two", "study", "analysis",
-    "case", "approach", "method", "model", "data", "results", "review",
-    "research", "paper", "effect", "effects", "use",
-    // Chinese
-    "的", "了", "在", "是", "我", "有", "和", "就", "不", "人",
-    "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去",
-    "你", "会", "着", "没有", "看", "好", "自己", "这", "他", "她",
-    "对", "中", "与", "及", "或", "等", "基于", "研究", "分析",
-]
 
 struct ContentView: View {
     @Environment(\.openSettings) private var openSettings
-    @StateObject private var viewModel = LibraryViewModel()
-    @StateObject private var cnkiMetadataProvider = CNKIMetadataProvider()
-    @StateObject private var baiduScholarEngine = BaiduScholarService.sharedEngine
-    @StateObject private var onboarding = OnboardingManager.shared
+    @Environment(\.openWindow) var openWindow
+    @StateObject var viewModel: LibraryViewModel
+    @StateObject var cnkiMetadataProvider = CNKIMetadataProvider()
     @AppStorage("hasPromptedCLIInstallation") private var hasPromptedCLIInstallation = false
     @State private var showCLIInstallPrompt = false
     @State private var cliInstallResult: CLIInstallResult?
@@ -616,131 +14,200 @@ struct ContentView: View {
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
     @State private var showWebImport = false
     @State private var showAddCollection = false
+    @State private var showAddWorkspace = false
     @State private var showAddByIdentifier = false
     @State private var showBatchImport = false
-    @State private var pendingQueueNotice: PendingQueueNotice?
-    @State private var cslImportMessage: String?
-    @State private var columnVisibility = NavigationSplitViewVisibility.all
-    @State private var selectedId: Int64?
-    @State private var refreshTask: Task<Void, Never>?
+    @State var pendingQueueNotice: PendingQueueNotice?
+    @State var cslImportMessage: String?
+    @State var columnVisibility = NavigationSplitViewVisibility.all
+    @State var selectedId: Int64?
+    @State var restoredWorkspaceSnapshots: Set<Int64> = []
+    @State var workspaceLayoutAutosaveTask: Task<Void, Never>?
+    @State var refreshTask: Task<Void, Never>?
 
-    private struct PendingQueueNotice: Identifiable, Equatable {
+    struct PendingQueueNotice: Identifiable, Equatable {
         let id = UUID()
         let title: String
         let message: String
     }
 
-    private var metadataResolver: MetadataResolver {
+    var metadataResolver: MetadataResolver {
         MetadataResolver(cnkiProvider: cnkiMetadataProvider)
     }
 
-    @State private var selectedReference: Reference?
+    @State var selectedReference: Reference?
+
+    init(initialWorkspaceID: Int64? = nil) {
+        _viewModel = StateObject(wrappedValue: LibraryViewModel(initialWorkspaceID: initialWorkspaceID))
+    }
+
+    private var sidebarColumn: some View {
+        SidebarView(
+            workspaces: viewModel.workspaces,
+            selectedWorkspaceID: viewModel.selectedWorkspaceID,
+            collections: viewModel.collections,
+            tags: viewModel.tags,
+            titleKeywords: viewModel.titleKeywords,
+            selection: $viewModel.selectedSidebar,
+            referenceCount: viewModel.totalReferenceCount,
+            onSelectWorkspace: { workspace in
+                switchWorkspace(to: workspace)
+            },
+            onOpenWorkspaceInNewWindow: { workspace in
+                saveCurrentWorkspaceLayoutSnapshot()
+                if let id = workspace.id {
+                    openWindow(value: id)
+                }
+            },
+            onAddWorkspace: { showAddWorkspace = true },
+            onDeleteCollection: { viewModel.deleteCollection(id: $0) },
+            onDeleteTag: { viewModel.deleteTag(id: $0) },
+            onAddCollection: { showAddCollection = true },
+            onRenameCollection: { collection, newName in
+                var c = collection
+                c.name = newName
+                viewModel.saveCollection(&c)
+            }
+        )
+        .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 260)
+    }
+
+    private var referenceListColumn: some View {
+        ReferenceListView(
+            references: viewModel.filteredReferences,
+            collections: viewModel.collections,
+            workspaces: viewModel.workspaces,
+            currentWorkspaceID: viewModel.selectedWorkspaceID,
+            selectedId: selectedId,
+            onSelect: { selectedId = $0 },
+            onDelete: { ids in deleteReferences(ids: ids) },
+            onMove: { ids, colId in viewModel.moveReferences(ids: ids, toCollectionId: colId) },
+            onAddToWorkspace: { ids, workspaceId in
+                viewModel.addReferences(ids: ids, toWorkspaceId: workspaceId)
+            },
+            onRemoveFromWorkspace: { ids, workspaceId in
+                viewModel.removeReferences(ids: ids, fromWorkspaceId: workspaceId)
+            },
+            onRefreshMetadata: { ids in refreshMetadataForIDs(ids) },
+            isRefreshingMetadata: viewModel.isImporting,
+            onDoubleClick: { refId in
+                openReader(for: refId)
+            },
+            onLoadMore: { item in viewModel.loadMoreIfNeeded(currentItem: item) },
+            onTranslateAbstract: { refId in
+                translateAbstractForID(refId)
+            }
+        )
+        .navigationSplitViewColumnWidth(min: 420, ideal: 640)
+    }
 
     var body: some View {
+        contentWithLifecycle
+    }
+
+    private var splitView: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(
-                collections: viewModel.collections,
-                tags: viewModel.tags,
-                titleKeywords: viewModel.titleKeywords,
-                selection: $viewModel.selectedSidebar,
-                referenceCount: viewModel.totalReferenceCount,
-                onDeleteCollection: { viewModel.deleteCollection(id: $0) },
-                onDeleteTag: { viewModel.deleteTag(id: $0) },
-                onAddCollection: { showAddCollection = true },
-                onRenameCollection: { collection, newName in
-                    var c = collection
-                    c.name = newName
-                    viewModel.saveCollection(&c)
-                }
-            )
-            .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 260)
+            sidebarColumn
         } content: {
-            ReferenceListView(
-                references: viewModel.filteredReferences,
-                collections: viewModel.collections,
-                selectedId: selectedId,
-                onSelect: { selectedId = $0 },
-                onDelete: { ids in deleteReferences(ids: ids) },
-                onMove: { ids, colId in viewModel.moveReferences(ids: ids, toCollectionId: colId) },
-                onRefreshMetadata: { ids in refreshMetadataForIDs(ids) },
-                isRefreshingMetadata: viewModel.isImporting,
-                onDoubleClick: { refId in
-                    openReader(for: refId)
-                },
-                onLoadMore: { item in viewModel.loadMoreIfNeeded(currentItem: item) },
-                onTranslateAbstract: { refId in
-                    translateAbstractForID(refId)
-                }
-            )
-            .navigationSplitViewColumnWidth(min: 420, ideal: 640)
+            referenceListColumn
         } detail: {
             detailSection
                 .navigationSplitViewColumnWidth(min: 340, ideal: 420, max: 560)
         }
-        .toolbar(content: {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    showSearch = true
-                } label: {
-                    Label("搜索", systemImage: "magnifyingglass")
-                }
-                .help("搜索文献")
-                .keyboardShortcut("f", modifiers: .command)
-
-                Button(action: {
-                    addReferenceInitialType = .journalArticle
-                    showAddReference = true
-                }) {
-                    Label("手动新建", systemImage: "square.and.pencil")
-                }
-                .help("新建一个空白条目并手动填写信息")
-
-                Menu {
-                    Button(action: { showWebImport = true }) {
-                        Label("网页剪藏", systemImage: "globe")
-                    }
-                    Button(action: { showAddByIdentifier = true }) {
-                        Label("按标识导入…", systemImage: "text.magnifyingglass")
-                    }
-                    Button(action: { importPDFWithMetadata() }) {
-                        Label("导入 PDF…", systemImage: "doc.badge.plus")
-                    }
-                    Divider()
-                    Button("批量按标识导入…") { showBatchImport = true }
-                    Button("导入 BibTeX (.bib)…") { importBibTeX() }
-                    Button("导入 RIS (.ris)…") { importRIS() }
-                    Divider()
-                    Button("导入引文样式 (.csl)…") { importCitationStyles() }
-                } label: {
-                    Label("导入", systemImage: "tray.and.arrow.down")
-                }
-                .help("导入文献或文件")
-                .disabled(viewModel.isImporting)
-                .coachMarkAnchor(.toolbarImport)
-
-                Button(action: { openPendingMetadataQueueWindow() }) {
-                    HStack(spacing: 6) {
-                        Label("待确认队列", systemImage: "clock.badge.exclamationmark")
-                        if !viewModel.pendingMetadataIntakes.isEmpty {
-                            Text("\(viewModel.pendingMetadataIntakes.count)")
-                                .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.orange.opacity(0.18), in: Capsule())
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                }
-                .help("打开待确认元数据队列，继续选候选、处理验证码或人工确认")
-                .disabled(viewModel.pendingMetadataIntakes.isEmpty)
-
-                Button(action: { openSettings() }) {
-                    Label("设置", systemImage: "gearshape")
-                }
-                .help("打开设置 (⌘,)")
+        .onChange(of: viewModel.selectedWorkspaceID) { _, newValue in
+            guard let id = newValue,
+                  !restoredWorkspaceSnapshots.contains(id),
+                  let workspace = viewModel.workspaces.first(where: { $0.id == id }) else {
+                return
             }
+            applyLayoutSnapshot(from: workspace)
+            restoredWorkspaceSnapshots.insert(id)
+        }
+        .onDisappear {
+            saveCurrentWorkspaceLayoutSnapshot()
+        }
+        .toolbar { primaryToolbar }
+    }
 
-        })
+    @ToolbarContentBuilder
+    private var primaryToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                showSearch = true
+            } label: {
+                Label("搜索", systemImage: "magnifyingglass")
+            }
+            .help("搜索文献")
+            .keyboardShortcut("f", modifiers: .command)
+            .accessibilityLabel("搜索文献")
+
+            Button(action: {
+                addReferenceInitialType = .journalArticle
+                showAddReference = true
+            }) {
+                Label("手动新建", systemImage: "square.and.pencil")
+            }
+            .help("新建一个空白条目并手动填写信息")
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+            .accessibilityLabel("手动新建文献")
+
+            importMenu
+
+            Button(action: { openPendingMetadataQueueWindow() }) {
+                pendingQueueToolbarLabel
+            }
+            .help("打开待确认元数据队列，继续选候选、处理验证码或人工确认")
+            .disabled(viewModel.pendingMetadataIntakes.isEmpty)
+            .accessibilityLabel("待确认元数据队列")
+
+            Button(action: { openSettings() }) {
+                Label("设置", systemImage: "gearshape")
+            }
+            .help("打开设置 (⌘,)")
+            .accessibilityLabel("打开设置")
+        }
+    }
+
+    private var importMenu: some View {
+        Menu {
+            Button(action: { showWebImport = true }) {
+                Label("网页剪藏", systemImage: "globe")
+            }
+            Button(action: { showAddByIdentifier = true }) {
+                Label("按标识导入…", systemImage: "text.magnifyingglass")
+            }
+            Button(action: { importPDFWithMetadata() }) {
+                Label("导入 PDF…", systemImage: "doc.badge.plus")
+            }
+            Divider()
+            Button("批量按标识导入…") { showBatchImport = true }
+            Button("导入 BibTeX (.bib)…") { importBibTeX() }
+            Button("导入 RIS (.ris)…") { importRIS() }
+            Divider()
+            Button("导入引文样式 (.csl)…") { importCitationStyles() }
+        } label: {
+            Label("导入", systemImage: "tray.and.arrow.down")
+        }
+        .help("导入文献或文件")
+        .disabled(viewModel.isImporting)
+    }
+
+    private var pendingQueueToolbarLabel: some View {
+        HStack(spacing: 6) {
+            Label("待确认队列", systemImage: "clock.badge.exclamationmark")
+            if !viewModel.pendingMetadataIntakes.isEmpty {
+                Text("\(viewModel.pendingMetadataIntakes.count)")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.18), in: Capsule())
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private var contentWithSheets: some View {
+        splitView
         .sheet(isPresented: $showAddReference) {
             AddReferenceView(
                 collections: viewModel.collections,
@@ -755,6 +222,7 @@ struct ContentView: View {
                 },
                 initialReferenceType: addReferenceInitialType
             )
+            .swiftLibElegantScrollersInSubtree()
         }
         .sheet(isPresented: $showWebImport) {
             WebImportView(
@@ -764,12 +232,13 @@ struct ContentView: View {
                     viewModel.saveManualReference(&r, reviewedBy: "web-import")
                 }
             )
+            .swiftLibElegantScrollersInSubtree()
         }
         .sheet(isPresented: $showBatchImport) {
             BatchImportView(
                 resolver: metadataResolver,
                 onImport: { refs in
-                viewModel.batchImportReferences(refs)
+                    viewModel.batchImportReferences(refs)
                 },
                 onQueueResult: { result, input in
                     queueResolutionResult(
@@ -782,36 +251,7 @@ struct ContentView: View {
                     )
                 }
             )
-        }
-        .overlay {
-            if showSearch {
-                SearchOverlay(
-                    db: viewModel.db,
-                    scope: viewModel.currentReferenceScope,
-                    collections: viewModel.collections,
-                    isPresented: $showSearch,
-                    onSelect: { ref in
-                        selectedId = ref.id
-                    },
-                    onDeleteMultiple: { refs in
-                        let ids = Set(refs.compactMap(\.id))
-                        deleteReferences(ids: ids)
-                    }
-                )
-            }
-        }
-        .overlay(alignment: .top) {
-            if let progress = viewModel.importProgress {
-                FloatingProgressToast(
-                    message: progress,
-                    isSpinning: viewModel.isImporting,
-                    onCancel: viewModel.isImporting ? cancelRefresh : nil
-                )
-                .padding(.top, 34)
-                .transition(.move(edge: .top).combined(with: .opacity))
-                .zIndex(10)
-                .animation(.spring(response: 0.35, dampingFraction: 0.8), value: progress)
-            }
+            .swiftLibElegantScrollersInSubtree()
         }
         .sheet(isPresented: $showAddByIdentifier) {
             AddByIdentifierView(
@@ -831,108 +271,69 @@ struct ContentView: View {
                     )
                 }
             )
+            .swiftLibElegantScrollersInSubtree()
         }
         .sheet(isPresented: $showAddCollection) {
             AddCollectionSheet { col in
                 var c = col
                 viewModel.saveCollection(&c)
             }
+            .swiftLibElegantScrollersInSubtree()
         }
-        .overlay(alignment: .bottom) {
-            if let msg = cslImportMessage {
-                Text(msg)
-                    .font(.callout)
-                    .foregroundStyle(.primary)
-                    .padding(10)
-                    .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.1), radius: 6, y: 3)
-                    .padding(.bottom, 20)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if let notice = pendingQueueNotice {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: "tray.full.fill")
-                            .foregroundStyle(.orange)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(notice.title)
-                                .font(.headline)
-                            Text(notice.message)
-                                .font(.callout)
-                                .foregroundStyle(.primary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer(minLength: 8)
-                        Button {
-                            pendingQueueNotice = nil
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.caption.weight(.semibold))
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                    }
-
-                    HStack {
-                        Button("打开待确认队列") {
-                            pendingQueueNotice = nil
-                            openPendingMetadataQueueWindow()
-                        }
-                        .buttonStyle(SLPrimaryButtonStyle())
-
-                        Button("稍后处理") {
-                            pendingQueueNotice = nil
-                        }
-                        .buttonStyle(SLSecondaryButtonStyle())
-                    }
+        .sheet(isPresented: $showAddWorkspace) {
+            AddWorkspaceSheet { workspace in
+                var item = workspace
+                viewModel.saveWorkspace(&item)
+                if let id = item.id {
+                    switchWorkspace(to: item)
+                    restoredWorkspaceSnapshots.insert(id)
                 }
-                .padding(14)
-                .frame(maxWidth: 360, alignment: .leading)
-                .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
-                .padding(.trailing, 20)
-                .padding(.bottom, 20)
-                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
+            .swiftLibElegantScrollersInSubtree()
         }
-        .animation(.easeInOut(duration: 0.2), value: cslImportMessage)
-        .animation(.easeInOut(duration: 0.2), value: pendingQueueNotice)
-        .onChange(of: viewModel.references) { _, newRefs in
-            syncSelectedReference(visibleRows: newRefs)
-        }
-        .onChange(of: selectedId) { _, newId in
-            loadSelectedReference(for: newId)
-        }
-        .onChange(of: cnkiMetadataProvider.verificationSession) { _, session in
-            presentCNKIVerificationIfNeeded(session)
-        }
-        .onChange(of: baiduScholarEngine.verificationSession) { _, session in
-            presentBaiduVerificationIfNeeded(session)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .swiftLibClipImported)) { note in
-            guard let id = note.userInfo?[SwiftLibClipImportedKeys.id] as? Int64 else { return }
-            selectedId = id
-            columnVisibility = .all
-        }
-        .alert("操作失败", isPresented: Binding(
-            get: { viewModel.errorMessage != nil },
-            set: { if !$0 { viewModel.errorMessage = nil } }
-        )) {
-            Button("确定") { viewModel.errorMessage = nil }
-        } message: {
-            Text(viewModel.errorMessage ?? "")
-        }
-        .frame(minWidth: 900, minHeight: 600)
-        .onAppear {
-            // 新手引导（延迟 0.5s，在 CLI 安装提示 1.5s 之前）
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                onboarding.triggerOnboardingIfNeeded()
-            }
+    }
 
+    private var contentWithLifecycle: some View {
+        let base = contentWithSheets
+            .overlay { searchOverlay }
+            .overlay(alignment: .top) { importProgressOverlay }
+            .overlay(alignment: .bottom) { cslMessageOverlay }
+            .overlay(alignment: .bottomTrailing) { pendingQueueNoticeOverlay }
+
+        return base
+            .animation(.easeInOut(duration: 0.2), value: cslImportMessage)
+            .animation(.easeInOut(duration: 0.2), value: pendingQueueNotice)
+            .onChange(of: viewModel.references) { _, newRefs in
+                syncSelectedReference(visibleRows: newRefs)
+            }
+            .onChange(of: selectedId) { _, newId in
+                loadSelectedReference(for: newId)
+                scheduleWorkspaceLayoutAutosave()
+            }
+            .onChange(of: viewModel.selectedSidebar) { _, _ in
+                scheduleWorkspaceLayoutAutosave()
+            }
+            .onChange(of: viewModel.searchText) { _, _ in
+                scheduleWorkspaceLayoutAutosave()
+            }
+            .onChange(of: columnVisibility) { _, _ in
+                scheduleWorkspaceLayoutAutosave()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .swiftLibClipImported)) { note in
+                guard let id = note.userInfo?[SwiftLibClipImportedKeys.id] as? Int64 else { return }
+                selectedId = id
+                columnVisibility = .all
+            }
+            .alert("操作失败", isPresented: Binding(
+                get: { viewModel.errorMessage != nil },
+                set: { if !$0 { viewModel.errorMessage = nil } }
+            )) {
+                Button("确定") { viewModel.errorMessage = nil }
+            } message: {
+                Text(viewModel.errorMessage ?? "")
+            }
+            .frame(minWidth: 900, minHeight: 600)
+        .onAppear {
             if !hasPromptedCLIInstallation && !CLIInstaller.isInstalled {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                     showCLIInstallPrompt = true
@@ -941,27 +342,13 @@ struct ContentView: View {
 
             syncVerificationPanels()
         }
+        .onChange(of: cnkiMetadataProvider.verificationSession) { _, session in
+            presentCNKIVerificationIfNeeded(session)
+        }
         .onDisappear {
+            workspaceLayoutAutosaveTask?.cancel()
+            saveCurrentWorkspaceLayoutSnapshot()
             MetadataVerificationPanels.cnki.dismiss()
-            MetadataVerificationPanels.baidu.dismiss()
-        }
-        .sheet(isPresented: $onboarding.showWelcomeWizard) {
-            // 向导关闭后启动 Coach Marks（如果向导已完成）
-            if SwiftLibPreferences.onboardingCompleted {
-                onboarding.advanceCoachMarks()
-            }
-        } content: {
-            WelcomeWizardView(onboarding: onboarding)
-        }
-        .overlayPreferenceValue(CoachMarkAnchorKey.self) { anchors in
-            if let step = onboarding.activeCoachMark {
-                CoachMarkOverlay(
-                    step: step,
-                    anchors: anchors,
-                    onNext: { onboarding.completeCurrentCoachMark() },
-                    onSkip: { onboarding.skipAll() }
-                )
-            }
         }
         .alert("安装命令行工具", isPresented: $showCLIInstallPrompt) {
             Button("安装") {
@@ -994,6 +381,108 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private var searchOverlay: some View {
+        if showSearch {
+            SearchOverlay(
+                onSearch: { [viewModel] scope, filter, limit in
+                    try viewModel.fetchReferences(scope: scope, filter: filter, limit: limit)
+                },
+                scope: viewModel.currentReferenceScope,
+                workspaceId: viewModel.selectedWorkspaceID,
+                collections: viewModel.collections,
+                isPresented: $showSearch,
+                onSelect: { ref in
+                    selectedId = ref.id
+                },
+                onDeleteMultiple: { refs in
+                    let ids = Set(refs.compactMap(\.id))
+                    deleteReferences(ids: ids)
+                }
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var importProgressOverlay: some View {
+        if let progress = viewModel.importProgress {
+            FloatingProgressToast(
+                message: progress,
+                isSpinning: viewModel.isImporting,
+                onCancel: viewModel.isImporting ? cancelRefresh : nil
+            )
+            .padding(.top, 34)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .zIndex(10)
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: progress)
+        }
+    }
+
+    @ViewBuilder
+    private var cslMessageOverlay: some View {
+        if let msg = cslImportMessage {
+            Text(msg)
+                .font(.callout)
+                .foregroundStyle(.primary)
+                .padding(10)
+                .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.1), radius: 6, y: 3)
+                .padding(.bottom, 20)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    @ViewBuilder
+    private var pendingQueueNoticeOverlay: some View {
+        if let notice = pendingQueueNotice {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "tray.full.fill")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(notice.title)
+                            .font(.headline)
+                        Text(notice.message)
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    Button {
+                        pendingQueueNotice = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Button("打开待确认队列") {
+                        pendingQueueNotice = nil
+                        openPendingMetadataQueueWindow()
+                    }
+                    .buttonStyle(SLPrimaryButtonStyle())
+
+                    Button("稍后处理") {
+                        pendingQueueNotice = nil
+                    }
+                    .buttonStyle(SLSecondaryButtonStyle())
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: 360, alignment: .leading)
+            .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
+            .padding(.trailing, 20)
+            .padding(.bottom, 20)
+            .transition(.move(edge: .trailing).combined(with: .opacity))
+        }
+    }
+
+    @ViewBuilder
     private var cnkiHiddenWebViewIfNeeded: some View {
         if cnkiMetadataProvider.needsWebView {
             HiddenWKWebViewHost(
@@ -1010,7 +499,6 @@ struct ContentView: View {
 
     private func syncVerificationPanels() {
         presentCNKIVerificationIfNeeded(cnkiMetadataProvider.verificationSession)
-        presentBaiduVerificationIfNeeded(baiduScholarEngine.verificationSession)
     }
 
     private func presentCNKIVerificationIfNeeded(_ session: CNKIMetadataProvider.VerificationSession?) {
@@ -1029,420 +517,6 @@ struct ContentView: View {
         }
     }
 
-    private func presentBaiduVerificationIfNeeded(_ session: BaiduScholarWebEngine.VerificationSession?) {
-        guard let session else {
-            MetadataVerificationPanels.baidu.dismiss()
-            return
-        }
-
-        MetadataVerificationPanels.baidu.present(title: session.title, onClose: {
-            baiduScholarEngine.cancelVerification()
-        }) {
-            BaiduScholarVerificationSheet(
-                provider: baiduScholarEngine,
-                session: session
-            )
-        }
-    }
-
-    private func importBibTeX() {
-        guard let url = OpenPanelPicker.pickBibTeXFile() else { return }
-        viewModel.importBibTeX(from: url)
-    }
-
-    private func importRIS() {
-        guard let url = OpenPanelPicker.pickRISFile() else { return }
-        viewModel.importRIS(from: url)
-    }
-
-    private func importPDFWithMetadata() {
-        guard let url = OpenPanelPicker.pickPDFFile() else { return }
-        viewModel.isImporting = true
-        viewModel.importProgress = "正在导入 PDF…"
-
-        Task { @MainActor in
-            do {
-                let prepared = try PDFService.prepareImportedPDF(from: url)
-                let fallbackReference = prepared.reference
-                let seed = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: prepared.extracted)
-
-                if MetadataResolution.shouldPreferCNKIForImportedPDF(seed: seed) {
-                    viewModel.importProgress = "正在匹配知网元数据…"
-                } else if let doi = prepared.extracted.doi, !doi.isEmpty {
-                    viewModel.importProgress = "正在获取元数据：\(doi)…"
-                }
-
-                let resolution = await metadataResolver.resolveImportedPDF(url: url, extracted: prepared.extracted)
-
-                switch resolution {
-                case .verified(let envelope):
-                    var reference = envelope.reference
-                    reference.pdfPath = fallbackReference.pdfPath
-                    finishPDFImport(with: reference, message: "已导入: \(reference.title)")
-
-                case .candidate, .blocked, .seedOnly, .rejected:
-                    let queued = queueResolutionResult(
-                        resolution,
-                        options: MetadataPersistenceOptions(
-                            sourceKind: .importedPDF,
-                            preferredPDFPath: fallbackReference.pdfPath
-                        ),
-                        successMessage: "还不能自动确认，已加入待确认队列"
-                    )
-                    if queued == nil, let pdfPath = fallbackReference.pdfPath {
-                        PDFService.deletePDF(at: pdfPath)
-                    }
-                }
-            } catch {
-                viewModel.isImporting = false
-                viewModel.importProgress = nil
-                viewModel.errorMessage = "PDF 导入失败: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func finishPDFImport(with reference: Reference, message: String?) {
-        var mutable = reference
-        viewModel.saveReference(&mutable)
-        selectedId = mutable.id
-        viewModel.isImporting = false
-        viewModel.importProgress = message
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            if !viewModel.isImporting {
-                viewModel.importProgress = nil
-            }
-        }
-    }
-
-    private func translateAbstractForID(_ refId: Int64) {
-        guard let reference = selectedReference, reference.id == refId else { return }
-        guard let abstract = reference.abstract?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !abstract.isEmpty else {
-            viewModel.importProgress = "该文献暂无摘要"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                if self.viewModel.importProgress == "该文献暂无摘要" {
-                    self.viewModel.importProgress = nil
-                }
-            }
-            return
-        }
-
-        viewModel.isImporting = true
-        viewModel.importProgress = "正在翻译摘要…"
-        Task { @MainActor in
-            if let updated = await viewModel.translateAbstract(reference) {
-                selectedReference = updated
-                viewModel.isImporting = false
-                viewModel.importProgress = "摘要翻译完成"
-            } else {
-                viewModel.isImporting = false
-                viewModel.importProgress = "摘要翻译失败"
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                if !self.viewModel.isImporting {
-                    self.viewModel.importProgress = nil
-                }
-            }
-        }
-    }
-
-    private func refreshMetadata(for references: [Reference]) {
-        let candidates = references.compactMap { reference -> Reference? in
-            guard reference.id != nil else { return nil }
-            return reference
-        }
-        guard !candidates.isEmpty else { return }
-
-        if candidates.count == 1, let reference = candidates.first {
-            refreshSingleReferenceMetadata(reference)
-        } else {
-            refreshBatchMetadata(for: candidates)
-        }
-    }
-
-    private func refreshSingleReferenceMetadata(_ reference: Reference) {
-        viewModel.isImporting = true
-        viewModel.importProgress = "正在刷新元数据…"
-
-        Task { @MainActor in
-            let result = await metadataResolver.refreshReference(reference, allowCandidateSelection: true)
-            switch result {
-            case .refreshed(let refreshed):
-                saveRefreshedReference(refreshed, message: "已刷新：\(refreshed.title)")
-
-            case .pending(let pendingResult):
-                _ = queueResolutionResult(
-                    pendingResult,
-                    options: MetadataPersistenceOptions(
-                        sourceKind: .refresh,
-                        originalInput: reference.doi ?? reference.pmid ?? reference.isbn ?? reference.title,
-                        linkedReferenceId: reference.id
-                    ),
-                    successMessage: "已加入待确认队列，等待你继续处理"
-                )
-
-            case .skipped(let reason):
-                viewModel.isImporting = false
-                viewModel.importProgress = reason
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                    if !viewModel.isImporting {
-                        viewModel.importProgress = nil
-                    }
-                }
-
-            case .failed(let message):
-                viewModel.isImporting = false
-                viewModel.importProgress = nil
-                viewModel.errorMessage = message
-            }
-        }
-    }
-
-    private func openPendingMetadataQueueWindow() {
-        guard !viewModel.pendingMetadataIntakes.isEmpty else { return }
-        PendingMetadataQueueWindowManager.shared.present(
-            db: viewModel.db,
-            resolver: metadataResolver,
-            onPersistResult: { result, intake in
-                queueResolutionResult(
-                    result,
-                    options: MetadataPersistenceOptions(
-                        sourceKind: intake.sourceKind,
-                        originalInput: intake.originalInput,
-                        preferredPDFPath: intake.pdfPath,
-                        linkedReferenceId: intake.linkedReferenceId,
-                        existingIntakeId: intake.id
-                    ),
-                    successMessage: nil,
-                    suppressProgressReset: true
-                )
-            },
-            onConfirmManual: { intake in
-                if let reference = viewModel.confirmPendingMetadataIntake(intake) {
-                    selectedId = reference.id
-                }
-            },
-            onDelete: { intake in
-                viewModel.deletePendingMetadataIntake(intake)
-            }
-        )
-    }
-
-    private func refreshBatchMetadata(for references: [Reference]) {
-        refreshTask?.cancel()
-
-        let task = Task { @MainActor in
-            viewModel.isImporting = true
-            viewModel.importProgress = "准备刷新 \(references.count) 条条目…"
-
-            var refreshedCount = 0
-            var skippedCount = 0
-            var failedMessages: [String] = []
-            let total = references.count
-            let maxConcurrency = 3
-
-            for batchStart in stride(from: 0, to: total, by: maxConcurrency) {
-                if Task.isCancelled { break }
-
-                let batchEnd = min(batchStart + maxConcurrency, total)
-                let batch = Array(references[batchStart..<batchEnd])
-
-                viewModel.importProgress = "正在刷新 \(batchStart + 1)–\(batchEnd)/\(total)…"
-
-                let batchResults: [(Reference, ReferenceMetadataRefreshResult)] = await withTaskGroup(
-                    of: (Reference, ReferenceMetadataRefreshResult).self,
-                    returning: [(Reference, ReferenceMetadataRefreshResult)].self
-                ) { group in
-                    for reference in batch {
-                        group.addTask {
-                            let result = await metadataResolver.refreshReference(reference, allowCandidateSelection: false)
-                            return (reference, result)
-                        }
-                    }
-                    var results: [(Reference, ReferenceMetadataRefreshResult)] = []
-                    for await pair in group {
-                        results.append(pair)
-                    }
-                    return results
-                }
-
-                // Respect cancellation after each batch
-                if Task.isCancelled {
-                    failedMessages.append(contentsOf: batch.map { "\($0.title)：已取消" })
-                    break
-                }
-
-                // Timeout guard: if a batch took longer than 30s, treat remaining as timed-out
-                // (actual timeout is per-item below; this is a coarse safety net)
-
-                for (reference, result) in batchResults {
-                    switch result {
-                    case .refreshed(let refreshed):
-                        saveRefreshedReference(refreshed, message: nil, finishRefreshing: false, clearProgress: false)
-                        refreshedCount += 1
-                    case .pending(let pendingResult):
-                        _ = queueResolutionResult(
-                            pendingResult,
-                            options: MetadataPersistenceOptions(
-                                sourceKind: .refresh,
-                                originalInput: reference.doi ?? reference.pmid ?? reference.isbn ?? reference.title,
-                                linkedReferenceId: reference.id
-                            ),
-                            successMessage: nil,
-                            suppressProgressReset: true
-                        )
-                        skippedCount += 1
-                    case .skipped:
-                        skippedCount += 1
-                    case .failed(let message):
-                        failedMessages.append("\(reference.title)：\(message)")
-                    }
-                }
-            }
-
-            if Task.isCancelled {
-                viewModel.importProgress = "已取消：完成 \(refreshedCount)/\(total) 条"
-            } else {
-                viewModel.importProgress = "批量刷新完成：\(refreshedCount) 条已更新，\(skippedCount) 条跳过，\(failedMessages.count) 条失败"
-            }
-            viewModel.isImporting = false
-
-            if !failedMessages.isEmpty && !Task.isCancelled {
-                viewModel.errorMessage = failedMessages.prefix(5).joined(separator: "\n")
-            }
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                if !viewModel.isImporting {
-                    viewModel.importProgress = nil
-                }
-            }
-
-            refreshTask = nil
-        }
-
-        refreshTask = task
-    }
-
-    private func cancelRefresh() {
-        refreshTask?.cancel()
-        refreshTask = nil
-        viewModel.isImporting = false
-        viewModel.importProgress = "已取消"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            if !viewModel.isImporting {
-                viewModel.importProgress = nil
-            }
-        }
-    }
-
-    private func saveRefreshedReference(
-        _ reference: Reference,
-        message: String?,
-        finishRefreshing: Bool = true,
-        clearProgress: Bool = true
-    ) {
-        var mutable = reference
-        viewModel.saveReference(&mutable)
-        viewModel.isImporting = !finishRefreshing ? viewModel.isImporting : false
-        viewModel.importProgress = message
-
-        guard clearProgress else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            if !viewModel.isImporting {
-                viewModel.importProgress = nil
-            }
-        }
-    }
-
-    @discardableResult
-    private func queueResolutionResult(
-        _ result: MetadataResolutionResult,
-        options: MetadataPersistenceOptions,
-        successMessage: String?,
-        suppressProgressReset: Bool = false
-    ) -> MetadataPersistenceResult? {
-        let persisted = viewModel.persistMetadataResolution(result, options: options)
-        switch persisted {
-        case .verified(let reference):
-            selectedId = reference.id
-            if !suppressProgressReset {
-                viewModel.isImporting = false
-                if reference.verificationStatus == .metadataEnriching {
-                    viewModel.importProgress = "已导入，元数据补全中：\(reference.title)"
-                } else {
-                    viewModel.importProgress = successMessage ?? "已验证：\(reference.title)"
-                }
-                pendingQueueNotice = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                    if !viewModel.isImporting {
-                        viewModel.importProgress = nil
-                    }
-                }
-            }
-        case .intake(let intake):
-            if !suppressProgressReset {
-                viewModel.isImporting = false
-                viewModel.importProgress = nil
-            }
-            showPendingQueueNotice(for: intake, message: successMessage)
-        case .none:
-            if !suppressProgressReset {
-                viewModel.isImporting = false
-                viewModel.importProgress = nil
-            }
-        }
-
-        return persisted
-    }
-
-    private func showPendingQueueNotice(for intake: MetadataIntake, message: String?) {
-        let title = "这条元数据还需要你确认"
-        let lead = intake.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "该条目" : "“\(intake.title)”"
-        let detail = message?.swiftlib_nilIfBlank
-            ?? intake.statusMessage?.swiftlib_nilIfBlank
-            ?? "已放入待确认队列。"
-
-        let notice = PendingQueueNotice(
-            title: title,
-            message: "\(lead)\(detail.hasPrefix("已") ? "" : " ")\(detail) 你可以直接打开队列继续处理。"
-        )
-        pendingQueueNotice = notice
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-            if pendingQueueNotice?.id == notice.id {
-                pendingQueueNotice = nil
-            }
-        }
-    }
-
-    private func importCitationStyles() {
-        let urls = OpenPanelPicker.pickCitationStyleFiles()
-        guard !urls.isEmpty else { return }
-
-        var imported: [String] = []
-        for url in urls {
-            if let title = try? CSLManager.shared.importCSL(from: url) {
-                imported.append(title)
-            }
-        }
-
-        guard !imported.isEmpty else { return }
-
-        cslImportMessage = "已导入：\(imported.joined(separator: "、"))"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            cslImportMessage = nil
-        }
-    }
-
-    private func deleteReferences(ids: Set<Int64>) {
-        if let selectedId, ids.contains(selectedId) {
-            self.selectedId = nil
-            self.selectedReference = nil
-        }
-        viewModel.deleteReferences(ids: ids)
-    }
-
     @ViewBuilder
     private var detailSection: some View {
         if let ref = selectedReference {
@@ -1450,7 +524,21 @@ struct ContentView: View {
                 reference: ref,
                 collections: viewModel.collections,
                 allTags: viewModel.tags,
-                db: viewModel.db,
+                onLoadSupplementary: { [viewModel] (id: Int64) in
+                    guard let tags = try? viewModel.fetchTags(forReference: id) else { return nil }
+                    let pdfCount = (try? viewModel.annotationCount(referenceId: id)) ?? 0
+                    let webCount = (try? viewModel.webAnnotationCount(referenceId: id)) ?? 0
+                    let hasStored = (try? viewModel.hasWebContent(id: id)) ?? false
+                    return ReferenceDetailSupplementaryData(
+                        tags: tags,
+                        pdfAnnotationCount: pdfCount,
+                        webAnnotationCount: webCount,
+                        hasStoredWebContent: hasStored
+                    )
+                },
+                onLoadWebContent: { [viewModel] (id: Int64) in
+                    try? viewModel.fetchWebContent(id: id)
+                },
                 onSave: { updated in
                     var r = updated
                     viewModel.saveReference(&r)
@@ -1468,6 +556,7 @@ struct ContentView: View {
                     ReaderWindowManager.shared.openWebReader(for: r)
                 }
             )
+            .swiftLibElegantScrollersInSubtree()
         } else if selectedId != nil {
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1483,104 +572,9 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
-            .coachMarkAnchor(.citationStyle)
         }
     }
 
-    private func syncSelectedReference(visibleRows refs: [ReferenceListRow]) {
-        guard let selectedId else { return }
-        if !refs.contains(where: { $0.id == selectedId }) {
-            self.selectedId = nil
-            self.selectedReference = nil
-        } else {
-            selectedReference = try? viewModel.db.fetchReference(id: selectedId)
-        }
-    }
-
-    private func loadSelectedReference(for id: Int64?) {
-        if let id {
-            Task {
-                let ref = try? await viewModel.db.fetchReferenceAsync(id: id)
-                await MainActor.run {
-                    selectedReference = ref
-                }
-            }
-        } else {
-            selectedReference = nil
-        }
-    }
-
-    private func refreshMetadataForIDs(_ ids: Set<Int64>) {
-        guard let refs = try? viewModel.db.fetchReferences(ids: Array(ids)) else { return }
-        refreshMetadata(for: refs)
-    }
-
-    private func openReader(for referenceID: Int64) {
-        guard let reference = try? viewModel.db.fetchReferences(ids: [referenceID]).first else { return }
-        if reference.pdfPath != nil {
-            ReaderWindowManager.shared.openPDFReader(for: reference)
-        } else if reference.canOpenWebReader {
-            ReaderWindowManager.shared.openWebReader(for: reference)
-        }
-    }
-}
-
-private struct FloatingProgressToast: View {
-    let message: String
-    let isSpinning: Bool
-    var onCancel: (() -> Void)?
-
-    var body: some View {
-        HStack(spacing: 10) {
-            if isSpinning {
-                NeonBreathingLoader(diameter: 20)
-                    .frame(width: 20, height: 20)
-            } else {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.green)
-            }
-
-            Text(message)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-
-            if isSpinning, let onCancel {
-                Divider()
-                    .frame(height: 12)
-                    .padding(.horizontal, 2)
-                Button(action: onCancel) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("取消刷新")
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
-        .background {
-            Capsule(style: .continuous)
-                .fill(backgroundColor)
-                .shadow(color: isSpinning ? Color.black.opacity(0.16) : .black.opacity(0.12), radius: 10, y: 4)
-                .shadow(color: isSpinning ? Color.orange.opacity(0.08) : .clear, radius: 18, y: 0)
-        }
-        .padding(.top, 10)
-    }
-
-    private var backgroundColor: Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
-            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            if isSpinning {
-                return isDark
-                    ? NSColor(calibratedRed: 0.10, green: 0.08, blue: 0.06, alpha: 0.94)
-                    : NSColor(calibratedRed: 0.98, green: 0.95, blue: 0.90, alpha: 0.96)
-            }
-            return NSColor.controlBackgroundColor
-        })
-    }
 }
 
 // MARK: - CLI Install Result

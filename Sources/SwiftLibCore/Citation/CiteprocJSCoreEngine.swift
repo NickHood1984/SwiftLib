@@ -47,7 +47,18 @@ public final class CiteprocJSCoreEngine {
     /// - Parameters:
     ///   - styleXML: The full CSL style XML content
     ///   - localeXML: The locale XML content (default: en-US)
-    public init(styleXML: String, localeXML: String) throws {
+    public convenience init(styleXML: String, localeXML: String) throws {
+        try self.init(styleXML: styleXML, localeXMLs: ["en-US": localeXML], primaryLang: "en-US")
+    }
+
+    /// Initialize with a CSL style XML string and a map of locale XMLs keyed by lang code.
+    /// citeproc-js will request locale by language (e.g. "en-US", "zh-CN", "zh") and we
+    /// respond with the matching XML, falling back to the primary one when missing.
+    /// - Parameters:
+    ///   - styleXML: The full CSL style XML content
+    ///   - localeXMLs: Map of lang -> locale XML (must contain at least one)
+    ///   - primaryLang: The primary lang to use as the fallback when a request misses
+    public init(styleXML: String, localeXMLs: [String: String], primaryLang: String) throws {
         guard let ctx = JSContext() else {
             throw EngineError.contextCreationFailed
         }
@@ -73,16 +84,37 @@ public final class CiteprocJSCoreEngine {
         }
         ctx.evaluateScript(bundleJS)
 
-        // Store locale for retrieval
-        let localeEscaped = localeXML
-        ctx.setObject(localeEscaped, forKeyedSubscript: "__swiftlib_locale" as NSString)
+        // Store locales (map: lang -> XML) for retrieval; citeproc-js will call
+        // retrieveLocale(lang) for each language it needs to resolve terms in.
+        let primaryXML = localeXMLs[primaryLang] ?? localeXMLs.values.first ?? ""
+        let localeJSON: String = {
+            if let data = try? JSONSerialization.data(withJSONObject: localeXMLs),
+               let str = String(data: data, encoding: .utf8) {
+                return str
+            }
+            return "{}"
+        }()
+        ctx.setObject(primaryXML, forKeyedSubscript: "__swiftlib_locale" as NSString)
+        ctx.setObject(primaryLang, forKeyedSubscript: "__swiftlib_primary_lang" as NSString)
         ctx.setObject(styleXML, forKeyedSubscript: "__swiftlib_style" as NSString)
+        ctx.evaluateScript("var __swiftlib_locales = \(localeJSON);")
 
         // Create the sys object that citeproc-js requires
         let sysSetup = """
         var __swiftlib_items = {};
         var __swiftlib_sys = {
             retrieveLocale: function(lang) {
+                if (lang && __swiftlib_locales[lang]) return __swiftlib_locales[lang];
+                if (lang) {
+                    var lower = String(lang).toLowerCase();
+                    for (var k in __swiftlib_locales) {
+                        if (String(k).toLowerCase() === lower) return __swiftlib_locales[k];
+                    }
+                    var bare = lower.split("-")[0];
+                    for (var k2 in __swiftlib_locales) {
+                        if (String(k2).toLowerCase().split("-")[0] === bare) return __swiftlib_locales[k2];
+                    }
+                }
                 return __swiftlib_locale;
             },
             retrieveItem: function(id) {
@@ -539,13 +571,26 @@ public final class CiteprocJSCorePool {
             return existing
         }
 
-        guard let styleXML = loadStyleXML(styleId: styleId),
-              let localeXML = loadLocaleXML(lang: "en-US") else {
+        guard let styleXML = loadStyleXML(styleId: styleId) else {
             return nil
         }
+        let detectedLang = Self.detectDefaultLocale(in: styleXML) ?? "en-US"
+        var localeMap: [String: String] = [:]
+        if let primary = loadLocaleXML(lang: detectedLang) {
+            localeMap[detectedLang] = primary
+        }
+        // Always include en-US as fallback (citeproc-js needs it for missing terms)
+        if localeMap["en-US"] == nil, let enUS = loadLocaleXML(lang: "en-US") {
+            localeMap["en-US"] = enUS
+        }
+        guard !localeMap.isEmpty else { return nil }
 
         do {
-            let engine = try CiteprocJSCoreEngine(styleXML: styleXML, localeXML: localeXML)
+            let engine = try CiteprocJSCoreEngine(
+                styleXML: styleXML,
+                localeXMLs: localeMap,
+                primaryLang: detectedLang
+            )
             let entry = PooledEngineEntry(engine: engine)
             // Evict least-recently-used engine if pool is full
             if engines.count >= maxEngines {
@@ -592,6 +637,21 @@ public final class CiteprocJSCorePool {
     /// Maps well-known style short IDs to their CSL file stem names.
     public static func bundledCSLStem(for styleId: String) -> String? {
         return _bundledCSLStem[styleId]
+    }
+
+    /// Extract `default-locale="..."` from the `<style>` root tag, if present.
+    static func detectDefaultLocale(in styleXML: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<style\b[^>]*\bdefault-locale\s*=\s*["']([^"']+)["']"#,
+            options: [.caseInsensitive]
+        ) else { return nil }
+        let range = NSRange(styleXML.startIndex..., in: styleXML)
+        guard let match = regex.firstMatch(in: styleXML, range: range),
+              match.numberOfRanges >= 2,
+              let r = Range(match.range(at: 1), in: styleXML) else {
+            return nil
+        }
+        return String(styleXML[r])
     }
 
     private static let _bundledCSLStem: [String: String] = [

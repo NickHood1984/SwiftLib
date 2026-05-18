@@ -34,9 +34,9 @@ extension MetadataResolver {
             resolverTrace("resolveCNKISeed 原生 CNKI 候选数=\(candidates.count)")
 
             guard !candidates.isEmpty else {
-                // CNKI 未返回结果，尝试百度学术 fallback
-                resolverTrace("resolveCNKISeed 原生 CNKI 无结果 → 尝试百度学术 fallback")
-                if let fallbackResult = await resolveBaiduScholarFallback(seed: seed, fallback: fallback) {
+                // CNKI 未返回结果，尝试中文浏览器 fallback
+                resolverTrace("resolveCNKISeed 原生 CNKI 无结果 → 尝试中文浏览器 fallback")
+                if let fallbackResult = await resolveChineseBrowserFallback(seed: seed, fallback: fallback) {
                     return fallbackResult
                 }
                 return .rejected(
@@ -54,10 +54,10 @@ extension MetadataResolver {
 
             // Require the best candidate to have a meaningful title similarity.
             // A score below 0.40 means CNKI found something but nothing relevant —
-            // treat this the same as "no results" and escalate to Baidu Scholar.
+            // treat this the same as "no results" and try the browser aggregation path.
             guard let bestCandidate = topCandidates.first, bestCandidate.score >= 0.40 else {
-                resolverTrace("resolveCNKISeed 最高候选评分 < 0.40，视为无有效结果 → 尝试百度学术 fallback")
-                if let fallbackResult = await resolveBaiduScholarFallback(seed: seed, fallback: fallback) {
+                resolverTrace("resolveCNKISeed 最高候选评分 < 0.40，视为无有效结果 → 尝试中文浏览器 fallback")
+                if let fallbackResult = await resolveChineseBrowserFallback(seed: seed, fallback: fallback) {
                     return fallbackResult
                 }
                 return .rejected(
@@ -83,15 +83,20 @@ extension MetadataResolver {
             case .verified, .blocked:
                 return autoResult
             case .rejected, .seedOnly:
-                resolverTrace("resolveCNKISeed 原生 CNKI 首候选详情抓取未通过 → 尝试百度学术 fallback")
-                if let fallbackResult = await resolveBaiduScholarFallback(seed: seed, fallback: fallback) {
+                resolverTrace("resolveCNKISeed 原生 CNKI 首候选详情抓取未通过 → 尝试中文浏览器 fallback")
+                if let fallbackResult = await resolveChineseBrowserFallback(seed: seed, fallback: fallback) {
                     return fallbackResult
                 }
             case .candidate:
-                return autoResult
+                resolverTrace("resolveCNKISeed 原生 CNKI 仅得到候选 → 继续尝试中文浏览器聚合候选")
+                return await augmentCandidateWithChineseBrowserFallbacks(
+                    autoResult,
+                    seed: seed,
+                    fallback: fallback
+                )
             }
 
-            return .candidate(
+            let candidateResult = MetadataResolutionResult.candidate(
                 CandidateEnvelope(
                     seed: seed,
                     fallbackReference: fallback,
@@ -99,6 +104,12 @@ extension MetadataResolver {
                     candidates: topCandidates,
                     message: "已找到候选结果，需进一步抓取 authoritative record。"
                 )
+            )
+            resolverTrace("resolveCNKISeed 返回 CNKI 候选前 → 继续尝试中文浏览器聚合候选")
+            return await augmentCandidateWithChineseBrowserFallbacks(
+                candidateResult,
+                seed: seed,
+                fallback: fallback
             )
         } catch let error as CNKIMetadataProvider.CNKIError {
             // 对于验证阻塞和超时，不走 fallback，直接返回
@@ -113,9 +124,9 @@ extension MetadataResolver {
             default:
                 break
             }
-            // 其他 CNKI 错误：尝试百度学术 fallback
-            resolverTrace("resolveCNKISeed CNKI 错误 → 尝试百度学术 fallback: \(error.localizedDescription)")
-            if let fallbackResult = await resolveBaiduScholarFallback(seed: seed, fallback: fallback) {
+            // 其他 CNKI 错误：尝试中文浏览器 fallback
+            resolverTrace("resolveCNKISeed CNKI 错误 → 尝试中文浏览器 fallback: \(error.localizedDescription)")
+            if let fallbackResult = await resolveChineseBrowserFallback(seed: seed, fallback: fallback) {
                 return fallbackResult
             }
             return blockedOrRejectedResult(
@@ -125,9 +136,9 @@ extension MetadataResolver {
                 message: error.localizedDescription
             )
         } catch {
-            // 通用错误：尝试百度学术 fallback
-            resolverTrace("resolveCNKISeed 通用错误 → 尝试百度学术 fallback: \(error.localizedDescription)")
-            if let fallbackResult = await resolveBaiduScholarFallback(seed: seed, fallback: fallback) {
+            // 通用错误：尝试中文浏览器 fallback
+            resolverTrace("resolveCNKISeed 通用错误 → 尝试中文浏览器 fallback: \(error.localizedDescription)")
+            if let fallbackResult = await resolveChineseBrowserFallback(seed: seed, fallback: fallback) {
                 return fallbackResult
             }
             return .rejected(
@@ -243,95 +254,134 @@ extension MetadataResolver {
         }
     }
 
-    private func resolveBaiduScholarFallback(
+    private func resolveChineseBrowserFallback(
         seed: MetadataResolutionSeed,
         fallback: Reference?
     ) async -> MetadataResolutionResult? {
-        guard MetadataRoutePlanner.shouldUseBaiduScholarFallback(seed: seed) else {
-            resolverTrace("resolveBaiduScholarFallback 跳过：当前种子更像图书，不走百度学术")
-            return nil
-        }
-        let baiduOutcome = await BaiduScholarService.searchOutcome(
-            title: seed.title ?? "",
-            author: seed.firstAuthor
-        )
-
-        let baiduRef: Reference
-        switch baiduOutcome {
-        case .reference(let reference):
-            baiduRef = reference
-        case .blockedByVerification:
-            return .blocked(
-                BlockedEnvelope(
-                    seed: seed,
-                    fallbackReference: fallback,
-                    currentReference: fallback,
-                    reason: .verificationRequired,
-                    message: "百度学术触发了安全验证，完成验证后可继续检索。"
-                )
-            )
-        case .noResult:
+        guard MetadataRoutePlanner.shouldUseChineseJournalBrowserFallback(seed: seed) else {
+            resolverTrace("resolveChineseBrowserFallback 跳过：当前种子更像图书，不走中文期刊浏览器聚合")
             return nil
         }
 
-        let evidence = buildGenericEvidence(
-            for: baiduRef,
-            source: .baiduScholar,
-            fetchMode: .identifier,
-            origin: .identifierAPI,
-            recordKey: baiduRef.doi,
-            exactIdentifierMatch: false
-        )
-        let record = AuthoritativeMetadataRecord(reference: baiduRef, evidence: evidence)
-        let result = verifyFetchedRecord(
-            record,
+        var candidateEnvelopes: [CandidateEnvelope] = []
+
+        if let browserEnvelope = await resolveChineseJournalBrowserFallbackEnvelope(seed: seed, fallback: fallback) {
+            candidateEnvelopes.append(browserEnvelope)
+        }
+
+        if let mergedEnvelope = Self.mergedChineseBrowserCandidateEnvelopes(candidateEnvelopes) {
+            return .candidate(mergedEnvelope)
+        }
+
+        return nil
+    }
+
+    private func resolveChineseJournalBrowserFallbackEnvelope(
+        seed: MetadataResolutionSeed,
+        fallback: Reference?
+    ) async -> CandidateEnvelope? {
+        var candidates: [MetadataCandidate] = []
+        async let wanfangOutcome = ChineseJournalBrowserSearchService.search(channel: .wanfang, seed: seed)
+        async let vipOutcome = ChineseJournalBrowserSearchService.search(channel: .vip, seed: seed)
+        let outcomes = await [
+            (ChineseJournalBrowserSearchService.Channel.wanfang, wanfangOutcome),
+            (.vip, vipOutcome)
+        ]
+
+        for (channel, outcome) in outcomes {
+            switch outcome {
+            case .candidates(let channelCandidates):
+                resolverTrace("resolveChineseJournalBrowserFallbackEnvelope \(channel.displayName) 候选数=\(channelCandidates.count)")
+                candidates.append(contentsOf: channelCandidates)
+            case .blockedByVerification:
+                resolverTrace("resolveChineseJournalBrowserFallbackEnvelope \(channel.displayName) 受阻")
+            case .noResult:
+                resolverTrace("resolveChineseJournalBrowserFallbackEnvelope \(channel.displayName) 无结果")
+            }
+        }
+
+        guard !candidates.isEmpty else { return nil }
+        return CandidateEnvelope(
             seed: seed,
-            fallback: fallback,
-            defaultRejectMessage: "百度学术候选未满足自动验证规则。"
+            fallbackReference: fallback,
+            currentReference: fallback,
+            candidates: candidates.sorted { $0.score > $1.score },
+            message: "知网不稳定时，已从万方/维普浏览器检索到候选，请确认后导入。"
         )
-        switch result {
-        case .verified, .candidate, .blocked:
-            return result
-        case .rejected(let envelope):
-            resolverTrace("resolveBaiduScholarFallback 命中但未自动验证通过 → 升为 candidate")
-            let fetched = envelope.currentReference ?? baiduRef
-            let titleScore = MetadataResolution.titleSimilarity(seed.title ?? "", fetched.title)
-            let matchedBy = [
-                "title",
-                fetched.authors.isEmpty ? nil : "author",
-                fetched.year == nil ? nil : "year",
-                fetched.journal?.swiftlib_nilIfBlank == nil ? nil : "journal",
-                fetched.abstract?.swiftlib_nilIfBlank == nil ? nil : "abstract",
-            ].compactMap { $0 }
-            let candidateDescriptor = MetadataCandidate(
-                source: .baiduScholar,
-                title: fetched.title,
-                authors: fetched.authors,
-                journal: fetched.journal,
-                publisher: fetched.publisher,
-                year: fetched.year,
-                detailURL: fetched.url ?? "",
-                score: max(titleScore, 0.60),
-                snippet: fetched.abstract,
-                workKind: MetadataResolution.workKind(for: fetched.referenceType),
-                referenceType: fetched.referenceType,
-                isbn: fetched.isbn,
-                issn: fetched.issn,
-                sourceRecordID: fetched.doi,
-                matchedBy: matchedBy
-            )
+    }
+
+    private func augmentCandidateWithChineseBrowserFallbacks(
+        _ cnkiResult: MetadataResolutionResult,
+        seed: MetadataResolutionSeed,
+        fallback: Reference?
+    ) async -> MetadataResolutionResult {
+        guard case .candidate(let cnkiEnvelope) = cnkiResult else {
+            return cnkiResult
+        }
+        guard let browserResult = await resolveChineseBrowserFallback(seed: seed, fallback: fallback) else {
+            return cnkiResult
+        }
+
+        switch browserResult {
+        case .verified:
+            resolverTrace("augmentCandidateWithChineseBrowserFallbacks → 浏览器 fallback 自动验证通过，采用 fallback 结果")
+            return browserResult
+        case .candidate(let browserEnvelope):
+            resolverTrace("augmentCandidateWithChineseBrowserFallbacks → 合并 CNKI + 中文浏览器候选")
             return .candidate(
-                CandidateEnvelope(
-                    seed: seed,
-                    fallbackReference: fallback,
-                    currentReference: fetched,
-                    candidates: [candidateDescriptor],
-                    message: "知网未命中，已切换到百度学术候选，请确认后导入。",
-                    evidence: envelope.evidence ?? evidence
+                Self.mergedChineseBrowserCandidateEnvelope(
+                    cnkiEnvelope,
+                    fallbackEnvelope: browserEnvelope
                 )
             )
-        case .seedOnly:
-            return nil
+        case .blocked:
+            resolverTrace("augmentCandidateWithChineseBrowserFallbacks → 浏览器 fallback 受阻，保留 CNKI 候选")
+            return cnkiResult
+        case .seedOnly, .rejected:
+            return cnkiResult
         }
+    }
+
+    nonisolated private static func mergedChineseBrowserCandidateEnvelopes(
+        _ envelopes: [CandidateEnvelope]
+    ) -> CandidateEnvelope? {
+        guard var merged = envelopes.first else { return nil }
+        for envelope in envelopes.dropFirst() {
+            merged = mergedChineseBrowserCandidateEnvelope(merged, fallbackEnvelope: envelope)
+        }
+        return merged
+    }
+
+    nonisolated static func mergedChineseBrowserCandidateEnvelope(
+        _ primary: CandidateEnvelope,
+        fallbackEnvelope: CandidateEnvelope
+    ) -> CandidateEnvelope {
+        let seen = Set(primary.candidates.map { candidateIdentity($0) })
+        let fallbackCandidates = fallbackEnvelope.candidates.filter { !seen.contains(candidateIdentity($0)) }
+        let mergedCandidates = (primary.candidates + fallbackCandidates)
+            .sorted { lhs, rhs in
+                if lhs.score == rhs.score {
+                    return lhs.source.rawValue < rhs.source.rawValue
+                }
+                return lhs.score > rhs.score
+            }
+
+        let sources = Array(Set(mergedCandidates.map(\.source.displayName))).sorted().joined(separator: "、")
+        return CandidateEnvelope(
+            seed: primary.seed ?? fallbackEnvelope.seed,
+            fallbackReference: primary.fallbackReference ?? fallbackEnvelope.fallbackReference,
+            currentReference: primary.currentReference ?? fallbackEnvelope.currentReference,
+            candidates: mergedCandidates,
+            message: "已聚合中文浏览器候选（\(sources)），请确认最匹配的条目。",
+            evidence: primary.evidence ?? fallbackEnvelope.evidence
+        )
+    }
+
+    nonisolated private static func candidateIdentity(_ candidate: MetadataCandidate) -> String {
+        [
+            MetadataResolution.normalizedComparableText(candidate.title),
+            candidate.source.rawValue,
+            candidate.detailURL.lowercased(),
+        ].joined(separator: "|")
     }
 }

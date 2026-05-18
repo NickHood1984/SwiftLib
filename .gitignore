@@ -42,5 +42,11 @@ test_pdfview
 test_pdfview.swift
 test_pdfview_margins
 
+# === Temporary directories ===
+tmp/
+
+# === Archives ===
+*.zip
+
 # === Claude / AI ===
 .claude/

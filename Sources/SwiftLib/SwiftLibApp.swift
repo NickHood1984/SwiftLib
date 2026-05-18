@@ -59,6 +59,7 @@ struct SwiftLibApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .swiftLibElegantScrollersInSubtree()
                 .overlay(alignment: .top) {
                     if let toast = addinToast {
                         AddinToast(message: toast.message, tone: toast.tone)
@@ -88,8 +89,36 @@ struct SwiftLibApp: App {
                 .keyboardShortcut("a", modifiers: [.command, .shift])
             }
         }
+        WindowGroup("待确认元数据", for: PendingQueueWindowID.self) { _ in
+            PendingMetadataQueueSceneView()
+                .swiftLibElegantScrollersInSubtree()
+        }
+        .windowResizability(.contentSize)
+        .defaultSize(width: 720, height: 520)
+
+        WindowGroup("工作区", for: Int64.self) { workspaceID in
+            ContentView(initialWorkspaceID: workspaceID.wrappedValue)
+                .swiftLibElegantScrollersInSubtree()
+                .overlay(alignment: .top) {
+                    if let toast = addinToast {
+                        AddinToast(message: toast.message, tone: toast.tone)
+                            .padding(.top, 10)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .swiftLibClipImported)) { note in
+                    let title = (note.userInfo?[SwiftLibClipImportedKeys.title] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let message = title.flatMap { !$0.isEmpty ? "已保存网页剪藏：\($0)" : nil } ?? "已保存网页剪藏"
+                    showToast(message, tone: .success)
+                }
+        }
+        .windowStyle(.titleBar)
+        .windowToolbarStyle(.unified(showsTitle: true))
+        .defaultSize(width: Self.defaultWindowSize.width, height: Self.defaultWindowSize.height)
         Settings {
             SettingsView()
+                .swiftLibElegantScrollersInSubtree()
         }
     }
 

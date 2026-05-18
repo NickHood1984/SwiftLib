@@ -75,12 +75,12 @@ public struct AuthorName: Codable, Hashable, Sendable {
         return initials.isEmpty ? family : "\(family), \(initials)"
     }
 
-    /// Parse a free-text name like "John Smith" → AuthorName(given: "John", family: "Smith")
+    /// Parse a free-text name like "John Smith" -> AuthorName(given: "John", family: "Smith")
     /// Also handles:
     /// - "Smith, John"  (comma-separated family-first)
     /// - "Smith JA" / "Wang R" / "Heink U" (scholarly "Family Initials" form)
     public static func parse(_ text: String) -> AuthorName {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        let trimmed = normalizedWhitespace(text)
         if let commaIdx = trimmed.firstIndex(of: ",") {
             let family = String(trimmed[..<commaIdx]).trimmingCharacters(in: .whitespaces)
             let given = String(trimmed[trimmed.index(after: commaIdx)...]).trimmingCharacters(in: .whitespaces)
@@ -88,10 +88,27 @@ public struct AuthorName: Codable, Hashable, Sendable {
         }
         let parts = trimmed.components(separatedBy: " ").filter { !$0.isEmpty }
         if parts.count >= 2 {
+            var suffixStart = parts.count
+            while suffixStart > 0, looksLikeInitialToken(parts[suffixStart - 1]) {
+                suffixStart -= 1
+            }
+
+            if suffixStart == 0 {
+                return AuthorName(given: "", family: trimmed)
+            }
+
+            if suffixStart < parts.count {
+                let family = parts[..<suffixStart].joined(separator: " ")
+                let given = parts[suffixStart...].map(normalizedInitialToken).joined(separator: " ")
+                if !family.isEmpty {
+                    return AuthorName(given: given, family: family)
+                }
+            }
+
             let last = parts.last!
             let rest = parts.dropLast().joined(separator: " ")
-            // "Family Initials" 形式：末尾 token 是缩写（全大写、≤4 字符），
-            // 其余部分不是缩写 → 把末尾当 given 初始化，其余当 family。
+            // "Family Initials" form: trailing token is an initial, the
+            // remaining text is the family name.
             if looksLikeInitials(last), !looksLikeInitials(rest) {
                 return AuthorName(given: last, family: rest)
             }
@@ -100,11 +117,67 @@ public struct AuthorName: Codable, Hashable, Sendable {
         return AuthorName(given: "", family: trimmed)
     }
 
-    /// 粗略识别「作者姓名初始缩写」：全大写 / 带点 / 带短横，且长度 ≤ 4。
+    /// Coarse detection for author initials: uppercase, optionally dotted or hyphenated.
     private static func looksLikeInitials(_ s: String) -> Bool {
         guard !s.isEmpty, s.count <= 4 else { return false }
         let allowed: Set<Character> = [".", "-", " "]
         return s.allSatisfy { $0.isUppercase || allowed.contains($0) }
+    }
+
+    private static func looksLikeInitialToken(_ token: String) -> Bool {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 5 else { return false }
+        let stripped = trimmed.replacingOccurrences(of: ".", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        guard !stripped.isEmpty else { return false }
+        return stripped.allSatisfy { $0.isUppercase }
+    }
+
+    private static func normalizedInitialToken(_ token: String) -> String {
+        token.replacingOccurrences(of: ".", with: "")
+    }
+
+    private static func normalizedWhitespace(_ text: String) -> String {
+        text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func looksLikeFamilyInitialsDisplay(_ text: String) -> Bool {
+        let parts = normalizedWhitespace(text).components(separatedBy: " ").filter { !$0.isEmpty }
+        guard parts.count >= 2 else { return false }
+        var suffixStart = parts.count
+        while suffixStart > 0, looksLikeInitialToken(parts[suffixStart - 1]) {
+            suffixStart -= 1
+        }
+        return suffixStart > 0 && suffixStart < parts.count
+    }
+
+    private static func allTokensLookLikeInitials(_ text: String) -> Bool {
+        let tokens = normalizedWhitespace(text).components(separatedBy: " ").filter { !$0.isEmpty }
+        guard !tokens.isEmpty else { return false }
+        return tokens.allSatisfy(looksLikeInitialToken)
+    }
+
+    private static func looksLikeKnownCompoundFamily(_ text: String) -> Bool {
+        let lower = normalizedWhitespace(text).lowercased()
+        return lower.hasPrefix("st. ")
+            || lower.hasPrefix("de ")
+            || lower.hasPrefix("del ")
+            || lower.hasPrefix("de la ")
+            || lower.hasPrefix("van ")
+            || lower.hasPrefix("van der ")
+            || lower.hasPrefix("von ")
+            || lower.hasPrefix("vander ")
+    }
+
+    private static func looksLikeFamilyGivenCommaPair(family: String, given: String) -> Bool {
+        let family = normalizedWhitespace(family)
+        let given = normalizedWhitespace(given)
+        guard !family.isEmpty, !given.isEmpty else { return false }
+        guard !looksLikeFamilyInitialsDisplay(family) else { return false }
+        return !family.contains(" ")
+            || allTokensLookLikeInitials(given)
+            || looksLikeKnownCompoundFamily(family)
     }
 
     /// Parse a plain-text authors string into structured array.
@@ -126,9 +199,11 @@ public struct AuthorName: Codable, Hashable, Sendable {
             let parts = trimmed.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
             if parts.count >= 2 {
                 let looksLikeFamilyGivenPairs =
-                    (parts.count == 2 && !parts[0].contains(" ")) ||
+                    (parts.count == 2 && looksLikeFamilyGivenCommaPair(family: parts[0], given: parts[1])) ||
                     (parts.count.isMultiple(of: 2) &&
-                        stride(from: 0, to: parts.count, by: 2).allSatisfy { !parts[$0].contains(" ") })
+                        stride(from: 0, to: parts.count, by: 2).allSatisfy {
+                            looksLikeFamilyGivenCommaPair(family: parts[$0], given: parts[$0 + 1])
+                        })
 
                 if looksLikeFamilyGivenPairs {
                     // Likely "Family, Given" pairs — group by twos
@@ -157,6 +232,57 @@ public struct AuthorName: Codable, Hashable, Sendable {
             .filter { !$0.isEmpty }
             .map { parse($0) }
             .filter { !$0.family.isEmpty }
+    }
+
+    public static func validationIssues(in authors: [AuthorName]) -> [AuthorNameValidationIssue] {
+        authors.enumerated().compactMap { offset, author in
+            let display = author.displayName
+            let displayTokens = normalizedWhitespace(display)
+                .components(separatedBy: " ")
+                .filter { !$0.isEmpty }
+            if displayTokens.count >= 3, displayTokens.allSatisfy(looksLikeInitialToken) {
+                return AuthorNameValidationIssue(
+                    index: offset,
+                    displayName: display,
+                    message: "author name is only initials; family/given order may be reversed"
+                )
+            }
+
+            let familyTokens = normalizedWhitespace(author.family)
+                .components(separatedBy: " ")
+                .filter { !$0.isEmpty }
+            if familyTokens.count >= 2,
+               familyTokens.dropFirst().contains(where: looksLikeInitialToken),
+               allTokensLookLikeInitials(author.given) {
+                return AuthorNameValidationIssue(
+                    index: offset,
+                    displayName: display,
+                    message: "family name appears to contain trailing initials"
+                )
+            }
+
+            if looksLikeInitialToken(author.family), allTokensLookLikeInitials(author.given) {
+                return AuthorNameValidationIssue(
+                    index: offset,
+                    displayName: display,
+                    message: "family name is a single initial; family/given order may be reversed"
+                )
+            }
+
+            return nil
+        }
+    }
+}
+
+public struct AuthorNameValidationIssue: Codable, Equatable, Sendable {
+    public let index: Int
+    public let displayName: String
+    public let message: String
+
+    public init(index: Int, displayName: String, message: String) {
+        self.index = index
+        self.displayName = displayName
+        self.message = message
     }
 }
 

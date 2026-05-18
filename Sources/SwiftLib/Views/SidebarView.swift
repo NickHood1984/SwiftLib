@@ -2,11 +2,16 @@ import SwiftUI
 import SwiftLibCore
 
 struct SidebarView: View {
+    let workspaces: [Workspace]
+    let selectedWorkspaceID: Int64?
     let collections: [Collection]
     let tags: [Tag]
     let titleKeywords: [(word: String, count: Int)]
     @Binding var selection: SidebarItem
     let referenceCount: Int
+    let onSelectWorkspace: (Workspace) -> Void
+    let onOpenWorkspaceInNewWindow: (Workspace) -> Void
+    let onAddWorkspace: () -> Void
     let onDeleteCollection: (Int64) -> Void
     let onDeleteTag: (Int64) -> Void
     let onAddCollection: () -> Void
@@ -21,16 +26,23 @@ struct SidebarView: View {
         VStack(spacing: 0) {
         OverlayScrollView {
             VStack(spacing: 20) {
-                sidebarSection {
-                    SidebarRow(
-                        icon: "books.vertical",
-                        label: "全部文献",
-                        isSelected: selection == .allReferences,
-                        trailing: { countBadge(referenceCount) }
-                    ) {
+                WorkspaceSwitcher(
+                    workspaces: workspaces,
+                    selectedWorkspaceID: selectedWorkspaceID,
+                    referenceCount: referenceCount,
+                    onSelectWorkspace: { workspace in
+                        onSelectWorkspace(workspace)
+                    },
+                    onShowWorkspaceRoot: {
                         selection = .allReferences
-                    }
-                }
+                    },
+                    onOpenWorkspaceInNewWindow: {
+                        if let selectedWorkspace {
+                            onOpenWorkspaceInNewWindow(selectedWorkspace)
+                        }
+                    },
+                    onAddWorkspace: onAddWorkspace
+                )
 
                 sidebarSection {
                     HStack {
@@ -78,7 +90,6 @@ struct SidebarView: View {
                         }
                     }
                 }
-                .coachMarkAnchor(.sidebarCollections)
 
                 sidebarSection {
                     Text("标签")
@@ -111,7 +122,6 @@ struct SidebarView: View {
                         }
                     }
                 }
-                .coachMarkAnchor(.sidebarTags)
 
             }
             .padding(.horizontal, 10)
@@ -163,6 +173,11 @@ struct SidebarView: View {
         }
         .background(Color(nsColor: .controlBackgroundColor))
         .navigationTitle("SwiftLib")
+    }
+
+    private var selectedWorkspace: Workspace? {
+        guard let selectedWorkspaceID else { return nil }
+        return workspaces.first { $0.id == selectedWorkspaceID }
     }
 
     // MARK: - Rename
@@ -253,6 +268,109 @@ struct SidebarView: View {
             .font(.system(size: 11, weight: .medium))
             .foregroundStyle(.secondary)
             .monospacedDigit()
+    }
+}
+
+// MARK: - Workspace Switcher
+
+private struct WorkspaceSwitcher: View {
+    let workspaces: [Workspace]
+    let selectedWorkspaceID: Int64?
+    let referenceCount: Int
+    let onSelectWorkspace: (Workspace) -> Void
+    let onShowWorkspaceRoot: () -> Void
+    let onOpenWorkspaceInNewWindow: () -> Void
+    let onAddWorkspace: () -> Void
+
+    @State private var isHovered = false
+
+    private var selectedWorkspace: Workspace? {
+        guard let selectedWorkspaceID else { return nil }
+        return workspaces.first { $0.id == selectedWorkspaceID }
+    }
+
+    private var displayName: String {
+        selectedWorkspace?.name ?? "全部文献"
+    }
+
+    private var displayIcon: String {
+        selectedWorkspace?.icon ?? "books.vertical"
+    }
+
+    var body: some View {
+        Menu {
+            Section("工作区") {
+                ForEach(workspaces) { workspace in
+                    Button {
+                        onSelectWorkspace(workspace)
+                    } label: {
+                        HStack {
+                            Label(workspace.name, systemImage: workspace.icon)
+                            if workspace.id == selectedWorkspaceID {
+                                Spacer()
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            Button {
+                onShowWorkspaceRoot()
+            } label: {
+                Label("显示当前工作区全部", systemImage: "line.3.horizontal.decrease.circle")
+            }
+
+            Button {
+                onOpenWorkspaceInNewWindow()
+            } label: {
+                Label("在新窗口打开", systemImage: "macwindow.badge.plus")
+            }
+            .disabled(selectedWorkspace == nil)
+
+            Divider()
+
+            Button {
+                onAddWorkspace()
+            } label: {
+                Label("新建工作区…", systemImage: "plus")
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: displayIcon)
+                    .font(.system(size: 14, weight: .regular))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 18, alignment: .center)
+
+                Text(displayName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+
+                Spacer(minLength: 6)
+
+                Text("\(referenceCount)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isHovered ? Color.accentColor.opacity(0.15) : Color.accentColor.opacity(0.10))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .menuStyle(.borderlessButton)
+        .onHover { isHovered = $0 }
     }
 }
 
@@ -349,46 +467,3 @@ extension Color {
     }
 }
 
-// MARK: - Flow Layout
-
-private struct FlowLayout: Layout {
-    var spacing: CGFloat = 6
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = proposal.width ?? 300  // finite fallback — sidebar is never unbounded
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var rowHeight: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > maxWidth && x > 0 {
-                x = 0
-                y += rowHeight + spacing
-                rowHeight = 0
-            }
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-
-        return CGSize(width: maxWidth, height: y + rowHeight)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX
-        var y = bounds.minY
-        var rowHeight: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX && x > bounds.minX {
-                x = bounds.minX
-                y += rowHeight + spacing
-                rowHeight = 0
-            }
-            subview.place(at: CGPoint(x: x, y: y), proposal: .unspecified)
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-    }
-}

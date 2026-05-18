@@ -159,4 +159,55 @@ final class WordCitationMarkerTests: XCTestCase {
         XCTAssertTrue(result.xml.contains(":nature:94,95"))
         XCTAssertTrue(result.xml.contains("<w:sdt>"))
     }
+
+    func testDocxAuditFindsMissingUnusedAndDuplicateCitations() {
+        let xml = """
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>
+            <w:p>
+              <w:sdt><w:sdtPr><w:tag w:val="swiftlib:v3:cite:c1:nature:94,95"/></w:sdtPr><w:sdtContent><w:r><w:t>[1]</w:t></w:r></w:sdtContent></w:sdt>
+              <w:sdt><w:sdtPr><w:tag w:val="swiftlib:v3:cite:c2:nature:94"/></w:sdtPr><w:sdtContent><w:r><w:t>[1]</w:t></w:r></w:sdtContent></w:sdt>
+            </w:p>
+            <w:sdt><w:sdtPr><w:tag w:val="swiftlib:v3:bib:b1:nature"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>1. Post D M. Example.</w:t></w:r></w:p></w:sdtContent></w:sdt>
+          </w:body>
+        </w:document>
+        """
+        let refs = [
+            Reference(id: 94, title: "Example", authors: [AuthorName(given: "D M", family: "Post")]),
+            Reference(id: 96, title: "Unused"),
+        ]
+
+        let report = WordCitationDOCXProcessor.auditDocumentXML(xml, references: refs)
+
+        XCTAssertEqual(report.citationControlCount, 2)
+        XCTAssertEqual(report.docUniqueIDs, [94, 95])
+        XCTAssertEqual(report.missingInLibrary, [95])
+        XCTAssertEqual(report.unusedInLibrary, [96])
+        XCTAssertEqual(report.duplicateCitationsInParagraphs, [
+            WordDOCXDuplicateCitation(paragraphIndex: 1, referenceID: 94, count: 2)
+        ])
+        XCTAssertEqual(report.bibliographyEntryCount, 1)
+        XCTAssertFalse(report.bibliographyMatchesBodyUniqueCount)
+    }
+
+    func testDocxAuditReadsShortCitationFallbackPayload() {
+        let xml = """
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>
+            <w:p>
+              <w:sdt><w:sdtPr><w:placeholder><w:docPart w:val="swiftlib:v3:payload:nature:94,95"/></w:placeholder><w:tag w:val="swiftlib:v3:cite:11111111-1111-4111-8111-111111111111"/></w:sdtPr><w:sdtContent><w:r><w:t>[1]</w:t></w:r></w:sdtContent></w:sdt>
+            </w:p>
+          </w:body>
+        </w:document>
+        """
+        let refs = [
+            Reference(id: 94, title: "Example"),
+            Reference(id: 95, title: "Example 2"),
+        ]
+
+        let report = WordCitationDOCXProcessor.auditDocumentXML(xml, references: refs)
+
+        XCTAssertEqual(report.docUniqueIDs, [94, 95])
+        XCTAssertTrue(report.missingInLibrary.isEmpty)
+    }
 }

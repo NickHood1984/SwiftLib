@@ -18997,6 +18997,24 @@
   var engineByStyleId = /* @__PURE__ */ new Map();
   var itemBag = { map: {} };
   var cachedLocaleXml = "";
+  var cachedLocalesByLang = /* @__PURE__ */ new Map();
+  function detectDefaultLocaleFromStyleXml(styleXml) {
+    if (!styleXml) return null;
+    const m = styleXml.match(/<style\b[^>]*\bdefault-locale\s*=\s*["']([^"']+)["']/i);
+    return m ? m[1] : null;
+  }
+  function lookupCachedLocaleXml(lang) {
+    if (!lang) return cachedLocaleXml || "";
+    if (cachedLocalesByLang.has(lang)) return cachedLocalesByLang.get(lang);
+    // Try base lang (e.g. "zh" when "zh-CN" requested, or vice versa)
+    const lower = String(lang).toLowerCase();
+    for (const [k, v] of cachedLocalesByLang) {
+      const lk = String(k).toLowerCase();
+      if (lk === lower) return v;
+      if (lk.split("-")[0] === lower.split("-")[0]) return v;
+    }
+    return cachedLocaleXml || "";
+  }
   var NAMED_ENTITIES = {
     amp: "&",
     lt: "<",
@@ -19060,7 +19078,7 @@
   }
   function makeSys() {
     return {
-      retrieveLocale: () => cachedLocaleXml,
+      retrieveLocale: (lang) => lookupCachedLocaleXml(lang),
       retrieveItem: (id) => itemBag.map[String(id)] || false
     };
   }
@@ -19208,11 +19226,37 @@
     }
     return hasCitationFormatting(formatting) ? formatting : null;
   }
+  async function ensureLocaleLoaded(base, lang) {
+    if (!lang) return null;
+    if (cachedLocalesByLang.has(lang)) return cachedLocalesByLang.get(lang);
+    try {
+      const xml = await getCachedLocaleXml(base, lang);
+      cachedLocalesByLang.set(lang, xml);
+      return xml;
+    } catch (_) {
+      return null;
+    }
+  }
+  async function preloadLocalesForStyle(base, styleXml, primaryLocaleId) {
+    const wanted = /* @__PURE__ */ new Set();
+    if (primaryLocaleId) wanted.add(primaryLocaleId);
+    // citeproc-js always falls back to en-US for missing terms
+    wanted.add("en-US");
+    let primary = null;
+    for (const lang of wanted) {
+      const xml = await ensureLocaleLoaded(base, lang);
+      if (lang === primaryLocaleId && xml) primary = xml;
+    }
+    if (!primary && primaryLocaleId) {
+      primary = cachedLocalesByLang.get(primaryLocaleId) || cachedLocalesByLang.get("en-US") || "";
+    }
+    cachedLocaleXml = primary || cachedLocalesByLang.get("en-US") || "";
+  }
   async function preloadStyleAndLocale(styleId, opts) {
     const base = opts?.baseURL ?? "";
-    const localeId = opts?.localeId || "en-US";
     const styleXml = await getCachedStyleXml(base, styleId);
-    cachedLocaleXml = await getCachedLocaleXml(base, localeId);
+    const localeId = opts?.localeId || detectDefaultLocaleFromStyleXml(styleXml) || "en-US";
+    await preloadLocalesForStyle(base, styleXml, localeId);
     getOrCreateEngine(styleId, styleXml);
   }
   function clearCiteprocCaches() {
@@ -19222,10 +19266,10 @@
     engineByStyleId.clear();
     itemBag.map = {};
     cachedLocaleXml = "";
+    cachedLocalesByLang.clear();
   }
   async function renderDocumentPayload(styleId, scan, opts) {
     const base = opts?.baseURL ?? "";
-    const localeId = opts?.localeId || "en-US";
     const allIds = [...new Set((scan.citations || []).flatMap((c) => c.ids || []))];
     if (!allIds.length) {
       return {
@@ -19235,21 +19279,50 @@
         bibliographyHtml: ""
       };
     }
-    const [styleXml, locXml] = await Promise.all([
-      getCachedStyleXml(base, styleId),
-      getCachedLocaleXml(base, localeId)
-    ]);
-    cachedLocaleXml = locXml;
-    const items = await getCachedCiteItems(base, allIds);
+    const styleXml = await getCachedStyleXml(base, styleId);
+    const localeId = opts?.localeId || detectDefaultLocaleFromStyleXml(styleXml) || "en-US";
+    await preloadLocalesForStyle(base, styleXml, localeId);
+    const embeddedItems = opts?.embeddedItems || {};
+    const embeddedById = {};
+    for (const [key, item] of Object.entries(embeddedItems)) {
+      if (!item || typeof item !== "object") continue;
+      let id = item._swiftlibRefId || item.id;
+      if (id == null && key.startsWith("lib:")) id = key.slice(4);
+      if (id == null) continue;
+      embeddedById[String(id)] = { ...item, id: String(id) };
+    }
+    const missingIds = allIds.filter((id) => !embeddedById[String(id)]);
+    const items = await getCachedCiteItems(base, missingIds);
     const idToItem = {};
+    Object.assign(idToItem, embeddedById);
     for (const it of items) {
       idToItem[String(it.id)] = it;
     }
     itemBag.map = idToItem;
     const engine = getOrCreateEngine(styleId, styleXml);
+    const citationItemsFor = (c) => {
+      if (Array.isArray(c.citationItems) && c.citationItems.length) {
+        const richItems = [];
+        for (const item of c.citationItems) {
+          const merged = { ...item };
+          if (typeof merged.itemRef === "string" && merged.itemRef.startsWith("lib:")) {
+            merged.id = String(merged.itemRef.slice(4));
+          } else if (merged.refId != null) {
+            merged.id = String(merged.refId);
+          } else if (merged.id != null) {
+            merged.id = String(merged.id);
+          }
+          delete merged.itemRef;
+          delete merged.refId;
+          if (merged.id != null) richItems.push(merged);
+        }
+        if (richItems.length) return richItems;
+      }
+      return (c.ids || []).map((id) => ({ id: String(id) }));
+    };
     const citationObjs = (scan.citations || []).map((c) => ({
       citationID: c.citationID,
-      citationItems: (c.ids || []).map((id) => ({ id: String(id) })),
+      citationItems: citationItemsFor(c),
       properties: { noteIndex: 0 }
     }));
     const triples = engine.rebuildProcessorState(citationObjs, "text");
@@ -19259,15 +19332,20 @@
       if (!t) continue;
       citationTexts[t[0]] = t[2] || "";
     }
-    engine.setOutputFormat("html");
-    const bib = engine.makeBibliography();
+    const includeBibliography = opts?.includeBibliography !== false;
+    let bib = null;
     let bibliographyHtml = "";
-    if (bib && bib[0] && bib[1]?.length) {
-      const params = bib[0];
-      const entries = bib[1];
-      bibliographyHtml = (params.bibstart || "") + entries.join("") + (params.bibend || "");
+    let bibliographyText = "";
+    if (includeBibliography) {
+      engine.setOutputFormat("html");
+      bib = engine.makeBibliography();
+      if (bib && bib[0] && bib[1]?.length) {
+        const params = bib[0];
+        const entries = bib[1];
+        bibliographyHtml = (params.bibstart || "") + entries.join("") + (params.bibend || "");
+      }
+      bibliographyText = plainBibliographyFromBibResult(bib);
     }
-    const bibliographyText = plainBibliographyFromBibResult(bib);
     const decors = engine.citation?.opt?.layout_decorations || [];
     const citationFormatting = citationFormattingFromDecorations(decors, styleXml);
     const superscriptCitationIDs = [];

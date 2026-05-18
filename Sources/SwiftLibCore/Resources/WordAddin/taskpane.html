@@ -181,7 +181,12 @@
     .overflow-menu-divider { height: 1px; background: var(--border); margin: 4px 6px; }
 
     /* ── Style row ── */
-    .meta-bar { padding: 11px 13px 12px; }
+    .meta-bar {
+      padding: 11px 13px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
 
     .meta-label {
       display: block;
@@ -839,10 +844,20 @@
 
     <!-- ─── Style Selector ─── -->
     <div class="card meta-bar">
-      <label class="meta-label" for="styleSelect">引文样式</label>
-      <div class="style-select-row">
-        <select id="styleSelect"></select>
-        <button class="style-manage-btn" id="styleManageBtn" type="button" title="管理引文样式" aria-label="管理引文样式">&#9881;</button>
+      <div>
+        <label class="meta-label" for="styleSelect">引文样式</label>
+        <div class="style-select-row">
+          <select id="styleSelect"></select>
+          <button class="style-manage-btn" id="styleManageBtn" type="button" title="管理引文样式" aria-label="管理引文样式">&#9881;</button>
+        </div>
+      </div>
+      <div>
+        <label class="meta-label" for="bibliographyStyleSelect">参考文献表样式</label>
+        <div class="style-select-row">
+          <select id="bibliographyStyleSelect">
+            <option value="Normal">Normal</option>
+          </select>
+        </div>
       </div>
     </div>
 

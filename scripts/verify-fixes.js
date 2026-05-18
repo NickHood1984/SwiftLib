@@ -174,9 +174,28 @@ const shared = globalThis.SwiftLibShared;
 test("SwiftLibShared is an object", () => assert.strictEqual(typeof shared, "object"));
 test("setCitationSuperscript is a function", () => assert.strictEqual(typeof shared.setCitationSuperscript, "function"));
 test("applySuperscriptToInsertedRange is a function", () => assert.strictEqual(typeof shared.applySuperscriptToInsertedRange, "function"));
+test("replaceContentControlText is a function", () => assert.strictEqual(typeof shared.replaceContentControlText, "function"));
 test("collectScanFromItems is a function", () => assert.strictEqual(typeof shared.collectScanFromItems, "function"));
 test("finalizeToPlainTextInContext is a function", () => assert.strictEqual(typeof shared.finalizeToPlainTextInContext, "function"));
 test("encodeCitationFallbackPayload is a function", () => assert.strictEqual(typeof shared.encodeCitationFallbackPayload, "function"));
+test("collectScanFromItems ignores stale snapshot citationItems", () => {
+  const scan = shared.collectScanFromItems(
+    [{ id: 1, tag: "swiftlib:v3:cite:c1:style:1,2", placeholderText: "" }],
+    new Map([["c1", {
+      style: "style",
+      ids: [1],
+      citationItems: [{ itemRef: "lib:1" }],
+    }]]),
+    {
+      tagPrefix: "swiftlib:v3:",
+      parseTag: (tag) => shared.parseTag(tag, "swiftlib:v3:cite:", "swiftlib:v3:bib:"),
+      readFallbackPayload: () => null,
+    }
+  );
+  assert.strictEqual(scan.citations.length, 1);
+  assert.deepStrictEqual(scan.citations[0].ids, [1, 2]);
+  assert.strictEqual(scan.citations[0].citationItems, null);
+});
 
 // --- Summary ---
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`);

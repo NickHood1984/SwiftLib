@@ -164,6 +164,36 @@ final class ReferenceTests: XCTestCase {
         XCTAssertEqual(authors[1], AuthorName(given: "Jane", family: "Doe"))
     }
 
+    func testParseListWithFamilyInitialsDisplayString() {
+        let authors = AuthorName.parseList("Carpenter S R, Stanley E H, Vander Zanden M J")
+        XCTAssertEqual(authors, [
+            AuthorName(given: "S R", family: "Carpenter"),
+            AuthorName(given: "E H", family: "Stanley"),
+            AuthorName(given: "M J", family: "Vander Zanden"),
+        ])
+    }
+
+    func testParseListKeepsCompoundFamilyNamesWithInitials() {
+        let authors = AuthorName.parseList("Dalsgaard J, St. John M, Kattner G, de Senerpont Domis L N, Müller-Navarra D C")
+        XCTAssertEqual(authors, [
+            AuthorName(given: "J", family: "Dalsgaard"),
+            AuthorName(given: "M", family: "St. John"),
+            AuthorName(given: "G", family: "Kattner"),
+            AuthorName(given: "L N", family: "de Senerpont Domis"),
+            AuthorName(given: "D C", family: "Müller-Navarra"),
+        ])
+    }
+
+    func testAuthorNameValidationFlagsInitialOnlyReversal() {
+        let issues = AuthorName.validationIssues(in: [
+            AuthorName(given: "C S", family: "R"),
+            AuthorName(given: "S R", family: "Carpenter"),
+        ])
+
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertEqual(issues[0].index, 0)
+    }
+
     func testParseListEmpty() {
         let authors = AuthorName.parseList("")
         XCTAssertTrue(authors.isEmpty)

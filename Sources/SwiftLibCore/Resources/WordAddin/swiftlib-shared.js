@@ -223,6 +223,23 @@
     });
   }
 
+  function replaceContentControlText(cc, text) {
+    const locReplace =
+      typeof Word !== "undefined" && Word.InsertLocation && Word.InsertLocation.replace !== undefined
+        ? Word.InsertLocation.replace
+        : "Replace";
+    try {
+      const contentLoc =
+        typeof Word !== "undefined" && Word.RangeLocation && Word.RangeLocation.content !== undefined
+          ? Word.RangeLocation.content
+          : "Content";
+      const contentRange = cc.getRange(contentLoc);
+      return contentRange.insertText(text, locReplace);
+    } catch {
+      return cc.insertText(text, locReplace);
+    }
+  }
+
   function escapeHtml(text) {
     return String(text || "")
       .replace(/&/g, "&amp;")
@@ -257,6 +274,27 @@
     return html;
   }
 
+  function citationItemID(item) {
+    if (!item || typeof item !== "object") return "";
+    if (typeof item.itemRef === "string" && item.itemRef.startsWith("lib:")) {
+      return item.itemRef.slice(4);
+    }
+    if (item.refId != null) return String(item.refId);
+    if (item.id != null) return String(item.id);
+    return "";
+  }
+
+  function citationItemsMatchIDs(citationItems, ids) {
+    if (!Array.isArray(citationItems) || !Array.isArray(ids)) return false;
+    const itemIDs = citationItems.map(citationItemID).filter(Boolean);
+    const normalizedIDs = ids.map((id) => String(id));
+    if (itemIDs.length !== normalizedIDs.length) return false;
+    for (let i = 0; i < normalizedIDs.length; i++) {
+      if (itemIDs[i] !== normalizedIDs[i]) return false;
+    }
+    return true;
+  }
+
   function collectScanFromItems(items, snapMap, options) {
     const map = snapMap || new Map();
     const citations = [];
@@ -289,12 +327,12 @@
             style = row.style || style || "";
             ids = row.ids?.length ? row.ids.slice() : ids;
             // v4: restore rich citation item options (locator/prefix/suffix/suppressAuthor)
-            if (Array.isArray(row.citationItems)) citationItems = row.citationItems;
+            if (citationItemsMatchIDs(row.citationItems, ids)) citationItems = row.citationItems;
           }
         } else {
           // Even when ids are available from the tag, still restore citationItems from snapMap
           const row = map.get(parsed.id);
-          if (row && Array.isArray(row.citationItems)) citationItems = row.citationItems;
+          if (row && citationItemsMatchIDs(row.citationItems, ids)) citationItems = row.citationItems;
         }
 
         if (!ids.length) continue;
@@ -387,6 +425,7 @@
   shared.setCitationSuperscript = setCitationSuperscript;
   shared.applyCitationFormattingToInsertedRange = applyCitationFormattingToInsertedRange;
   shared.applySuperscriptToInsertedRange = applySuperscriptToInsertedRange;
+  shared.replaceContentControlText = replaceContentControlText;
   shared.citationHtmlFromTextAndFormatting = citationHtmlFromTextAndFormatting;
   shared.collectScanFromItems = collectScanFromItems;
   shared.finalizeToPlainTextInContext = finalizeToPlainTextInContext;

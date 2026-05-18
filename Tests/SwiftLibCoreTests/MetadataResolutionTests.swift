@@ -211,7 +211,7 @@ final class MetadataResolutionTests: XCTestCase {
         )
 
         XCTAssertFalse(MetadataRoutePlanner.isBookLike(seed))
-        XCTAssertTrue(MetadataRoutePlanner.shouldUseBaiduScholarFallback(seed: seed))
+        XCTAssertTrue(MetadataRoutePlanner.shouldUseChineseJournalBrowserFallback(seed: seed))
     }
 
     func testChineseJournalMetadataWithoutWorkKindStillBeatsBookHeuristicWhenJournalPresent() {
@@ -266,7 +266,7 @@ final class MetadataResolutionTests: XCTestCase {
         )
     }
 
-    func testChineseBookSeedSkipsBaiduScholarFallback() {
+    func testChineseBookSeedSkipsChineseJournalBrowserFallback() {
         let seed = MetadataResolutionSeed(
             fileName: "修炼_谢耘",
             title: "修炼",
@@ -277,7 +277,7 @@ final class MetadataResolutionTests: XCTestCase {
             workKindHint: .book
         )
 
-        XCTAssertFalse(MetadataRoutePlanner.shouldUseBaiduScholarFallback(seed: seed))
+        XCTAssertFalse(MetadataRoutePlanner.shouldUseChineseJournalBrowserFallback(seed: seed))
     }
 
     func testReferenceSeedFallsBackToPDFFileName() {

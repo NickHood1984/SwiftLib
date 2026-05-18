@@ -9,6 +9,9 @@ const BIB_TAG_PREFIX = "swiftlib:v3:bib:";
 /** Zero-width non-joiner inside a tiny Plain Text CC after each citation — keeps caret outside cite CC (Boundary Guard). */
 const BOUNDARY_GUARD_TAG = "swiftlib:v3:boundary-guard";
 const ZERO_WIDTH_SEPARATOR = "\u200C";
+const DEFAULT_FETCH_TIMEOUT_MS = 8000;
+const RENDER_FETCH_TIMEOUT_MS = 20000;
+const DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE = "Normal";
 
 // Document-level JSON snapshot (WordApi 1.4 CustomXmlPart): travels with the .docx, supports repair/sync
 // independent of content-control tag quirks. Rendering prefers client citeproc and
@@ -25,6 +28,7 @@ const state = {
   citedIds: new Set(),
   debounceTimer: null,
   preferredStyle: null,
+  preferredBibliographyStyle: DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE,
   /** @type {Record<string, string>} style id → citationKind (numeric | authorDate | note) */
   styleCitationKind: {},
   hasBibliography: false,
@@ -65,9 +69,133 @@ const swiftLibStorageCache = {
   lastJson: "",
 };
 
+/**
+ * Per-session CSL JSON cache keyed by ref id.
+ * Avoids repeated /api/cite-items HTTP calls when re-inserting the same
+ * library item.  Populated on every successful upsert so subsequent inserts
+ * with the same ids skip the network roundtrip entirely.
+ */
+const cslSnapshotCacheById = new Map();
+
+/**
+ * Returns embedded item snapshots ({ "lib:<id>": item, ... }) for the requested ids.
+ * Uses cslSnapshotCacheById for known ids; only fetches missing ids over HTTP.
+ * Failures are non-fatal — returns whatever was already cached.
+ */
+async function fetchCSLSnapshotsForIds(ids) {
+  const result = {};
+  const missing = [];
+  for (const id of ids) {
+    const cached = cslSnapshotCacheById.get(String(id));
+    if (cached) {
+      result[`lib:${cached._swiftlibRefId || cached.id || id}`] = cached;
+    } else {
+      missing.push(id);
+    }
+  }
+  if (missing.length) {
+    try {
+      const cslItems = await fetchJSON(`/api/cite-items?ids=${missing.join(",")}`);
+      for (const item of cslItems) {
+        const refId = String(item._swiftlibRefId || item.id || "");
+        if (refId) cslSnapshotCacheById.set(refId, item);
+        const key = `lib:${item._swiftlibRefId || item.id}`;
+        result[key] = item;
+      }
+    } catch (e) {
+      console.warn("SwiftLib CSL snapshot fetch (using cache only):", e);
+    }
+  }
+  return result;
+}
+
+/**
+ * Pre-render a single (new or edited) citation client-side via SwiftLibCiteproc.
+ * Builds a synthetic scan: existing citations (from CustomXmlPart cache) +
+ * the new/edited one, so author-date / note styles get correct disambiguation
+ * and "ibid" handling.  Returns { text, formatting } or null if rendering is
+ * unavailable / fails.
+ *
+ * NOTE: For numeric styles, all citations may renumber when inserting in the
+ * middle of the document, so the caller must still run a full refresh.  This
+ * helper is fast-path only for author-date / note kinds.
+ */
+async function preRenderSingleCitation(style, citationID, ids, citationItems, freshSnapshots, isEditing) {
+  if (typeof SwiftLibCiteproc === "undefined" || !SwiftLibCiteproc.renderDocumentPayload) return null;
+  const cachedCitations = swiftLibStorageCache.payload?.citations || [];
+  const syntheticCitations = [];
+  for (const c of cachedCitations) {
+    const cid = String(c.citationId || "");
+    if (!cid) continue;
+    if (isEditing && cid === citationID) continue; // replaced below
+    syntheticCitations.push({
+      citationID: cid,
+      ids: Array.isArray(c.refIds) ? c.refIds : [],
+      citationItems: c.citationItems || null,
+    });
+  }
+  syntheticCitations.push({ citationID, ids, citationItems });
+  const embeddedItems = Object.assign(
+    {},
+    swiftLibStorageCache.payload?.items || {},
+    freshSnapshots || {}
+  );
+  try {
+    const payload = await SwiftLibCiteproc.renderDocumentPayload(
+      style,
+      { citations: syntheticCitations, bibControls: [] },
+      {
+        baseURL: "",
+        citationKind: state.styleCitationKind[style] || "",
+        embeddedItems,
+        includeBibliography: false,
+      }
+    );
+    const text = payload?.citationTexts?.[citationID] || "";
+    if (!isUsableCitationText(text)) return null;
+    return { text, formatting: payload.citationFormatting || null };
+  } catch (e) {
+    console.warn("SwiftLib preRenderSingleCitation:", e);
+    return null;
+  }
+}
+
+/**
+ * Insert / update the new citation entry into the in-memory storage cache without
+ * re-scanning the document.  Lets us persist incrementally on the fast path.
+ */
+function patchStorageCacheWithCitation(citationID, ids, citationItems, style, freshSnapshots) {
+  if (!swiftLibStorageCache.payload) {
+    swiftLibStorageCache.payload = {
+      v: 4,
+      preferences: { style, bibliographyStyle: currentBibliographyParagraphStyle() },
+      items: {},
+      citations: [],
+      bibliography: false,
+    };
+  }
+  const payload = swiftLibStorageCache.payload;
+  if (!payload.preferences) payload.preferences = { style };
+  else payload.preferences.style = style;
+  payload.preferences.bibliographyStyle = currentBibliographyParagraphStyle();
+  payload.items = Object.assign({}, payload.items || {}, freshSnapshots || {});
+  const newEntry = {
+    citationId: citationID,
+    citationItems: citationItems || ids.map((id) => ({ itemRef: `lib:${id}`, refId: id })),
+    refIds: ids,
+    style,
+  };
+  payload.citations = Array.isArray(payload.citations) ? payload.citations.slice() : [];
+  const existingIdx = payload.citations.findIndex((c) => String(c.citationId) === String(citationID));
+  if (existingIdx >= 0) payload.citations[existingIdx] = Object.assign({}, payload.citations[existingIdx], newEntry);
+  else payload.citations.push(newEntry);
+  swiftLibStorageCache.lastJson = ""; // force re-persist on next sync
+}
+
 /** Coalesce overlapping refresh calls (immediate). */
 let refreshDocumentBusy = false;
 let refreshDocumentQueued = false;
+let deferredBibliographyRefreshTimer = null;
 
 /** Prevent double-submit while Insert Citation is running. */
 let upsertCitationBusy = false;
@@ -76,6 +204,7 @@ const runtimeLocks = (typeof SwiftLibShared !== "undefined" && SwiftLibShared.ru
   : { upsertCitation: false };
 
 let insertBibliographyFromTaskpaneBusy = false;
+let wordFocusBounceInFlight = false;
 
 /** Optional: debounce rapid triggers (e.g. future doc listeners). */
 const debouncedRefreshDocument = debounce(() => {
@@ -277,8 +406,12 @@ async function restoreStyleFromDocument() {
       tryTrackedObjectsRemoveAll(ctx);
       // v4: preferences.style; v3 (legacy): snap.style — both are supported
       const restoredStyle = snap?.preferences?.style || snap?.style || null;
+      const restoredBibliographyStyle = snap?.preferences?.bibliographyStyle || null;
       if (restoredStyle) {
         state.preferredStyle = restoredStyle;
+      }
+      if (restoredBibliographyStyle) {
+        state.preferredBibliographyStyle = restoredBibliographyStyle;
       }
       return restoredStyle;
     });
@@ -333,6 +466,9 @@ async function initializeDocumentState() {
     const styleSelect = document.getElementById("styleSelect");
     if (styleSelect && styleSelect.options.length) styleSelect.value = restoredStyle;
   }
+  await runStartupStep("load bibliography styles", loadBibliographyParagraphStyles, {
+    timeoutMs: 3500,
+  });
 
   runStartupStepInBackground("preload citeproc", preloadSwiftLibCiteprocForCurrentStyle, {
     timeoutMs: 5000,
@@ -375,6 +511,8 @@ function bindEvents() {
   const finalizeBtn = document.getElementById("finalizeBtn");
   if (finalizeBtn) finalizeBtn.addEventListener("click", () => { closeOverflowMenu(); finalizeToPlainText(); });
   document.getElementById("styleSelect").addEventListener("change", onStyleChange);
+  const bibliographyStyleSelect = document.getElementById("bibliographyStyleSelect");
+  if (bibliographyStyleSelect) bibliographyStyleSelect.addEventListener("change", onBibliographyStyleChange);
   document.getElementById("editCancelBtn").addEventListener("click", cancelEditMode);
 
   // Overflow menu toggle
@@ -456,6 +594,19 @@ function onStyleChange() {
   debouncedRefreshDocument();
 }
 
+function onBibliographyStyleChange() {
+  const newStyle = currentBibliographyParagraphStyle();
+  state.preferredBibliographyStyle = newStyle;
+  if (swiftLibStorageCache.loaded && swiftLibStorageCache.payload) {
+    if (!swiftLibStorageCache.payload.preferences) {
+      swiftLibStorageCache.payload.preferences = {};
+    }
+    swiftLibStorageCache.payload.preferences.bibliographyStyle = newStyle;
+    swiftLibStorageCache.lastJson = "";
+  }
+  debouncedRefreshDocument();
+}
+
 function showEditBanner(label) {
   const banner = document.getElementById("editBanner");
   const text = document.getElementById("editBannerText");
@@ -495,6 +646,132 @@ function isWordApi14() {
   }
 }
 
+function isWordApi15() {
+  try {
+    return (
+      typeof Office !== "undefined" &&
+      Office.context &&
+      Office.context.requirements &&
+      Office.context.requirements.isSetSupported("WordApi", "1.5")
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+function normalizeBibliographyParagraphStyle(styleName) {
+  const name = String(styleName || "").trim();
+  return name || DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE;
+}
+
+function currentBibliographyParagraphStyle() {
+  const select = document.getElementById("bibliographyStyleSelect");
+  return normalizeBibliographyParagraphStyle(
+    select?.value || state.preferredBibliographyStyle || DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE
+  );
+}
+globalThis.swiftLibGetBibliographyParagraphStyle = currentBibliographyParagraphStyle;
+
+function isParagraphStyleType(type) {
+  const value = String(type || "").toLowerCase();
+  return !value || value === "paragraph" || value.endsWith(".paragraph");
+}
+
+function addBibliographyStyleOption(options, seen, value, label) {
+  const styleName = normalizeBibliographyParagraphStyle(value);
+  const key = styleName.toLowerCase();
+  if (seen.has(key)) return;
+  seen.add(key);
+  options.push({ value: styleName, label: label || styleName });
+}
+
+async function loadBibliographyParagraphStyles() {
+  const select = document.getElementById("bibliographyStyleSelect");
+  if (!select) return;
+
+  const selected = normalizeBibliographyParagraphStyle(state.preferredBibliographyStyle);
+  const options = [];
+  const seen = new Set();
+  addBibliographyStyleOption(options, seen, DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE);
+
+  if (isWordApi15() && typeof Word !== "undefined" && typeof Word.run === "function") {
+    try {
+      await Word.run(async (ctx) => {
+        if (!ctx.document.getStyles) return;
+        const styles = ctx.document.getStyles();
+        styles.load("items/nameLocal,items/type");
+        await ctx.sync();
+        for (const style of styles.items || []) {
+          if (!isParagraphStyleType(style.type)) continue;
+          const name = normalizeBibliographyParagraphStyle(style.nameLocal);
+          addBibliographyStyleOption(options, seen, name);
+        }
+      });
+    } catch (e) {
+      console.warn("SwiftLib load bibliography paragraph styles:", e);
+    }
+  }
+
+  addBibliographyStyleOption(options, seen, selected);
+  const normal = options.find((o) => o.value.toLowerCase() === DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE.toLowerCase());
+  const rest = options
+    .filter((o) => o !== normal)
+    .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
+  const ordered = normal ? [normal, ...rest] : rest;
+  select.replaceChildren(
+    ...ordered.map((opt) => {
+      const option = document.createElement("option");
+      option.value = opt.value;
+      option.textContent = opt.label;
+      return option;
+    })
+  );
+  select.value = selected;
+}
+
+async function resolveBibliographyParagraphStyleForDocument(ctx, requestedStyle) {
+  const requested = normalizeBibliographyParagraphStyle(requestedStyle);
+  if (requested.toLowerCase() === DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE.toLowerCase()) {
+    return DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE;
+  }
+  if (!isWordApi15() || !ctx?.document?.getStyles) return requested;
+
+  try {
+    const style = ctx.document.getStyles().getByNameOrNullObject(requested);
+    style.load("nameLocal,type");
+    await ctx.sync();
+    if (!style.isNullObject && isParagraphStyleType(style.type)) {
+      return normalizeBibliographyParagraphStyle(style.nameLocal || requested);
+    }
+  } catch (e) {
+    console.warn("SwiftLib validate bibliography paragraph style:", e);
+  }
+  return DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE;
+}
+
+function applyBibliographyParagraphStyle(para, styleName) {
+  const resolved = normalizeBibliographyParagraphStyle(styleName);
+  if (resolved.toLowerCase() === DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE.toLowerCase()) {
+    try {
+      para.styleBuiltIn = Word.Style.normal;
+      return;
+    } catch (_) {
+      /* fall back to style name */
+    }
+  }
+  try {
+    para.style = resolved;
+    return;
+  } catch (_) {
+    /* fallback below */
+  }
+  try {
+    para.styleBuiltIn = Word.Style.normal;
+  } catch (_) {
+    /* ignore */
+  }
+}
+
 function utf8ToBase64(str) {
   const bytes = new TextEncoder().encode(str);
   let bin = "";
@@ -502,7 +779,7 @@ function utf8ToBase64(str) {
   return btoa(bin);
 }
 
-function buildStoragePayloadFromScan(scan, style) {
+function buildStoragePayloadFromScan(scan, style, bibliographyStyle) {
   // Merge existing items snapshot from cache with any new items from scan.
   // This ensures CSL snapshots accumulate across refreshes rather than being lost.
   const existingItems = swiftLibStorageCache.payload?.items || {};
@@ -520,6 +797,7 @@ function buildStoragePayloadFromScan(scan, style) {
     // not on every refresh. This prevents UI state from polluting the document.
     preferences: {
       style,
+      bibliographyStyle: normalizeBibliographyParagraphStyle(bibliographyStyle || currentBibliographyParagraphStyle()),
     },
     // CSL JSON snapshots keyed by docItemKey ("lib:<refId>" or "doi:<doi>" or "uuid:<uuid>").
     // Allows the document to be refreshed without the local library.
@@ -568,11 +846,11 @@ async function loadSwiftLibCustomXmlParts(ctx) {
  * Writes the SwiftLib snapshot into a CustomXmlPart (single part per document, namespace SWIFTLIB_XML_NS).
  * Must run inside an existing Word.run(ctx) — queues setXml/add; caller syncs.
  */
-async function persistSwiftLibStorageInContext(ctx, scan, style, rawPayload) {
+async function persistSwiftLibStorageInContext(ctx, scan, style, rawPayload, bibliographyStyle) {
   if (!isWordApi14()) return;
 
   // rawPayload: if provided (e.g. from relink), use directly instead of rebuilding from scan
-  const storagePayload = rawPayload || buildStoragePayloadFromScan(scan, style);
+  const storagePayload = rawPayload || buildStoragePayloadFromScan(scan, style, bibliographyStyle);
   const json = JSON.stringify(storagePayload);
 
   // Skip write if payload unchanged since last persist
@@ -833,17 +1111,25 @@ async function preloadSwiftLibCiteprocForCurrentStyle() {
  * When the document snapshot contains embedded CSL item data (`items`), it is passed
  * to both the client-side citeproc and the server, enabling refresh without the local library.
  */
-async function fetchDocumentRenderPayload(styleId, scan) {
+async function fetchDocumentRenderPayload(styleId, scan, options) {
   const kind = state.styleCitationKind[styleId] || "";
   // Collect embedded item snapshots from the document (v4 schema)
   const embeddedItems = swiftLibStorageCache.payload?.items || {};
+  const includeBibliography = options?.includeBibliography !== false && (scan.bibControls || []).length > 0;
   try {
     if (typeof SwiftLibCiteproc !== "undefined" && SwiftLibCiteproc.renderDocumentPayload) {
-      return await SwiftLibCiteproc.renderDocumentPayload(styleId, scan, {
+      const clientResult = await SwiftLibCiteproc.renderDocumentPayload(styleId, scan, {
         baseURL: "",
         citationKind: kind,
         embeddedItems,
+        includeBibliography,
       });
+      // Validate completeness: every citation in the scan must have a non-empty entry in
+      // citationTexts.  If any are missing the client-side engine silently failed to render
+      // them (e.g. items not loaded), so fall through to the reliable server path.
+      const missing = missingCitationTextIDs(clientResult, scan.citations);
+      if (!missing.length) return clientResult;
+      console.warn("SwiftLib: client citeproc missing citation texts, using server", missing);
     }
   } catch (e) {
     console.warn("SwiftLib client citeproc failed, using server:", e);
@@ -861,7 +1147,7 @@ async function fetchDocumentRenderPayload(styleId, scan) {
   // — which carries { error, orphanIds } for items deleted from the library —
   // is returned as a parsed object instead of thrown.  The caller checks
   // data.error and can still present the orphan banner using data.orphanIds.
-  const rawResp = await fetch("/api/render-document", {
+  const rawResp = await fetchWithTimeout("/api/render-document", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -870,14 +1156,19 @@ async function fetchDocumentRenderPayload(styleId, scan) {
     body: JSON.stringify({
       style: styleId,
       citations: reqCitations,
+      includeBibliography,
       // Pass embedded items to server so it can render without DB lookup when available
       items: Object.keys(embeddedItems).length ? embeddedItems : undefined,
     }),
-  });
+  }, RENDER_FETCH_TIMEOUT_MS);
   const payload = await rawResp.json();
   // For unexpected errors (not 422 orphan case), surface as thrown error
   if (!rawResp.ok && !Array.isArray(payload.orphanIds)) {
     throw new Error(payload.error || `HTTP ${rawResp.status}`);
+  }
+  const missing = missingCitationTextIDs(payload, scan.citations);
+  if (missing.length && !payload.error) {
+    throw new Error(`渲染结果缺少引文文本：${missing.join(", ")}`);
   }
   return payload;
 }
@@ -913,6 +1204,17 @@ function citationFormattingForPayload(payload, citationID) {
   return Object.values(formatting).some((value) => value !== null && value !== undefined)
     ? formatting
     : null;
+}
+
+function isUsableCitationText(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function missingCitationTextIDs(payload, citations) {
+  const citationTexts = payload?.citationTexts || {};
+  return (citations || [])
+    .map((c) => c.citationID)
+    .filter((id) => id && !isUsableCitationText(citationTexts[id]));
 }
 
 function shouldInsertCitationAsHTML(formatting) {
@@ -1595,6 +1897,19 @@ async function findAdjacentCitationCC(ctx) {
     }
     await ctx.sync();
 
+    // Legacy-document guard: if the document has NO boundary-guard CCs at all,
+    // it was produced by a SwiftLib build that did not emit them.  In that case
+    // the "+2 chars adjacency" heuristic below is unreliable — in dense
+    // numeric-style theses it fires constantly and tries to merge into legacy
+    // CCs whose `<w:placeholder>` reference makes `cc.insertText(..., replace)`
+    // silently no-op on Word for Mac, leaving the document unchanged.  Skip
+    // adjacency-merge in that case so a fresh CC is always inserted instead.
+    let hasAnyBoundaryGuard = false;
+    for (const { cc } of pairs) {
+      if (isBoundaryGuardTag(cc.tag || "")) { hasAnyBoundaryGuard = true; break; }
+    }
+    if (!hasAnyBoundaryGuard) return null;
+
     // Sort by document position
     pairs.sort((a, b) => (a.rng.start ?? 0) - (b.rng.start ?? 0));
 
@@ -1642,23 +1957,41 @@ async function upsertCitation() {
   const style = document.getElementById("styleSelect").value;
   const ids = state.selectedRefs.map((ref) => ref.id);
 
-  // Fetch CSL snapshots for the selected refs so we can embed them in the document.
-  // This makes the document self-contained and enables refresh without the local library.
-  let cslSnapshots = {};
-  try {
-    const cslItems = await fetchJSON(`/api/cite-items?ids=${ids.join(",")}`);
-    for (const item of cslItems) {
-      const key = `lib:${item._swiftlibRefId || item.id}`;
-      cslSnapshots[key] = item;
-    }
-  } catch (e) {
-    console.warn("SwiftLib: failed to fetch CSL snapshots for upsert, continuing without:", e);
-  }
-
   if (!ids.length) {
     setStatus("请至少选择一条文献。");
     return;
   }
+
+  // Build citation item options up-front (also needed for pre-render).
+  const locator = document.getElementById("citOptLocator")?.value?.trim() || undefined;
+  const locatorLabel = document.getElementById("citOptLocatorLabel")?.value || "page";
+  const prefix = document.getElementById("citOptPrefix")?.value?.trim() || undefined;
+  const suffix = document.getElementById("citOptSuffix")?.value?.trim() || undefined;
+  const suppressAuthor = document.getElementById("citOptSuppressAuthor")?.checked || false;
+  const citationItemsForPending = ids.map((id) => {
+    const item = { itemRef: `lib:${id}`, refId: id };
+    if (locator) { item.locator = locator; item.label = locatorLabel; }
+    if (prefix) item.prefix = prefix;
+    if (suffix) item["suffix"] = suffix;
+    if (suppressAuthor) item["suppress-author"] = true;
+    return item;
+  });
+
+  const citationKind = state.styleCitationKind[style] || "";
+  // Repeat citations always get a fixed number (the first occurrence's number),
+  // so they're safe to fast-path regardless of insert position.
+  // An empty snapshot has no existing citations to conflict with.
+  // For a new-unique numeric citation into a non-empty document we still attempt
+  // the fast path but gate it on a document-position check inside Word.run.
+  const isRepeatCitation = ids.every(id => state.citedIds.has(id));
+  const snapshotHasCitations = !!(swiftLibStorageCache.payload?.citations?.length);
+  const fastPathEligible = citationKind !== "numeric" || isRepeatCitation || !snapshotHasCitations;
+  const numericNeedsPositionCheck = citationKind === "numeric" && !isRepeatCitation && snapshotHasCitations;
+
+  // Kick off CSL snapshot fetch in parallel with chip clearing / status updates.
+  // fetchCSLSnapshotsForIds uses the per-session cache and only hits the network
+  // for ids it has not seen before.
+  const snapshotsPromise = fetchCSLSnapshotsForIds(ids);
 
   /** Snapshot so we can restore chips if Word insert fails after optimistic clear. */
   const selectionSnapshot = {
@@ -1671,12 +2004,40 @@ async function upsertCitation() {
   const primaryBtn = document.getElementById("primaryBtn");
   if (primaryBtn) primaryBtn.disabled = true;
   showLoadingOverlay("正在插入引文…");
+  clearSearchFocusRequest();
 
   let citationID = "";
+  let usedFastPath = false;
   try {
     clearCitationSelectionUI();
 
     setStatus("正在构建引文…");
+
+    // Wait for CSL snapshots (parallel with UI work above).
+    const cslSnapshots = await snapshotsPromise;
+
+    // Pre-render the new citation client-side for the fast path.  This is
+    // CPU-only (no IPC, no network) and typically <50 ms.  Allows us to write
+    // the final citation text directly into the new CC, eliminating the
+    // separate post-insert refreshDocument round-trip.
+    //
+    // Pre-render is only attempted for *new* citations (not editing): the
+    // editing path needs the live editingCC's id from inside Word.run, and
+    // updating an existing citation's text often shifts neighboring ones too,
+    // which the full refreshDocument handles correctly.
+    let preRenderedNew = null;
+    if (fastPathEligible && !state.editingCitationID) {
+      const provisionalID = generateUUID();
+      preRenderedNew = await preRenderSingleCitation(
+        style,
+        provisionalID,
+        ids,
+        citationItemsForPending,
+        cslSnapshots,
+        false
+      );
+      preRenderedNew && (preRenderedNew.provisionalID = provisionalID);
+    }
 
     // Step 1: Merge insert-mode detection + CC insert into a single Word.run
     // (eliminates the separate resolveCitationInsertMode() Word.run)
@@ -1713,23 +2074,12 @@ async function upsertCitation() {
       }
       state.editingCitationID = editingId;
 
-      citationID = editingId || generateUUID();
+      // Reuse the provisional id from pre-render when it applies (new citation,
+      // not editing); falls back to a fresh UUID if pre-render is unavailable.
+      citationID = editingId || preRenderedNew?.provisionalID || generateUUID();
       const tagChoice = chooseCitationContentTag(citationID, style, ids);
       const tag = tagChoice.tag;
-      // Build citationItems with full item options model, reading from the options panel
-      const locator = document.getElementById("citOptLocator")?.value?.trim() || undefined;
-      const locatorLabel = document.getElementById("citOptLocatorLabel")?.value || "page";
-      const prefix = document.getElementById("citOptPrefix")?.value?.trim() || undefined;
-      const suffix = document.getElementById("citOptSuffix")?.value?.trim() || undefined;
-      const suppressAuthor = document.getElementById("citOptSuppressAuthor")?.checked || false;
-      const citationItemsForPending = ids.map((id) => {
-        const item = { itemRef: `lib:${id}`, refId: id };
-        if (locator) { item.locator = locator; item.label = locatorLabel; }
-        if (prefix) item.prefix = prefix;
-        if (suffix) item["suffix"] = suffix;
-        if (suppressAuthor) item["suppress-author"] = true;
-        return item;
-      });
+      // citation item options were captured before Word.run (see citationItemsForPending above)
       if (tagChoice.isShort) {
         state.pendingCitationPayload[citationID] = {
           style,
@@ -1742,7 +2092,15 @@ async function upsertCitation() {
       }
       // Always store item snapshots in the cache so they survive even if tag is not short
       if (Object.keys(cslSnapshots).length) {
-        if (!swiftLibStorageCache.payload) swiftLibStorageCache.payload = { v: 4, preferences: { style }, items: {}, citations: [], bibliography: false };
+        if (!swiftLibStorageCache.payload) {
+          swiftLibStorageCache.payload = {
+            v: 4,
+            preferences: { style, bibliographyStyle: currentBibliographyParagraphStyle() },
+            items: {},
+            citations: [],
+            bibliography: false,
+          };
+        }
         if (!swiftLibStorageCache.payload.items) swiftLibStorageCache.payload.items = {};
         Object.assign(swiftLibStorageCache.payload.items, cslSnapshots);
         swiftLibStorageCache.lastJson = ""; // force re-persist
@@ -1752,7 +2110,7 @@ async function upsertCitation() {
         // --- Edit existing citation: update the parent CC directly ---
         editingCC.tag = tag;
         syncCitationFallbackPlaceholder(editingCC, { kind: "citation", fromShortTag: tagChoice.isShort }, style, ids);
-        editingCC.insertText("[\u2026]", Word.InsertLocation.replace);
+        SwiftLibShared.replaceContentControlText(editingCC, "[\u2026]");
         try {
           await ctx.sync();
         } catch (e) {
@@ -1760,7 +2118,7 @@ async function upsertCitation() {
           editingCC.tag = `${CITE_TAG_PREFIX}${citationID}`;
           state.pendingCitationPayload[citationID] = { style, ids: ids.slice() };
           syncCitationFallbackPlaceholder(editingCC, { kind: "citation", fromShortTag: true }, style, ids);
-          editingCC.insertText("[\u2026]", Word.InsertLocation.replace);
+          SwiftLibShared.replaceContentControlText(editingCC, "[\u2026]");
           await ctx.sync();
         }
       } else {
@@ -1797,7 +2155,7 @@ async function upsertCitation() {
               delete state.pendingCitationPayload[mergedCitationID];
             }
             syncCitationFallbackPlaceholder(prevCC, { kind: "citation", fromShortTag: mergedTagChoice.isShort }, style, mergedIds);
-            prevCC.insertText("[\u2026]", Word.InsertLocation.replace);
+            SwiftLibShared.replaceContentControlText(prevCC, "[\u2026]");
             await ctx.sync();
             mergedIntoPrevious = true;
             console.log("SwiftLib: merged citation into adjacent CC", mergedCitationID, mergedIds);
@@ -1817,6 +2175,15 @@ async function upsertCitation() {
           cc.appearance = "Hidden";
           syncCitationFallbackPlaceholder(cc, { kind: "citation", fromShortTag: tagChoice.isShort }, style, ids);
           cc.tag = tag;
+
+          // Fast-path: pre-rendered text + same-Word.run persist eliminates the
+          // separate refreshDocument round-trip.  Falls back to the placeholder
+          // + post-insert refresh path on any error.
+          let canFastPath =
+            fastPathEligible &&
+            preRenderedNew &&
+            preRenderedNew.provisionalID === citationID &&
+            !!preRenderedNew.text;
           try {
             await ctx.sync();
           } catch (e) {
@@ -1824,9 +2191,63 @@ async function upsertCitation() {
             cc.tag = `${CITE_TAG_PREFIX}${citationID}`;
             state.pendingCitationPayload[citationID] = { style, ids: ids.slice() };
             syncCitationFallbackPlaceholder(cc, { kind: "citation", fromShortTag: true }, style, ids);
+            canFastPath = false;
             await ctx.sync();
           }
-          cc.insertText("[\u2026]", Word.InsertLocation.replace);
+
+          // For new-unique numeric citations: verify the new CC is the last
+          // citation in the document before trusting the optimistic pre-render
+          // (which assumed it was appended at the end).  Two extra syncs here,
+          // but still cheaper than starting a full second Word.run when the
+          // check passes (common case: appending citations in document order).
+          if (canFastPath && numericNeedsPositionCheck) {
+            try {
+              const newCCRng = cc.getRange();
+              newCCRng.load("start");
+              const allCtrls = ctx.document.contentControls;
+              allCtrls.load("items");
+              await ctx.sync();
+
+              const laterRngs = [];
+              for (const c of allCtrls.items) {
+                const t = c.tag || "";
+                if (t.startsWith(CITE_TAG_PREFIX) && !isBoundaryGuardTag(t)) {
+                  const r = c.getRange();
+                  r.load("start");
+                  laterRngs.push({ tag: t, r });
+                }
+              }
+              await ctx.sync();
+
+              const newStart = newCCRng.start ?? -1;
+              const hasLater = newStart >= 0 && laterRngs.some(p => {
+                const parsed = parseCitationTag(p.tag);
+                return parsed && parsed.id !== citationID && (p.r.start ?? 0) > newStart;
+              });
+              if (hasLater) canFastPath = false;
+            } catch (posErr) {
+              console.warn("SwiftLib numeric position check:", posErr);
+              canFastPath = false;
+            }
+          }
+
+          const insertText = canFastPath ? preRenderedNew.text : "[\u2026]";
+          const insertedRange = SwiftLibShared.replaceContentControlText(cc, insertText);
+          if (canFastPath && preRenderedNew.formatting && typeof SwiftLibShared !== "undefined" &&
+              typeof SwiftLibShared.applyCitationFormattingToInsertedRange === "function") {
+            SwiftLibShared.applyCitationFormattingToInsertedRange(insertedRange, preRenderedNew.formatting);
+          }
+          if (canFastPath) {
+            // Persist the snapshot patch in the same Word.run so we skip the
+            // post-insert refreshDocument call entirely.
+            patchStorageCacheWithCitation(citationID, ids, citationItemsForPending, style, cslSnapshots);
+            try {
+              await persistSwiftLibStorageInContext(ctx, null, style, swiftLibStorageCache.payload);
+            } catch (persistErr) {
+              console.warn("SwiftLib fast-path persist:", persistErr);
+            }
+            usedFastPath = true;
+          }
           await ctx.sync();
           try {
             await insertLightweightGuardAfterCitationCC(ctx, cc, citationID);
@@ -1838,21 +2259,48 @@ async function upsertCitation() {
           } catch (e) {
             console.warn("SwiftLib: caret hop skipped:", e);
           }
+          if (canFastPath && preRenderedNew.formatting &&
+              typeof SwiftLibShared !== "undefined" &&
+              typeof SwiftLibShared.setCitationFormatting === "function") {
+            // Re-apply formatting on the post-sync content range for hosts that
+            // drop the inserted-range font (Word for Mac superscript flake).
+            try {
+              SwiftLibShared.setCitationFormatting(cc, preRenderedNew.formatting);
+            } catch (_) { /* ignore */ }
+          }
           await ctx.sync();
         }
       }
     });
-
-    setStatus("正在格式化引文…");
 
     const searchInput = document.getElementById("searchInput");
     if (searchInput) searchInput.value = "";
     state.lastQuery = "";
     clearSearchResultsPlaceholder();
 
-    await yieldToPaint();
-
-    await refreshDocument({ skipGhostCleanup: true, fromUpsert: true });
+    if (usedFastPath) {
+      // Fast path: text was rendered + persisted inside the same Word.run.
+      // Skip the full refreshDocument round-trip; update state in-memory and
+      // schedule a deferred bibliography refresh if the doc has a bib block.
+      for (const id of ids) state.citedIds.add(id);
+      state.citedCount = state.citedIds.size;
+      delete state.pendingCitationPayload[citationID];
+      renderResults(state.allResults);
+      const _docSummary = document.getElementById("docSummary");
+      if (_docSummary) {
+        const _parts = [`已引用 ${state.citedCount} 条不重复文献`];
+        _parts.push(state.hasBibliography ? "已含参考文献表" : "尚未插入参考文献表");
+        _docSummary.textContent = _parts.join(" · ");
+      }
+      updateInsertBibliographyButton();
+      if (state.hasBibliography) {
+        scheduleDeferredBibliographyRefresh();
+      }
+    } else {
+      setStatus("正在格式化引文…");
+      await yieldToPaint();
+      await refreshDocument({ skipGhostCleanup: true, fromUpsert: true });
+    }
     clearCitationSelectionUI();
     setStatus("✓ 引文已插入。", "success");
     // Flash primary button green briefly
@@ -1861,7 +2309,8 @@ async function upsertCitation() {
       _primaryBtn.classList.add("is-success");
       setTimeout(() => _primaryBtn.classList.remove("is-success"), 1400);
     }
-    requestSearchFocus();
+    releaseTaskpaneFocusToDocument();
+    triggerWordFocusBounce();
     if (!tryInsertMessageBox("引文已插入并完成格式化。")) {
       /* setStatus 已足够；无 messageBox 时不弹 alert 打扰 */
     }
@@ -1923,6 +2372,9 @@ async function refreshDocumentOnce(options) {
     ? (swiftLibStorageCache.payload?.preferences?.style || swiftLibStorageCache.payload?.style || null)
     : null;
   const style = snapStyle || document.getElementById("styleSelect").value;
+  const requestedBibliographyStyle = swiftLibStorageCache.loaded
+    ? (swiftLibStorageCache.payload?.preferences?.bibliographyStyle || state.preferredBibliographyStyle)
+    : currentBibliographyParagraphStyle();
 
   try {
     setStatus("正在刷新引文…");
@@ -1938,6 +2390,7 @@ async function refreshDocumentOnce(options) {
     }
 
     const result = await Word.run(async (ctx) => {
+      const bibliographyParagraphStyle = await resolveBibliographyParagraphStyleForDocument(ctx, requestedBibliographyStyle);
       if (!skipGhost) {
         await deleteSwiftLibGhostContentControlsInContext(ctx);
       }
@@ -1952,8 +2405,22 @@ async function refreshDocumentOnce(options) {
         return { kind: "empty" };
       }
 
-      for (const cc of items) cc.load("tag,id,placeholderText");
+      // Load range text alongside tag/id so we can skip insertText for CCs
+      // whose rendered text is already up to date (selective write).
+      const ccCurrentTextPairs = [];
+      for (const cc of items) {
+        cc.load("tag,id,placeholderText");
+        const rng = cc.getRange();
+        rng.load("text");
+        ccCurrentTextPairs.push({ cc, rng });
+      }
       await ctx.sync();
+
+      // id → current visible text; used below to skip unchanged insertText calls.
+      const ccCurrentTextById = new Map();
+      for (const { cc, rng } of ccCurrentTextPairs) {
+        if (cc.id != null) ccCurrentTextById.set(cc.id, rng.text ?? "");
+      }
 
       if (!items.some((cc) => (cc.tag || "").startsWith(TAG_PREFIX))) {
         tryTrackedObjectsRemoveAll(ctx);
@@ -1967,7 +2434,9 @@ async function refreshDocumentOnce(options) {
         return { kind: "noSwiftLib" };
       }
 
-      const data = await fetchDocumentRenderPayload(style, scan);
+      const data = await fetchDocumentRenderPayload(style, scan, {
+        includeBibliography: !trustInitialScan,
+      });
       if (data.error) {
         tryTrackedObjectsRemoveAll(ctx);
         return { kind: "error", message: data.error, orphanIds: data.orphanIds || [] };
@@ -2000,7 +2469,9 @@ async function refreshDocumentOnce(options) {
         }
 
         if (scanStructuralSignature(scan) !== scanStructuralSignature(scanW)) {
-          payload = await fetchDocumentRenderPayload(style, scanW);
+          payload = await fetchDocumentRenderPayload(style, scanW, {
+            includeBibliography: !trustInitialScan,
+          });
           if (payload.error) {
             tryTrackedObjectsRemoveAll(ctx);
             return { kind: "error", message: payload.error, orphanIds: payload.orphanIds || [] };
@@ -2037,27 +2508,29 @@ async function refreshDocumentOnce(options) {
       const pendingCitationFormattingApplications = [];
       for (const row of citationRows) {
         const text = payload.citationTexts?.[row.parsed.id];
-        if (text) {
+        if (isUsableCitationText(text)) {
           syncCitationFallbackPlaceholder(
             row.cc,
             row.parsed,
             row.resolved?.style || row.parsed.style || "",
             row.resolved?.ids || row.parsed.ids || []
           );
+          // Skip insertText when the CC already shows the correct text.
+          // For a numeric append-at-end this means only the new CC is written;
+          // for unchanged citations (repeat inserts, non-numeric edits) it
+          // avoids redundant IPC across all n CCs in the document.
+          const currentText = row.cc.id != null ? (ccCurrentTextById.get(row.cc.id) ?? null) : null;
+          if (currentText !== null && text === currentText) continue;
           const citationFormatting = citationFormattingForPayload(payload, row.parsed.id);
-          const citationHtml =
-            shouldInsertCitationAsHTML(citationFormatting)
-            && typeof SwiftLibShared !== "undefined" && typeof SwiftLibShared.citationHtmlFromTextAndFormatting === "function"
-              ? SwiftLibShared.citationHtmlFromTextAndFormatting(text, citationFormatting)
-              : null;
-          const insertedRange = citationHtml
-            ? row.cc.insertHtml(citationHtml, Word.InsertLocation.replace)
-            : row.cc.insertText(text, Word.InsertLocation.replace);
+          const insertedRange = SwiftLibShared.replaceContentControlText(row.cc, text);
+          if (typeof SwiftLibShared !== "undefined" && typeof SwiftLibShared.applyCitationFormattingToInsertedRange === "function") {
+            SwiftLibShared.applyCitationFormattingToInsertedRange(insertedRange, citationFormatting);
+          }
           pendingCitationFormattingApplications.push({
             cc: row.cc,
             insertedRange,
             citationFormatting,
-            usedHtmlFormatting: !!citationHtml,
+            usedHtmlFormatting: false,
           });
         }
       }
@@ -2087,13 +2560,13 @@ async function refreshDocumentOnce(options) {
 
       if (primaryBibCC && (payload.bibliographyHtml || payload.bibliographyText)) {
         trySetPlaceholderEmpty(primaryBibCC);
-        renderBibliographyIntoCC(primaryBibCC, payload.bibliographyText, payload.bibliographyHtml);
+        renderBibliographyIntoCC(primaryBibCC, payload.bibliographyText, payload.bibliographyHtml, bibliographyParagraphStyle);
       }
 
       for (const stale of staleBibCCs) stale.delete(false);
 
       try {
-        await persistSwiftLibStorageInContext(ctx, finalScan, style);
+        await persistSwiftLibStorageInContext(ctx, finalScan, style, null, bibliographyParagraphStyle);
       } catch (persistErr) {
         console.warn("SwiftLib CustomXmlPart persist:", persistErr);
       }
@@ -2105,6 +2578,7 @@ async function refreshDocumentOnce(options) {
         citationIDs: finalScan.citations.map((c) => c.citationID),
         orphanIds: payload.orphanIds || [],
         scan: finalScan,
+        deferredBibliographyRefresh: trustInitialScan && finalScan.bibControls.length > 0,
       };
     });
 
@@ -2132,6 +2606,9 @@ async function refreshDocumentOnce(options) {
 
     // v4: show orphan banner if any citations were rendered from embedded snapshot
     updateOrphanBanner(result.orphanIds || []);
+    if (result.deferredBibliographyRefresh) {
+      scheduleDeferredBibliographyRefresh();
+    }
 
     // Use the scan data already collected during refresh to avoid redundant Word.run calls.
     if (result.scan) {
@@ -2315,9 +2792,9 @@ function onRelinkOrphan(orphanId, label) {
   }
 }
 
-function renderBibliographyIntoCC(cc, bibliographyText, bibliographyHtml) {
-  // Always use plain-text paragraph insertion so we can force Word.Style.normal
-  // on every entry, regardless of the cursor's surrounding heading style.
+function renderBibliographyIntoCC(cc, bibliographyText, bibliographyHtml, paragraphStyle) {
+  // Always use plain-text paragraph insertion so each entry receives the selected
+  // Word paragraph style rather than inheriting the cursor's surrounding style.
   // (insertHtml is intentionally avoided: it inherits the ambient paragraph style
   //  and carries citeproc-js wrapper divs that Word renders unpredictably.)
   //
@@ -2333,7 +2810,7 @@ function renderBibliographyIntoCC(cc, bibliographyText, bibliographyHtml) {
     const para = last
       ? last.insertParagraph(entries[i], Word.InsertLocation.after)
       : cc.insertParagraph(entries[i], Word.InsertLocation.start);
-    try { para.styleBuiltIn = Word.Style.normal; } catch (_) {}
+    applyBibliographyParagraphStyle(para, paragraphStyle);
     last = para;
   }
 }
@@ -2425,7 +2902,7 @@ async function search(query) {
   const trimmed = query.trim();
   if (!trimmed) {
     clearSearchResultsPlaceholder();
-    if (state.shouldRefocusSearch) focusSearchInput();
+    if (state.shouldRefocusSearch) focusSearchInput({ onlyIfPending: true });
     return;
   }
 
@@ -2444,7 +2921,7 @@ async function search(query) {
     renderEmpty("无法连接 SwiftLib。");
   }
 
-  if (state.shouldRefocusSearch) focusSearchInput();
+  if (state.shouldRefocusSearch) focusSearchInput({ onlyIfPending: true });
 }
 
 const REF_TYPE_LABELS = {
@@ -2684,11 +3161,47 @@ async function runPrimaryAction() {
 // Utilities
 // ---------------------------------------------------------------------------
 
+function scheduleDeferredBibliographyRefresh() {
+  if (deferredBibliographyRefreshTimer) {
+    clearTimeout(deferredBibliographyRefreshTimer);
+  }
+  deferredBibliographyRefreshTimer = setTimeout(() => {
+    deferredBibliographyRefreshTimer = null;
+    if (refreshDocumentBusy || upsertCitationBusy) {
+      scheduleDeferredBibliographyRefresh();
+      return;
+    }
+    refreshDocument({ skipGhostCleanup: true }).catch((error) => {
+      console.warn("SwiftLib deferred bibliography refresh:", error);
+    });
+  }, 900);
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const opts = options ? { ...options } : {};
+  let timer = null;
+  if (controller) {
+    opts.signal = controller.signal;
+    timer = setTimeout(() => controller.abort(), timeoutMs || DEFAULT_FETCH_TIMEOUT_MS);
+  }
+  try {
+    return await fetch(url, opts);
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      throw new Error("SwiftLib 本地服务响应超时，请确认 SwiftLib 应用正在运行后重试。");
+    }
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function fetchJSON(pathOrUrl, options) {
   const opts = options ? { ...options } : {};
   opts.headers = Object.assign({}, opts.headers || {});
   if (window.__SWIFTLIB_TOKEN) opts.headers["Authorization"] = "Bearer " + window.__SWIFTLIB_TOKEN;
-  const response = await fetch(pathOrUrl, opts);
+  const response = await fetchWithTimeout(pathOrUrl, opts, DEFAULT_FETCH_TIMEOUT_MS);
   if (!response.ok) {
     const fallback = await response.text();
     let message = fallback || `HTTP ${response.status}`;
@@ -2720,11 +3233,12 @@ function setStatus(message, type) {
 
 function requestSearchFocus() {
   state.shouldRefocusSearch = true;
-  focusSearchInput({ preservePending: true });
+  focusSearchInput({ preservePending: true, onlyIfPending: true });
 }
 
 function focusSearchInput(options = {}) {
   window.setTimeout(() => {
+    if (options.onlyIfPending && !state.shouldRefocusSearch) return;
     const input = document.getElementById("searchInput");
     if (!input) return;
     input.focus();
@@ -2732,6 +3246,39 @@ function focusSearchInput(options = {}) {
     input.setSelectionRange(caret, caret);
     if (!options.preservePending) state.shouldRefocusSearch = false;
   }, 0);
+}
+
+function clearSearchFocusRequest() {
+  state.shouldRefocusSearch = false;
+}
+
+function releaseTaskpaneFocusToDocument() {
+  clearSearchFocusRequest();
+  window.setTimeout(() => {
+    const active = document.activeElement;
+    if (active && active !== document.body && typeof active.blur === "function") {
+      active.blur();
+    }
+  }, 0);
+}
+
+function triggerWordFocusBounce() {
+  if (wordFocusBounceInFlight) return;
+  wordFocusBounceInFlight = true;
+  fetchWithTimeout("/api/word/focus-bounce", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(window.__SWIFTLIB_TOKEN ? { "Authorization": "Bearer " + window.__SWIFTLIB_TOKEN } : {}),
+    },
+    body: "{}",
+  }, 1800)
+    .catch((error) => {
+      console.warn("SwiftLib Word focus bounce failed:", error);
+    })
+    .finally(() => {
+      wordFocusBounceInFlight = false;
+    });
 }
 
 function escapeHtml(value) {

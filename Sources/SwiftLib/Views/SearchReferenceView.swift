@@ -2,8 +2,9 @@ import SwiftUI
 import SwiftLibCore
 
 struct SearchOverlay: View {
-    let db: AppDatabase
+    let onSearch: (ReferenceScope, ReferenceFilter, Int) async throws -> [Reference]
     let scope: ReferenceScope
+    let workspaceId: Int64?
     let collections: [Collection]
     @Binding var isPresented: Bool
     let onSelect: (Reference) -> Void
@@ -20,7 +21,6 @@ struct SearchOverlay: View {
     @State private var hasPDF: Bool?
     @State private var yearFrom = ""
     @State private var yearTo = ""
-    @State private var showFilters = false
     @State private var results: [Reference] = []
     @State private var errorMessage: String?
     @State private var searchTask: Task<Void, Never>?
@@ -38,16 +38,6 @@ struct SearchOverlay: View {
         hasPDF != nil || !yearFrom.isEmpty || !yearTo.isEmpty
     }
 
-    private var activeFilterCount: Int {
-        var c = 0
-        if titleOnly { c += 1 }
-        if selectedType != nil { c += 1 }
-        if selectedCollectionId != nil { c += 1 }
-        if hasPDF != nil { c += 1 }
-        if !yearFrom.isEmpty || !yearTo.isEmpty { c += 1 }
-        return c
-    }
-
     private struct FilterState: Equatable {
         var query: String
         var selectedType: ReferenceType?
@@ -63,184 +53,34 @@ struct SearchOverlay: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.opacity(0.3)
-                .ignoresSafeArea()
-                .onTapGesture { close() }
+        GeometryReader { geometry in
+            // Scale the search panel proportionally to the window size while
+            // keeping it comfortably smaller than before.
+            let widthRatio: CGFloat = 0.62
+            let heightRatio: CGFloat = 0.58
+            let panelWidth = min(820, max(460, geometry.size.width * widthRatio))
+            let panelHeight = min(560, max(380, geometry.size.height * heightRatio))
 
-            VStack(spacing: 0) {
-                // Search input
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.secondary)
-                    TextField("搜索文献…", text: $query)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 16))
-                        .focused($isFocused)
-                        .onSubmit {
-                            if isMultiSelectMode {
-                                // In multi-select mode, Enter confirms batch open
-                                openMultiSelected()
-                            } else if let idx = selectedIndex, idx < results.count {
-                                select(results[idx])
-                            } else if let first = results.first {
-                                select(first)
-                            }
-                        }
-                    if !query.isEmpty {
-                        Button { query = "" } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.tertiary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    // Multi-select mode indicator
-                    if isMultiSelectMode {
-                        HStack(spacing: 4) {
-                            Text("\(multiSelection.count) 条已选")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Color.accentColor, in: Capsule())
-                            Button {
-                                clearMultiSelection()
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .transition(.scale.combined(with: .opacity))
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+            ZStack(alignment: .top) {
+                Color.black.opacity(0.42)
+                    .ignoresSafeArea()
+                    .onTapGesture { close() }
 
-                // Filter bar
-                Divider()
-                filterBar
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-
-                // Expanded filters
-                if showFilters {
-                    Divider()
-                    expandedFilters
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                }
-
-                Divider()
-
-                // Results
-                if results.isEmpty {
-                    VStack(spacing: 6) {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(.system(size: 24))
-                            .foregroundStyle(.tertiary)
-                        Text("无匹配结果")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                        if let errorMessage, !errorMessage.isEmpty {
-                            Text(errorMessage)
-                                .font(.caption)
-                                .foregroundStyle(.red)
-                                .multilineTextAlignment(.center)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 120)
-                } else {
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            VStack(spacing: 0) {
-                                if query.isEmpty && !hasActiveFilters {
-                                    Text("最近文献")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(.horizontal, 16)
-                                        .padding(.vertical, 6)
-                                }
-                                ForEach(Array(results.enumerated()), id: \.element.id) { index, ref in
-                                    let refId = ref.id ?? -1
-                                    let isMultiSelected = multiSelection.contains(refId)
-
-                                    SearchResultRow(
-                                        reference: ref,
-                                        isHighlighted: !isMultiSelectMode && selectedIndex == index,
-                                        isMultiSelected: isMultiSelected
-                                    )
-                                    .id(index)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        handleSearchTap(ref: ref, index: index,
-                                            modifiers: NSApp.currentEvent?.modifierFlags ?? [])
-                                    }
-                                    .onHover { hovering in
-                                        if hovering && !isMultiSelectMode { selectedIndex = index }
-                                    }
-                                    .contextMenu {
-                                        if isMultiSelected && multiSelection.count > 1 {
-                                            Button("打开所选 \(multiSelection.count) 条") { openMultiSelected() }
-                                            if onDeleteMultiple != nil {
-                                                Button("删除所选 \(multiSelection.count) 条", role: .destructive) {
-                                                    showDeleteConfirm = true
-                                                }
-                                            }
-                                            Divider()
-                                            Button("取消多选") { clearMultiSelection() }
-                                        } else {
-                                            Button("打开") { select(ref) }
-                                            if onDeleteMultiple != nil {
-                                                Button("删除", role: .destructive) {
-                                                    onDeleteMultiple?([ref])
-                                                }
-                                            }
-                                            Divider()
-                                            Button("⌘+点击可多选") {}.disabled(true)
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(.vertical, 4)
-                        }
-                        .swiftLibElegantScrollers()
-                        .frame(maxHeight: 360)
-                        .onChange(of: selectedIndex) { _, newValue in
-                            if keyboardNavigated, let idx = newValue {
-                                withAnimation(.easeOut(duration: 0.1)) {
-                                    proxy.scrollTo(idx, anchor: .center)
-                                }
-                                DispatchQueue.main.async { keyboardNavigated = false }
-                            }
-                        }
-                    }
-                }
-
-                // Batch action bar (shown when multi-select is active)
-                if isMultiSelectMode && !multiSelection.isEmpty {
-                    Divider()
-                    batchActionBar
-                }
-
-                // Footer
-                Divider()
-                footer
+                searchPanel
+                    .frame(width: panelWidth, height: panelHeight)
+                    .padding(.top, max(20, geometry.size.height * 0.07))
             }
-            .background(.ultraThickMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .shadow(color: .black.opacity(0.3), radius: 30, y: 10)
-            .frame(width: 560)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.top, 60)
-            .frame(maxHeight: .infinity, alignment: .top)
         }
         .onAppear {
-            isFocused = true
             selectedIndex = 0
             scheduleSearch(immediate: true)
+            // Defer focus to ensure the TextField is fully presented before
+            // requesting first responder; setting @FocusState directly inside
+            // onAppear can be ignored when the overlay is presented as a sheet
+            // or transition.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                isFocused = true
+            }
         }
         .onDisappear {
             searchTask?.cancel()
@@ -283,6 +123,198 @@ struct SearchOverlay: View {
         } message: {
             Text("此操作不可撤销。")
         }
+    }
+
+    private var searchPanel: some View {
+        VStack(spacing: 0) {
+            topSearchBar
+
+            Divider()
+                .opacity(0.55)
+
+            filterBar
+
+            Divider()
+                .opacity(0.45)
+
+            resultsSection
+
+            if isMultiSelectMode && !multiSelection.isEmpty {
+                Divider()
+                    .opacity(0.45)
+                batchActionBar
+            }
+
+            Divider()
+                .opacity(0.55)
+
+            footer
+        }
+        .background(notionSearchBackground)
+        .overlay(notionSearchBorder)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: .black.opacity(0.38), radius: 34, x: 0, y: 22)
+    }
+
+    private var topSearchBar: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 20, weight: .regular))
+                .foregroundStyle(.secondary)
+                .frame(width: 24)
+
+            TextField("在当前工作区中搜索文献…", text: $query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 18, weight: .regular))
+                .focused($isFocused)
+                .onSubmit {
+                    if isMultiSelectMode {
+                        openMultiSelected()
+                    } else if let idx = selectedIndex, idx < results.count {
+                        select(results[idx])
+                    } else if let first = results.first {
+                        select(first)
+                    }
+                }
+
+            if !query.isEmpty {
+                Button { query = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("清除搜索")
+            }
+
+            if isMultiSelectMode {
+                HStack(spacing: 6) {
+                    Text("\(multiSelection.count) 条已选")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                    Button {
+                        clearMultiSelection()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 9)
+                .frame(height: 26)
+                .background(Color.accentColor.opacity(0.14), in: Capsule())
+                .transition(.scale.combined(with: .opacity))
+            }
+
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 56)
+    }
+
+    @ViewBuilder
+    private var resultsSection: some View {
+        if results.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.tertiary)
+                Text("无匹配结果")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.secondary)
+                if let errorMessage, !errorMessage.isEmpty {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 40)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 2) {
+                        if query.isEmpty && !hasActiveFilters {
+                            Text("最近文献")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 18)
+                                .padding(.top, 8)
+                                .padding(.bottom, 4)
+                        }
+
+                        ForEach(Array(results.enumerated()), id: \.element.id) { index, ref in
+                            let refId = ref.id ?? -1
+                            let isMultiSelected = multiSelection.contains(refId)
+
+                            SearchResultRow(
+                                reference: ref,
+                                isHighlighted: !isMultiSelectMode && selectedIndex == index,
+                                isMultiSelected: isMultiSelected
+                            )
+                            .id(index)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                handleSearchTap(
+                                    ref: ref,
+                                    index: index,
+                                    modifiers: NSApp.currentEvent?.modifierFlags ?? []
+                                )
+                            }
+                            .onHover { hovering in
+                                if hovering && !isMultiSelectMode { selectedIndex = index }
+                            }
+                            .contextMenu {
+                                if isMultiSelected && multiSelection.count > 1 {
+                                    Button("打开所选 \(multiSelection.count) 条") { openMultiSelected() }
+                                    if onDeleteMultiple != nil {
+                                        Button("删除所选 \(multiSelection.count) 条", role: .destructive) {
+                                            showDeleteConfirm = true
+                                        }
+                                    }
+                                    Divider()
+                                    Button("取消多选") { clearMultiSelection() }
+                                } else {
+                                    Button("打开") { select(ref) }
+                                    if onDeleteMultiple != nil {
+                                        Button("删除", role: .destructive) {
+                                            onDeleteMultiple?([ref])
+                                        }
+                                    }
+                                    Divider()
+                                    Button("⌘+点击可多选") {}.disabled(true)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .swiftLibElegantScrollers()
+                .onChange(of: selectedIndex) { _, newValue in
+                    if keyboardNavigated, let idx = newValue {
+                        withAnimation(.easeOut(duration: 0.1)) {
+                            proxy.scrollTo(idx, anchor: .center)
+                        }
+                        DispatchQueue.main.async { keyboardNavigated = false }
+                    }
+                }
+            }
+        }
+    }
+
+    private var notionSearchBackground: some View {
+        RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .fill(.ultraThickMaterial)
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor).opacity(0.72))
+            )
+    }
+
+    private var notionSearchBorder: some View {
+        RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .strokeBorder(Color(nsColor: .separatorColor).opacity(0.72), lineWidth: 1)
     }
 
     // MARK: - Batch action bar
@@ -329,7 +361,7 @@ struct SearchOverlay: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(Color.accentColor.opacity(0.06))
+        .background(Color.accentColor.opacity(0.08))
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
@@ -376,122 +408,80 @@ struct SearchOverlay: View {
         .font(.caption2)
         .foregroundStyle(.tertiary)
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .frame(height: 38)
     }
 
     // MARK: - Filter bar
 
     private var filterBar: some View {
-        HStack(spacing: 6) {
-            FilterPill(
-                icon: "character.cursor.ibeam",
-                label: "仅标题",
-                isActive: titleOnly
-            ) {
-                titleOnly.toggle()
-            }
-
-            FilterPillMenu(icon: "doc.on.doc", label: typeLabel) {
-                Button("全部类型") { selectedType = nil }
-                Divider()
-                ForEach(ReferenceType.allCases, id: \.self) { type in
-                    Button {
-                        selectedType = type
-                    } label: {
-                        Label(type.rawValue, systemImage: type.icon)
-                    }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                FilterPill(
+                    icon: "textformat",
+                    label: "仅搜索标题",
+                    isActive: titleOnly
+                ) {
+                    titleOnly.toggle()
                 }
-            }
 
-            if !collections.isEmpty {
-                FilterPillMenu(icon: "folder", label: collectionLabel) {
-                    Button("全部分组") { selectedCollectionId = nil }
+                FilterPillMenu(icon: "doc.text", label: typeLabel) {
+                    Button("全部类型") { selectedType = nil }
                     Divider()
-                    ForEach(collections) { col in
+                    ForEach(ReferenceType.allCases, id: \.self) { type in
                         Button {
-                            selectedCollectionId = col.id
+                            selectedType = type
                         } label: {
-                            Label(col.name, systemImage: col.icon)
+                            Label(type.rawValue, systemImage: type.icon)
                         }
                     }
                 }
-            }
 
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    showFilters.toggle()
-                }
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 10))
-                    Text("筛选")
-                    if activeFilterCount > 0 {
-                        Text("(\(activeFilterCount))")
+                if !collections.isEmpty {
+                    FilterPillMenu(icon: "folder", label: collectionLabel) {
+                        Button("全部分组") { selectedCollectionId = nil }
+                        Divider()
+                        ForEach(collections) { col in
+                            Button {
+                                selectedCollectionId = col.id
+                            } label: {
+                                Label(col.name, systemImage: col.icon)
+                            }
+                        }
                     }
                 }
-                .font(.system(size: 12))
-                .foregroundStyle(showFilters ? .primary : .secondary)
-                .padding(.horizontal, 8)
-                .frame(height: 24)
-                .background(showFilters ? Color.accentColor.opacity(0.15) : Color.clear)
-                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-            }
-            .buttonStyle(.plain)
 
-            Spacer()
-
-            if hasActiveFilters {
-                Button {
-                    clearFilters()
-                } label: {
-                    Text("清除")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                FilterPill(
+                    icon: "paperclip",
+                    label: pdfLabel,
+                    isActive: hasPDF != nil
+                ) {
+                    hasPDF = hasPDF == true ? nil : true
                 }
-                .buttonStyle(.plain)
-            }
-        }
-    }
 
-    // MARK: - Expanded filters
+                YearRangePill(
+                    yearFrom: $yearFrom,
+                    yearTo: $yearTo,
+                    label: yearLabel
+                )
 
-    private var expandedFilters: some View {
-        VStack(spacing: 10) {
-            // Has PDF
-            HStack(spacing: 8) {
-                Image(systemName: "paperclip")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16)
-                    .font(.caption)
-                Picker("PDF", selection: $hasPDF) {
-                    Text("不限").tag(nil as Bool?)
-                    Text("有 PDF").tag(true as Bool?)
-                    Text("无 PDF").tag(false as Bool?)
+                if hasActiveFilters {
+                    Button {
+                        clearFilters()
+                    } label: {
+                        Text("清除")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 10)
+                            .frame(height: 26)
+                            .background(Color.primary.opacity(0.045), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 200)
-                Spacer()
             }
-
-            // Year range
-            HStack(spacing: 8) {
-                Image(systemName: "calendar")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16)
-                    .font(.caption)
-                TextField("起始年份", text: $yearFrom)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 80)
-                Text("—")
-                    .foregroundStyle(.tertiary)
-                TextField("结束年份", text: $yearTo)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 80)
-                Spacer()
-            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
         }
+        .frame(height: 48)
     }
 
     // MARK: - Helpers
@@ -505,7 +495,28 @@ struct SearchOverlay: View {
            let col = collections.first(where: { $0.id == id }) {
             return col.name
         }
-        return "分组"
+        return "在分组中"
+    }
+
+    private var pdfLabel: String {
+        switch hasPDF {
+        case true:
+            return "有 PDF"
+        case false:
+            return "无 PDF"
+        case nil:
+            return "PDF"
+        }
+    }
+
+    private var yearLabel: String {
+        if yearFrom.isEmpty && yearTo.isEmpty {
+            return "年份"
+        }
+        let from = yearFrom.isEmpty ? "…" : yearFrom
+        let to = yearTo.isEmpty ? "…" : yearTo
+        if from == to { return from }
+        return "\(from) – \(to)"
     }
 
     private func clearFilters() {
@@ -533,20 +544,10 @@ struct SearchOverlay: View {
     private func runSearch() async {
         let limit = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasActiveFilters ? 20 : 0
         let filter = buildFilter()
-        let db = self.db
         let scope = self.scope
 
         do {
-            let fetched: [Reference] = try await withCheckedThrowingContinuation { continuation in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    do {
-                        let refs = try db.fetchReferences(scope: scope, filter: filter, limit: limit)
-                        continuation.resume(returning: refs)
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                }
-            }
+            let fetched = try await onSearch(scope, filter, limit)
             guard !Task.isCancelled else { return }
             results = fetched
             errorMessage = nil
@@ -565,6 +566,7 @@ struct SearchOverlay: View {
         filter.titleOnly = titleOnly
         filter.yearFrom = Int(yearFrom)
         filter.yearTo = Int(yearTo)
+        filter.workspaceId = workspaceId
         return filter
     }
 
@@ -665,15 +667,15 @@ private struct FilterPill: View {
     private var pillContent: some View {
         HStack(spacing: 4) {
             Image(systemName: icon)
-                .font(.system(size: 10))
+                .font(.system(size: 12, weight: .medium))
             Text(label)
         }
-        .font(.system(size: 12))
-        .foregroundStyle(isActive ? .primary : .secondary)
-        .padding(.horizontal, 8)
-        .frame(height: 24)
-        .background(isActive ? Color.accentColor.opacity(0.15) : Color.primary.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .font(.system(size: 13, weight: .medium))
+        .foregroundStyle(isActive ? Color.accentColor : .secondary)
+        .padding(.horizontal, 10)
+        .frame(height: 26)
+        .background(isActive ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.045), in: Capsule())
+        .contentShape(Capsule())
     }
 }
 
@@ -688,20 +690,179 @@ private struct FilterPillMenu<Content: View>: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: icon)
-                    .font(.system(size: 10))
+                    .font(.system(size: 12, weight: .medium))
                 Text(label)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 7, weight: .semibold))
+                    .font(.system(size: 8, weight: .semibold))
             }
-            .font(.system(size: 12))
+            .font(.system(size: 13, weight: .medium))
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .frame(height: 24)
-            .background(Color.primary.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .background(Color.primary.opacity(0.045), in: Capsule())
+            .contentShape(Capsule())
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+    }
+}
+
+// MARK: - Year range pill (modern web-style)
+
+private struct YearRangePill: View {
+    @Binding var yearFrom: String
+    @Binding var yearTo: String
+    let label: String
+
+    @State private var isPresented = false
+
+    private var isActive: Bool {
+        !yearFrom.isEmpty || !yearTo.isEmpty
+    }
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "calendar")
+                    .font(.system(size: 12, weight: .medium))
+                Text(label)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(isActive ? Color.accentColor : .secondary)
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .background(isActive ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.045), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            YearRangePopover(
+                yearFrom: $yearFrom,
+                yearTo: $yearTo
+            )
+        }
+    }
+}
+
+private struct YearRangePopover: View {
+    @Binding var yearFrom: String
+    @Binding var yearTo: String
+
+    @FocusState private var focusedField: Field?
+
+    private enum Field { case from, to }
+
+    private var currentYear: Int {
+        Calendar.current.component(.year, from: Date())
+    }
+
+    private var presets: [(label: String, from: Int, to: Int)] {
+        [
+            ("今年", currentYear, currentYear),
+            ("近 3 年", currentYear - 2, currentYear),
+            ("近 5 年", currentYear - 4, currentYear),
+            ("近 10 年", currentYear - 9, currentYear),
+            ("近 20 年", currentYear - 19, currentYear)
+        ]
+    }
+
+    private var hasValue: Bool {
+        !yearFrom.isEmpty || !yearTo.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("发表年份")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                if hasValue {
+                    Button {
+                        yearFrom = ""
+                        yearTo = ""
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.counterclockwise")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("重置")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            // Custom inputs
+            HStack(spacing: 10) {
+                yearField(text: $yearFrom, placeholder: "起始", field: .from)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                yearField(text: $yearTo, placeholder: "结束", field: .to)
+            }
+
+            // Quick presets
+            VStack(alignment: .leading, spacing: 6) {
+                Text("快捷选项")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .textCase(.uppercase)
+                    .tracking(0.5)
+                HStack(spacing: 6) {
+                    ForEach(presets.indices, id: \.self) { i in
+                        let preset = presets[i]
+                        let selected = yearFrom == String(preset.from) && yearTo == String(preset.to)
+                        Button {
+                            yearFrom = String(preset.from)
+                            yearTo = String(preset.to)
+                        } label: {
+                            Text(preset.label)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(selected ? Color.accentColor : .primary.opacity(0.85))
+                                .padding(.horizontal, 9)
+                                .frame(height: 24)
+                                .background(
+                                    Capsule()
+                                        .fill(selected ? Color.accentColor.opacity(0.15) : Color.primary.opacity(0.06))
+                                )
+                                .overlay(
+                                    Capsule()
+                                        .stroke(selected ? Color.accentColor.opacity(0.4) : Color.clear, lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+        }
+        .padding(16)
+        .frame(width: 340)
+    }
+
+    private func yearField(text: Binding<String>, placeholder: String, field: Field) -> some View {
+        TextField(placeholder, text: text)
+            .textFieldStyle(.plain)
+            .font(.system(size: 15, weight: .medium, design: .rounded))
+            .multilineTextAlignment(.center)
+            .focused($focusedField, equals: field)
+            .padding(.horizontal, 8)
+            .frame(height: 36)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(focusedField == field ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.08), lineWidth: 1)
+            )
+            .animation(.easeInOut(duration: 0.15), value: focusedField)
     }
 }
 
@@ -728,7 +889,7 @@ private struct SearchResultRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             ZStack {
                 if isMultiSelected {
                     Image(systemName: "checkmark.circle.fill")
@@ -742,18 +903,18 @@ private struct SearchResultRow: View {
                         .transition(.opacity)
                 }
             }
-            .frame(width: 22, height: 22)
+            .frame(width: 24, height: 24)
             .animation(.easeInOut(duration: 0.15), value: isMultiSelected)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(reference.title)
-                    .font(.system(.callout, weight: .medium))
+                Text(reference.title.decodingHTMLEntities())
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
 
                 if !metaLine.isEmpty {
                     Text(metaLine)
-                        .font(.caption)
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -767,9 +928,13 @@ private struct SearchResultRow: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
-        .background(rowBackground)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(rowBackground)
+        )
+        .padding(.horizontal, 10)
         .contentShape(Rectangle())
         .animation(.easeInOut(duration: 0.12), value: isMultiSelected)
     }
@@ -794,11 +959,11 @@ private struct KeyboardHint: View {
         HStack(spacing: 2) {
             ForEach(symbols, id: \.self) { symbol in
                 Text(symbol)
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-                    .background(Color.primary.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .padding(.horizontal, 5)
+                    .frame(height: 18)
+                    .background(Color.primary.opacity(0.075))
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             }
         }
     }

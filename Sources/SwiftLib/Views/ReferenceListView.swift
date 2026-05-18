@@ -11,10 +11,14 @@ import SwiftLibCore
 struct ReferenceListView: View {
     let references: [ReferenceListRow]
     let collections: [Collection]
+    let workspaces: [Workspace]
+    let currentWorkspaceID: Int64?
     let selectedId: Int64?
     let onSelect: (Int64) -> Void
     let onDelete: (Set<Int64>) -> Void
     let onMove: (Set<Int64>, Int64?) -> Void
+    let onAddToWorkspace: (Set<Int64>, Int64) -> Void
+    let onRemoveFromWorkspace: (Set<Int64>, Int64) -> Void
     let onRefreshMetadata: (Set<Int64>) -> Void
     var isRefreshingMetadata = false
     var onDoubleClick: ((Int64) -> Void)? = nil
@@ -24,15 +28,16 @@ struct ReferenceListView: View {
     // Table-native selection. Optional Int64 because ReferenceListRow.id is Int64?.
     @State private var tableSelection: Set<Int64?> = []
 
-    // Sort order persisted in the scene. Defaults to most-recently-added first.
-    @State private var sortOrder: [KeyPathComparator<ReferenceListRow>] = [
-        KeyPathComparator(\ReferenceListRow.dateAdded, order: .reverse)
-    ]
-
     // Column visibility / ordering / width. Stored per-scene so it persists
     // across relaunches but doesn't leak between different windows.
     @SceneStorage("ReferenceListView.tableColumnCustomization")
     private var tableCustomization: TableColumnCustomization<ReferenceListRow>
+
+    // Sort order — bound to Table so clicking headers updates it.
+    // Default: dateAdded descending (newest first).
+    @State private var sortOrder: [KeyPathComparator<ReferenceListRow>] = [
+        KeyPathComparator(\ReferenceListRow.dateAdded, order: .reverse)
+    ]
 
     // Delete confirmation
     @State private var showDeleteConfirm = false
@@ -146,12 +151,15 @@ struct ReferenceListView: View {
                         .frame(width: 14, alignment: .center)
                         .help(ref.referenceType.rawValue)
 
-                    Text(ref.title)
+                    Text(ref.title.decodingHTMLEntities())
                         .font(.system(.callout, weight: .medium))
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                .onAppear { onLoadMore?(ref) }
+                .onAppear {
+                    guard let onLoadMore else { return }
+                    DispatchQueue.main.async { onLoadMore(ref) }
+                }
             }
             .width(min: 180, ideal: 260)
             .customizationID("title")
@@ -218,6 +226,7 @@ struct ReferenceListView: View {
                 onDoubleClick?(only)
             }
         }
+        .animation(.none, value: sortOrder)
         .swiftLibElegantScrollers()
     }
 
@@ -232,6 +241,7 @@ struct ReferenceListView: View {
             .disabled(isRefreshingMetadata)
             Divider()
             moveToCollectionMenu(ids: ids)
+            workspaceMenu(ids: ids)
             Divider()
             Button("删除所选 \(ids.count) 条", role: .destructive) {
                 pendingDeleteIDs = ids
@@ -248,6 +258,7 @@ struct ReferenceListView: View {
             }
             Divider()
             moveToCollectionMenu(ids: [only])
+            workspaceMenu(ids: [only])
             Divider()
             Button("删除", role: .destructive) {
                 pendingDeleteIDs = [only]
@@ -265,6 +276,32 @@ struct ReferenceListView: View {
             if !collections.isEmpty { Divider() }
             ForEach(collections) { col in
                 Button(col.name) { onMove(ids, col.id) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func workspaceMenu(ids: Set<Int64>) -> some View {
+        let editableWorkspaces = workspaces.filter { $0.kind != .all && $0.id != nil }
+        Menu("添加到工作区…") {
+            if editableWorkspaces.isEmpty {
+                Button("暂无工作区") {}
+                    .disabled(true)
+            } else {
+                ForEach(editableWorkspaces) { workspace in
+                    Button(workspace.name) {
+                        if let workspaceId = workspace.id {
+                            onAddToWorkspace(ids, workspaceId)
+                        }
+                    }
+                }
+            }
+        }
+
+        if let currentWorkspaceID,
+           workspaces.first(where: { $0.id == currentWorkspaceID })?.kind != .all {
+            Button("从当前工作区移除") {
+                onRemoveFromWorkspace(ids, currentWorkspaceID)
             }
         }
     }

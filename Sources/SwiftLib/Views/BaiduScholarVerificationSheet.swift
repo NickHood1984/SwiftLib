@@ -102,11 +102,17 @@ private struct BaiduScholarVerificationWebView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.customUserAgent = ReaderExtractionManager.safariLikeUserAgent
         webView.navigationDelegate = context.coordinator
+        DispatchQueue.main.async {
+            webView.applySwiftLibElegantScrollersRecursively(forceVerticalScroller: true)
+        }
         webView.load(URLRequest(url: url))
         return webView
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
+        DispatchQueue.main.async {
+            nsView.applySwiftLibElegantScrollersRecursively(forceVerticalScroller: true)
+        }
         guard nsView.url?.absoluteString != url.absoluteString else { return }
         nsView.load(URLRequest(url: url))
     }
@@ -123,6 +129,7 @@ private struct BaiduScholarVerificationWebView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.applySwiftLibElegantScrollersRecursively(forceVerticalScroller: true)
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 let script = #"""

@@ -193,6 +193,7 @@ struct BatchImportView: View {
             }
         }
         .frame(width: 680, height: 540)
+        .swiftLibElegantScrollersInSubtree()
     }
 
     private var identifiers: [String] {

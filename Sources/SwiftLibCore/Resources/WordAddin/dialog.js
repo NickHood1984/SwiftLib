@@ -1,6 +1,7 @@
 /* global Office */
 
 const DIALOG_SERVER = "";
+const DIALOG_FETCH_TIMEOUT_MS = 8000;
 
 const dlgState = {
   selectedIds: new Set(),
@@ -24,9 +25,29 @@ function escapeHtml(s) {
 async function fetchJSON(path) {
   const headers = {};
   if (window.__SWIFTLIB_TOKEN) headers["Authorization"] = "Bearer " + window.__SWIFTLIB_TOKEN;
-  const resp = await fetch(DIALOG_SERVER + path, { headers });
+  const resp = await fetchWithTimeout(DIALOG_SERVER + path, { headers }, DIALOG_FETCH_TIMEOUT_MS);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const opts = options ? { ...options } : {};
+  let timer = null;
+  if (controller) {
+    opts.signal = controller.signal;
+    timer = setTimeout(() => controller.abort(), timeoutMs || DIALOG_FETCH_TIMEOUT_MS);
+  }
+  try {
+    return await fetch(url, opts);
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      throw new Error("SwiftLib 本地服务响应超时，请确认 SwiftLib 应用正在运行后重试。");
+    }
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function sendToParent(obj) {

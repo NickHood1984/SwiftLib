@@ -70,43 +70,54 @@ final class NewBackendIntegrationTests: XCTestCase {
         """)
     }
 
-    // MARK: - BaiduScholarService
+    // MARK: - Chinese journal browser aggregation
 
-    /// 搜索一篇经典中文论文（题目精确）。
-    /// 注意：百度学术有 anti-bot 机制，在命令行测试环境下可能返回安全验证页。
-    /// 在真实 macOS App 中 WKWebView 有完整 Cookie，通过率更高。
-    func testBaiduScholarSearchExactTitle() async {
-        let title = "卷积神经网络研究综述"
-        let result = await BaiduScholarService.search(title: title, author: nil)
-
-        // 不强制断言 notNil：命令行测试环境下 anti-bot 可能拦截，真实 App 才完整测试
-        if let ref = result {
-            XCTAssertFalse(ref.title.isEmpty)
+    func testWanfangSearchExactTitle() async {
+        let seed = MetadataResolutionSeed(
+            fileName: "近百年来枝角类群落响应洱海营养水平、外来鱼类引入以及水生植被变化的特征",
+            title: "近百年来枝角类群落响应洱海营养水平、外来鱼类引入以及水生植被变化的特征",
+            firstAuthor: "卢慧斌",
+            languageHint: .chinese,
+            workKindHint: .journalArticle
+        )
+        let outcome = await ChineseJournalBrowserSearchService.search(channel: .wanfang, seed: seed)
+        switch outcome {
+        case .candidates(let candidates):
+            XCTAssertFalse(candidates.isEmpty)
             print("""
-            \n✅ [百度学术] \(ref.title)
-               作者: \(ref.authors.map { $0.family }.joined(separator: ", "))
-               期刊: \(ref.journal ?? "-")  年份: \(ref.year.map(String.init) ?? "-")
-               来源: \(ref.metadataSource?.displayName ?? "-")
+            \n✅ [万方] \(candidates.first?.title ?? "-")
+               作者: \(candidates.first?.authors.displayString ?? "-")
+               期刊: \(candidates.first?.journal ?? "-")  年份: \(candidates.first?.year.map(String.init) ?? "-")
             """)
-        } else {
-            print("\nℹ️ [百度学术] 未获取结果（可能被 anti-bot 拦截，在真实 App 中应正常工作）")
+        case .blockedByVerification:
+            print("\n⚠️ [万方] 被安全验证或访问拦截")
+        case .noResult:
+            print("\nℹ️ [万方] 未获取结果")
         }
     }
 
-    /// 标题 + 作者组合搜索
-    func testBaiduScholarSearchWithAuthor() async {
-        let title = "深度学习"
-        let author = "LeCun"
-        let result = await BaiduScholarService.search(title: title, author: author)
-        // 结果可能为 nil（标题太短，容忍 nil）
-        if let ref = result {
+    func testVIPSearchExactTitle() async {
+        let seed = MetadataResolutionSeed(
+            fileName: "近百年来枝角类群落响应洱海营养水平、外来鱼类引入以及水生植被变化的特征",
+            title: "近百年来枝角类群落响应洱海营养水平、外来鱼类引入以及水生植被变化的特征",
+            firstAuthor: "卢慧斌",
+            languageHint: .chinese,
+            workKindHint: .journalArticle
+        )
+        let outcome = await ChineseJournalBrowserSearchService.search(channel: .vip, seed: seed)
+        switch outcome {
+        case .candidates(let candidates):
+            XCTAssertFalse(candidates.isEmpty)
             print("""
-            \n✅ [百度学术+作者] \(ref.title)
-               作者: \(ref.authors.map { $0.family }.joined(separator: ", "))
-               期刊: \(ref.journal ?? "-")  年份: \(ref.year.map(String.init) ?? "-")
+            \n✅ [维普] \(candidates.first?.title ?? "-")
+               作者: \(candidates.first?.authors.displayString ?? "-")
+               期刊: \(candidates.first?.journal ?? "-")  年份: \(candidates.first?.year.map(String.init) ?? "-")
             """)
-        } else {
-            print("\nℹ️ [百度学术+作者] 未找到匹配结果（可能被限流或相似度不足）")
+        case .blockedByVerification:
+            print("\n⚠️ [维普] 被安全验证或访问拦截")
+        case .noResult:
+            print("\nℹ️ [维普] 未获取结果")
         }
     }
+
 }

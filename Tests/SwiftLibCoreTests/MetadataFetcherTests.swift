@@ -124,6 +124,37 @@ final class MetadataFetcherTests: XCTestCase {
         XCTAssertEqual(reference.authors[1].family, "Johnson")
     }
 
+    func testParseCSLJSONResponseMapsDOIFallbackMetadata() throws {
+        let json = """
+        {
+          "type": "article-journal",
+          "title": "Fallback Paper",
+          "author": [
+            {"family": "Carpenter", "given": "S R"},
+            {"family": "Vander Zanden", "given": "M J"}
+          ],
+          "issued": {"date-parts": [[2025, 4, 1]]},
+          "container-title": "Aquatic Ecology",
+          "volume": "59",
+          "issue": "2",
+          "page": "101-112",
+          "DOI": "10.1080/example"
+        }
+        """.data(using: .utf8)!
+
+        let reference = try MetadataFetcher.parseCSLJSONResponse(json, doi: "10.1080/example")
+
+        XCTAssertEqual(reference.title, "Fallback Paper")
+        XCTAssertEqual(reference.authors, [
+            AuthorName(given: "S R", family: "Carpenter"),
+            AuthorName(given: "M J", family: "Vander Zanden"),
+        ])
+        XCTAssertEqual(reference.year, 2025)
+        XCTAssertEqual(reference.journal, "Aquatic Ecology")
+        XCTAssertEqual(reference.pages, "101-112")
+        XCTAssertEqual(reference.referenceType, .journalArticle)
+    }
+
     func testParseCrossrefResponseHandlesOrganizationAuthor() throws {
         // CrossRef sometimes has organization names in "name" field
         let json = """

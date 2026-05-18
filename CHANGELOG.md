@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v1.4.0 — 2026-05-18
+
+### 新增
+
+- 新增工作区（Workspace）模型：支持 all、manual、smart、hybrid 四种类型，持久化记录 sidebar 选区、搜索文本、列可见性及布局快照，可同时维护多个研究上下文。
+- 新增万方数据与维普（VIP）期刊平台浏览器检索通道，作为 CNKI 的平行中文期刊元数据来源，支持候选结果排序与相似度过滤。
+- CLI 新增三个 DOCX 命令：`refresh-docx`（刷新 .docx 引文编号与参考文献表）、`docx-audit`（检查引文与文献库一致性）、`prune-unused`（按 .docx 正文引用裁剪文献库未使用条目）。
+- Word 插件新增简体中文 CSL 语言包（zh-CN），补齐中英混排引文的术语、日期格式与标点输出。
+- 新增 `HiddenWKWebViewMediaGuard`：为后台隐藏 WKWebView 统一注入媒体静音与自动播放拦截脚本，防止意外触发摄像头/麦克风权限弹窗。
+
+### 清理
+
+- 重构元数据管线目录：Core metadata 服务从 `SwiftLibCore/Services/` 迁入专用 `SwiftLibCore/Metadata/`；`MetadataFetcher` 拆为 facade + 11 个 source/transport extension，`MetadataResolution` 拆为 facade + 5 个 decision/text extension；数据库入口 `AppDatabase` 拆为 10 个 domain extension。
+- 重构 App target 目录结构：建立 `ViewModels/`、`Views/Readers/`、`Windowing/AIChat/`、`Navigation/`、`Search/`、`DesignSystem/`、`UIInfrastructure/`、`Updates/` 专用目录；CNKI 服务拆为 6 个 provider extension 归入 `Services/CNKI/`；`ChineseMetadata*` 从 App Services 迁入 Core Metadata。
+- AI 助手 DOM 选择器升级至 v11（2026-05-14）：重新探针验证 ChatGPT、DeepSeek、豆包、Kimi 四项服务；ChatGPT 新增对未登录弹窗（`modal-no-auth-login`）的处理说明。
+
 ## v1.3.0 — 2026-04-29
 
 ### 新增

@@ -2,11 +2,19 @@ import SwiftUI
 import PDFKit
 import SwiftLibCore
 
+struct ReferenceDetailSupplementaryData: Sendable {
+    var tags: [Tag]
+    var pdfAnnotationCount: Int
+    var webAnnotationCount: Int
+    var hasStoredWebContent: Bool
+}
+
 struct ReferenceDetailView: View {
     let reference: Reference
     let collections: [Collection]
     let allTags: [Tag]
-    let db: AppDatabase
+    let onLoadSupplementary: (Int64) async -> ReferenceDetailSupplementaryData?
+    let onLoadWebContent: (Int64) async -> String?
     let onSave: (Reference) -> Void
     let onDelete: () -> Void
     var onOpenPDFReader: ((Reference) -> Void)?
@@ -23,11 +31,22 @@ struct ReferenceDetailView: View {
     @State private var isLoadingWebContent = false
     @State private var showTranslatedAbstract: Bool = true
 
-    init(reference: Reference, collections: [Collection], allTags: [Tag], db: AppDatabase, onSave: @escaping (Reference) -> Void, onDelete: @escaping () -> Void, onOpenPDFReader: ((Reference) -> Void)? = nil, onOpenWebReader: ((Reference) -> Void)? = nil) {
+    init(
+        reference: Reference,
+        collections: [Collection],
+        allTags: [Tag],
+        onLoadSupplementary: @escaping (Int64) async -> ReferenceDetailSupplementaryData?,
+        onLoadWebContent: @escaping (Int64) async -> String?,
+        onSave: @escaping (Reference) -> Void,
+        onDelete: @escaping () -> Void,
+        onOpenPDFReader: ((Reference) -> Void)? = nil,
+        onOpenWebReader: ((Reference) -> Void)? = nil
+    ) {
         self.reference = reference
         self.collections = collections
         self.allTags = allTags
-        self.db = db
+        self.onLoadSupplementary = onLoadSupplementary
+        self.onLoadWebContent = onLoadWebContent
         self.onSave = onSave
         self.onDelete = onDelete
         self.onOpenPDFReader = onOpenPDFReader
@@ -48,7 +67,7 @@ struct ReferenceDetailView: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .swiftLibElegantScrollers()
+        .swiftLibElegantScrollersInSubtree()
         .background {
             if !isEditing, reference.pdfPath != nil {
                 quickPreviewShortcut
@@ -66,6 +85,8 @@ struct ReferenceDetailView: View {
                         }
                     }
                 }
+                .keyboardShortcut(.return, modifiers: .command)
+                .accessibilityLabel(isEditing ? "完成编辑" : "编辑文献")
             }
         }
         .onChange(of: reference) { oldRef, newRef in
@@ -101,7 +122,7 @@ struct ReferenceDetailView: View {
                         .clipShape(Capsule())
                 }
 
-                Text(reference.title)
+                Text(reference.title.decodingHTMLEntities())
                     .font(.title2.bold())
                     .textSelection(.enabled)
 
@@ -760,22 +781,7 @@ struct ReferenceDetailView: View {
             return
         }
 
-        struct Payload: Sendable {
-            var tags: [Tag]
-            var pdfAnnotationCount: Int
-            var webAnnotationCount: Int
-            var hasStoredWebContent: Bool
-        }
-
-        let payload = await Task.detached(priority: .userInitiated) { [db] in
-            Payload(
-                tags: (try? db.fetchTags(forReference: referenceID)) ?? [],
-                pdfAnnotationCount: (try? db.annotationCount(referenceId: referenceID)) ?? 0,
-                webAnnotationCount: (try? db.webAnnotationCount(referenceId: referenceID)) ?? 0,
-                hasStoredWebContent: (try? db.hasWebContent(id: referenceID)) ?? false
-            )
-        }.value
-
+        guard let payload = await onLoadSupplementary(referenceID) else { return }
         guard !Task.isCancelled, reference.id == referenceID else { return }
         referenceTags = payload.tags
         pdfAnnotationCount = payload.pdfAnnotationCount
@@ -789,9 +795,7 @@ struct ReferenceDetailView: View {
         }
 
         isLoadingWebContent = true
-        let webContent = await Task.detached(priority: .userInitiated) { [db] in
-            try? db.fetchWebContent(id: referenceID)
-        }.value
+        let webContent = await onLoadWebContent(referenceID)
 
         guard !Task.isCancelled, reference.id == referenceID else { return }
         isLoadingWebContent = false
@@ -813,9 +817,7 @@ struct ReferenceDetailView: View {
             return prepared
         }
 
-        let webContent = await Task.detached(priority: .userInitiated) { [db] in
-            try? db.fetchWebContent(id: referenceID)
-        }.value
+        let webContent = await onLoadWebContent(referenceID)
 
         guard !Task.isCancelled, reference.id == referenceID else { return nil }
         var prepared = reference

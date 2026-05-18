@@ -3,7 +3,7 @@ import Combine
 import SwiftLibCore
 
 struct PendingMetadataQueueView: View {
-    let db: AppDatabase
+    let intakesPublisher: AnyPublisher<[MetadataIntake], Never>
     let resolver: MetadataResolver
     let onPersistResult: (MetadataResolutionResult, MetadataIntake) -> Void
     let onConfirmManual: (MetadataIntake) -> Void
@@ -24,13 +24,8 @@ struct PendingMetadataQueueView: View {
                 queueContent
             }
         }
-        .frame(width: 720, height: 520)
-        // 订阅 DB observer，队列变化时自动刷新窗口内容
-        .onReceive(
-            db.observePendingMetadataIntakes()
-                .receive(on: DispatchQueue.main)
-                .replaceError(with: [])
-        ) { items in
+        .frame(minWidth: 720, minHeight: 520)
+        .onReceive(intakesPublisher) { items in
             intakes = items
             // 若当前展开或正在工作的条目已被移出队列，清除其本地状态
             if let expanded = expandedIntakeID,
@@ -186,7 +181,7 @@ private struct IntakeRow: View {
             // ── 条目头部：标题 + 来源角标 + 操作菜单
             HStack(alignment: .top, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(intake.title)
+                    Text(intake.title.decodingHTMLEntities())
                         .font(.headline)
                         .lineLimit(2)
                     // 有候选时在标题下方显示分数/来源，隐藏冗余的状态消息
@@ -375,7 +370,7 @@ private struct CandidateCard: View {
             // 标题行 — 最佳候选已在外层行头展示，此处只在其他候选卡中重复显示
             if !isBest {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(candidate.title)
+                    Text(candidate.title.decodingHTMLEntities())
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(2)

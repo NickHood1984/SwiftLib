@@ -188,8 +188,10 @@ final class WordAddinServer {
             handleStyleDelete(conn, body: body)
         case ("POST", "/api/perf-log"):
             handlePerfLog(conn, body: body)
+        case ("POST", "/api/word/focus-bounce"):
+            handleFocusBounce(conn, bundleIdentifier: "com.microsoft.Word", label: "Word")
         case ("POST", "/api/wps/focus-bounce"):
-            handleWPSFocusBounce(conn)
+            handleFocusBounce(conn, bundleIdentifier: "com.kingsoft.wpsoffice.mac", label: "WPS")
         case ("OPTIONS", _):
             handleOptions(conn)
         case ("GET", _):
@@ -534,21 +536,20 @@ final class WordAddinServer {
         sendJSON(conn, status: 200, json: ["ok": true])
     }
 
-    // MARK: - WPS focus bounce (return keyboard focus to WPS document after task pane action)
-    // Briefly activates SwiftLib itself, then immediately re-activates WPS.
+    // MARK: - Focus bounce (return keyboard focus to host document after task pane action)
+    // Briefly activates System Events, then immediately re-activates the host app.
     // This causes macOS to reassign FirstResponder from the task pane WebView
-    // back to the WPS document area without any visible app-switching to the user.
+    // back to the document area without visible app-switching to the user.
 
-    private func handleWPSFocusBounce(_ conn: NWConnection) {
+    private func handleFocusBounce(_ conn: NWConnection, bundleIdentifier: String, label: String) {
         focusBounceQueue.async { [weak self] in
             guard let self else { conn.cancel(); return }
-            let wpsID = "com.kingsoft.wpsoffice.mac"
             // Use "System Events" as the invisible bounce target — it is a macOS background
             // daemon, always running, has no visible UI, so the user sees nothing flash.
             let script = """
                 tell application "System Events" to activate
                 delay 0.05
-                do shell script "/usr/bin/open -b \(wpsID)"
+                do shell script "/usr/bin/open -b \(bundleIdentifier)"
                 """
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -558,7 +559,9 @@ final class WordAddinServer {
             do {
                 try process.run()
                 process.waitUntilExit()
-            } catch {}
+            } catch {
+                print("SwiftLib \(label) focus bounce failed: \(error.localizedDescription)")
+            }
             self.sendJSON(conn, status: 200, json: ["ok": true])
         }
     }

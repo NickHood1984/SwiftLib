@@ -151,8 +151,13 @@ extension Reference {
         }
 
         // P2 fields
+        // If the user supplied a language, normalize it to a CSL-recognized tag.
+        // Otherwise auto-detect from title (CJK → zh, mostly Latin → en) so that
+        // multilingual styles (e.g. GB/T 7714) can switch "等" / "et al." correctly.
         if let lang = language, !lang.isEmpty {
-            obj["language"] = lang
+            obj["language"] = Self.normalizeCSLLanguageTag(lang) ?? lang
+        } else if let auto = Self.autoDetectCSLLanguage(title: title) {
+            obj["language"] = auto
         }
         if let pm = pmid, !pm.isEmpty {
             obj["PMID"] = pm
@@ -182,5 +187,55 @@ extension Reference {
         let parts = dateStr.split(separator: "-").compactMap { Int($0) }
         guard !parts.isEmpty else { return nil }
         return ["date-parts": [parts]]
+    }
+
+    // MARK: - Language helpers
+
+    /// Best-effort normalization of a user-supplied language string into a BCP-47 tag
+    /// that CSL locales understand (e.g. "中文" / "Chinese" / "zh-CN" → "zh-CN").
+    static func normalizeCSLLanguageTag(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lower = trimmed.lowercased()
+        // Already looks like a BCP-47 tag (e.g. "en", "en-US", "zh-CN")
+        if let regex = try? NSRegularExpression(pattern: #"^[a-z]{2,3}(-[a-z0-9]{2,8})*$"#),
+           regex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil {
+            // Canonicalize the region part to upper-case (zh-cn → zh-CN)
+            let parts = lower.split(separator: "-")
+            if parts.count >= 2 {
+                return ([parts[0].lowercased()] + parts.dropFirst().map { $0.uppercased() }).joined(separator: "-")
+            }
+            return lower
+        }
+        // Common natural-language synonyms
+        let chineseAliases: Set<String> = ["chinese", "中文", "汉语", "中文（简体）", "简体中文", "zh_cn", "zh-cn"]
+        let englishAliases: Set<String> = ["english", "英文", "英语", "en_us", "en-us"]
+        if chineseAliases.contains(lower) { return "zh-CN" }
+        if englishAliases.contains(lower) { return "en-US" }
+        return nil
+    }
+
+    /// Heuristic: detect "en" vs "zh" from title characters.
+    /// Returns nil if the title is empty or ambiguous.
+    static func autoDetectCSLLanguage(title: String) -> String? {
+        let stripped = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !stripped.isEmpty else { return nil }
+        var cjkCount = 0
+        var latinCount = 0
+        for scalar in stripped.unicodeScalars {
+            let v = scalar.value
+            // CJK Unified Ideographs + extensions + Hiragana/Katakana/Hangul
+            if (0x4E00...0x9FFF).contains(v) ||
+               (0x3400...0x4DBF).contains(v) ||
+               (0x20000...0x2A6DF).contains(v) ||
+               (0x3040...0x30FF).contains(v) ||
+               (0xAC00...0xD7AF).contains(v) {
+                cjkCount += 1
+            } else if (v >= 0x41 && v <= 0x5A) || (v >= 0x61 && v <= 0x7A) {
+                latinCount += 1
+            }
+        }
+        if cjkCount == 0 && latinCount == 0 { return nil }
+        return cjkCount > 0 ? "zh-CN" : "en-US"
     }
 }

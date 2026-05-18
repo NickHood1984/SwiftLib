@@ -30,7 +30,7 @@ struct MetadataCandidatePickerView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     let assessment = assessmentByCandidateID[candidate.id]
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(candidate.title)
+                        Text(candidate.title.decodingHTMLEntities())
                             .font(.headline)
                         Spacer(minLength: 0)
                         if candidate.id == candidates.first?.id {
@@ -146,6 +146,7 @@ struct MetadataCandidatePickerView: View {
         }
         .padding(20)
         .frame(minWidth: 720, minHeight: 460)
+        .swiftLibElegantScrollersInSubtree()
         .onAppear {
             selectedCandidateID = candidates.first?.id
         }

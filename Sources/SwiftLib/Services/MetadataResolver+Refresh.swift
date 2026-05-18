@@ -142,22 +142,26 @@ extension MetadataResolver {
         // "Refresh Metadata" expecting a fresh scrape, not a replay of a
         // stale cache entry from a bad earlier parse.
         let forceRefresh = true
+        let includeCrossRef = Self.shouldUseCrossRefForRefresh(reference: reference, seed: seed)
+        if !includeCrossRef {
+            resolverTrace("refreshWithParallelSources -> 中文期刊刷新跳过 Crossref")
+        }
 
         // Determine fetch strategy based on available identifiers
         if let doi = normalizedIdentifier(reference.doi) {
             resolverTrace("refreshWithParallelSources -> DOI 并行抓取: \(doi)")
-            fetchResult = await fetcher.fetchByDOI(doi, forceRefresh: forceRefresh)
+            fetchResult = await fetcher.fetchByDOI(doi, forceRefresh: forceRefresh, includeCrossRef: includeCrossRef)
         } else if let pmid = normalizedIdentifier(reference.pmid) {
             resolverTrace("refreshWithParallelSources -> PMID 标识符抓取: \(pmid)")
-            fetchResult = await fetcher.fetchByIdentifier(.pmid(pmid), forceRefresh: forceRefresh)
+            fetchResult = await fetcher.fetchByIdentifier(.pmid(pmid), forceRefresh: forceRefresh, includeCrossRef: includeCrossRef)
         } else if let isbn = normalizedIdentifier(reference.isbn) {
             resolverTrace("refreshWithParallelSources -> ISBN 标识符抓取: \(isbn)")
-            fetchResult = await fetcher.fetchByIdentifier(.isbn(isbn), forceRefresh: forceRefresh)
+            fetchResult = await fetcher.fetchByIdentifier(.isbn(isbn), forceRefresh: forceRefresh, includeCrossRef: includeCrossRef)
         } else {
             let title = reference.title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty else { return nil }
             resolverTrace("refreshWithParallelSources -> 标题并行搜索: \(title)")
-            fetchResult = await fetcher.fetchByTitle(title, forceRefresh: forceRefresh)
+            fetchResult = await fetcher.fetchByTitle(title, forceRefresh: forceRefresh, includeCrossRef: includeCrossRef)
         }
 
         guard !fetchResult.sources.isEmpty else {
@@ -195,6 +199,35 @@ extension MetadataResolver {
         return .skipped("元数据没有变化。")
     }
 
+    nonisolated static func shouldUseCrossRefForRefresh(reference: Reference, seed: MetadataResolutionSeed) -> Bool {
+        guard seed.shouldSearchCNKI, !MetadataRoutePlanner.isBookLike(seed) else { return true }
+
+        let chineseSources: Set<MetadataSource> = [.cnki, .wanfang, .vip]
+        let source = reference.metadataSource
+        let sourceFromURL = MetadataResolution.metadataSource(for: reference.url, fallback: .translationServer)
+        let sourceFromVerificationURL = MetadataResolution.metadataSource(
+            for: reference.verificationSourceURL,
+            fallback: .translationServer
+        )
+        let hasChineseSource = source.map(chineseSources.contains) == true
+            || chineseSources.contains(sourceFromURL)
+            || chineseSources.contains(sourceFromVerificationURL)
+
+        let hasChineseJournalText = MetadataResolution.containsHanCharacters(reference.journal)
+            || MetadataResolution.containsHanCharacters(seed.journal)
+            || MetadataResolution.containsHanCharacters(reference.title)
+            || MetadataResolution.containsHanCharacters(seed.title)
+
+        let isJournalLike = seed.workKindHint == .journalArticle
+            || MetadataResolution.workKind(for: reference.referenceType) == .journalArticle
+            || reference.journal?.swiftlib_nilIfBlank != nil
+            || seed.journal?.swiftlib_nilIfBlank != nil
+            || reference.issn?.swiftlib_nilIfBlank != nil
+            || seed.issn?.swiftlib_nilIfBlank != nil
+
+        return !(isJournalLike && (hasChineseJournalText || hasChineseSource))
+    }
+
     // MARK: - CNKI Outcome Processing
 
     nonisolated func refreshOutcome(from result: MetadataResolutionResult, original: Reference) async -> ReferenceMetadataRefreshResult {
@@ -202,43 +235,78 @@ extension MetadataResolver {
         case .verified(let envelope):
             var refreshed = MetadataResolution.mergeRefreshedReference(primary: envelope.reference, existing: original)
 
-            // For CNKI-sourced results, still try to add enrichment from OpenAlex/S2
+            // Capture values needed by parallel tasks upfront.
             let doiValue = refreshed.doi
             let titleValue = refreshed.title
+            let abstractMissing = (refreshed.abstract ?? "").isEmpty
+            let journalForRank = refreshed.journal
+            let secretKey = SwiftLibPreferences.easyScholarSecretKey
 
-            // Abstract fallback for Chinese articles that may lack abstracts
-            if (refreshed.abstract ?? "").isEmpty {
-                if let doi = refreshed.doi, !doi.isEmpty {
-                    if let newAbstract = try? await MetadataFetcher.fetchAbstractFromSemanticScholar(doi: doi) {
-                        resolverTrace("refreshOutcome -> 通过 SemanticScholar(DOI) 获取到摘要")
-                        refreshed.abstract = newAbstract
-                    } else if let newAbstract = try? await MetadataFetcher.fetchAbstractFromOpenAlex(doi: doi) {
-                        resolverTrace("refreshOutcome -> 通过 OpenAlex(DOI) 获取到摘要")
-                        refreshed.abstract = newAbstract
+            // ── Parallel enrichment: S2 abstract + OA enrichment + easyScholar ──
+            //
+            // All three are independent of each other and can run concurrently.
+            // `enrichWithOpenAlex` already requests `abstract_inverted_index`, so
+            // `applyEnrichment` fills the abstract automatically as a fallback —
+            // there is no need for a standalone `fetchAbstractFromOpenAlex` call.
+            // S2 is tried only when the DOI is known and the abstract is missing,
+            // because S2 often has a curated abstract that OA lacks.
+            //
+            // Using withTaskGroup (not async let) to match ParallelSourceFetcher
+            // and avoid the swift_task_dealloc crash in Swift 5.9.
+            enum EnrichOutput: @unchecked Sendable {
+                case s2Abstract(String?)
+                case openAlexEnrichment(MetadataFetcher.OpenAlexEnrichment?)
+                case easyScholar(EasyScholarRankResponse?)
+            }
+            var s2Abstract: String? = nil
+            var enrichment: MetadataFetcher.OpenAlexEnrichment? = nil
+            var rankResponse: EasyScholarRankResponse? = nil
+
+            await withTaskGroup(of: EnrichOutput.self) { group in
+                // S2 abstract: only when abstract is missing and DOI is available.
+                if abstractMissing, let doi = doiValue, !doi.isEmpty {
+                    group.addTask {
+                        .s2Abstract(try? await MetadataFetcher.fetchAbstractFromSemanticScholar(doi: doi))
                     }
-                } else if !refreshed.title.isEmpty, let newAbstract = try? await MetadataFetcher.fetchAbstractFromOpenAlex(title: refreshed.title) {
-                    resolverTrace("refreshOutcome -> 通过 OpenAlex(Title) 获取到摘要")
-                    refreshed.abstract = newAbstract
+                }
+
+                // OA enrichment: includes abstract_inverted_index — applyEnrichment
+                // handles the abstract fallback without a second OA round-trip.
+                if let doi = doiValue, !doi.isEmpty {
+                    group.addTask { .openAlexEnrichment(await MetadataFetcher.enrichWithOpenAlex(doi: doi)) }
+                } else if !titleValue.isEmpty {
+                    group.addTask { .openAlexEnrichment(await MetadataFetcher.enrichWithOpenAlex(title: titleValue)) }
+                }
+
+                // easyScholar journal rank: independent of abstract/enrichment.
+                if !secretKey.isEmpty, let journal = journalForRank?.swiftlib_nilIfBlank {
+                    group.addTask { .easyScholar(await MetadataFetcher.enrichWithEasyScholar(journal: journal, secretKey: secretKey)) }
+                }
+
+                for await output in group {
+                    switch output {
+                    case .s2Abstract(let a):          s2Abstract = a
+                    case .openAlexEnrichment(let e):  enrichment = e
+                    case .easyScholar(let r):          rankResponse = r
+                    }
                 }
             }
 
-            // Enrichment: sequential (avoids async let cancellation crash on swift_task_dealloc)
-            let enrichment: MetadataFetcher.OpenAlexEnrichment?
-            if let doi = doiValue, !doi.isEmpty {
-                enrichment = await MetadataFetcher.enrichWithOpenAlex(doi: doi)
-            } else if !titleValue.isEmpty {
-                enrichment = await MetadataFetcher.enrichWithOpenAlex(title: titleValue)
-            } else {
-                enrichment = nil
+            // S2 abstract takes precedence; apply before applyEnrichment so the
+            // OA abstract bundled in enrichment is only used as a further fallback.
+            if let abs = s2Abstract {
+                resolverTrace("refreshOutcome -> 通过 SemanticScholar 获取到摘要")
+                refreshed.abstract = abs
             }
-            refreshed = MetadataResolution.applyEnrichment(enrichment, to: refreshed)
 
-            // easyScholar journal-rank enrichment
-            let secretKey = SwiftLibPreferences.easyScholarSecretKey
-            if !secretKey.isEmpty, let journal = refreshed.journal, !journal.isEmpty {
-                let rankResponse = await MetadataFetcher.enrichWithEasyScholar(journal: journal, secretKey: secretKey)
-                refreshed = MetadataResolution.applyEasyScholarEnrichment(rankResponse, to: refreshed)
+            // applyEnrichment fills topics/keywords/OA/citations/funding and,
+            // when refreshed.abstract is still empty, the OA abstract field.
+            refreshed = MetadataResolution.applyEnrichment(enrichment, to: refreshed)
+            if s2Abstract == nil, abstractMissing, !(refreshed.abstract ?? "").isEmpty {
+                resolverTrace("refreshOutcome -> 通过 OpenAlex 富化数据获取到摘要")
             }
+
+            refreshed = MetadataResolution.applyEasyScholarEnrichment(rankResponse, to: refreshed)
 
             if MetadataResolution.hasMeaningfulRefreshChanges(original: original, refreshed: refreshed) {
                 return .refreshed(refreshed)

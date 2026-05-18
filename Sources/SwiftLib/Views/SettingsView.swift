@@ -20,6 +20,7 @@ struct SettingsView: View {
         .toolbar(removing: .sidebarToggle)
         .toolbar(.hidden)
         .frame(width: 620, height: 440)
+        .swiftLibElegantScrollersInSubtree()
     }
 }
 

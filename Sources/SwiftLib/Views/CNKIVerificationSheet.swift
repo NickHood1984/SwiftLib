@@ -107,11 +107,17 @@ private struct CNKIVerificationWebView: NSViewRepresentable {
         webView.customUserAgent = ReaderExtractionManager.safariLikeUserAgent
         webView.navigationDelegate = context.coordinator
         context.coordinator.webView = webView
+        DispatchQueue.main.async {
+            webView.applySwiftLibElegantScrollersRecursively(forceVerticalScroller: true)
+        }
         webView.load(URLRequest(url: url))
         return webView
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
+        DispatchQueue.main.async {
+            nsView.applySwiftLibElegantScrollersRecursively(forceVerticalScroller: true)
+        }
         guard nsView.url?.absoluteString != url.absoluteString else { return }
         nsView.load(URLRequest(url: url))
     }
@@ -145,6 +151,7 @@ private struct CNKIVerificationWebView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.applySwiftLibElegantScrollersRecursively(forceVerticalScroller: true)
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 let prepared = await prepareResultIfPossible(webView)

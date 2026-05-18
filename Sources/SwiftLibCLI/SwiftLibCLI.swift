@@ -24,6 +24,9 @@ struct SwiftLibCLI: AsyncParsableCommand {
             Styles.self,
             Export.self,
             TagDOCX.self,
+            RefreshDOCX.self,
+            DocxAudit.self,
+            PruneUnused.self,
             CNKIDebug.self,
         ]
     )
@@ -48,6 +51,90 @@ func printJSONError(_ message: String) {
     let obj: [String: String] = ["error": message]
     if let data = try? jsonEncoder.encode(obj), let str = String(data: data, encoding: .utf8) {
         FileHandle.standardError.write(Data((str + "\n").utf8))
+    }
+}
+
+func printProgress(_ message: String) {
+    FileHandle.standardError.write(Data(("[swiftlib-cli] \(message)\n").utf8))
+}
+
+func warnAuthorValidationIssues(_ authors: [AuthorName]) {
+    for issue in AuthorName.validationIssues(in: authors) {
+        printProgress("warning: suspicious author #\(issue.index + 1) '\(issue.displayName)': \(issue.message)")
+    }
+}
+
+private struct CLITimeoutError: LocalizedError {
+    let seconds: TimeInterval
+
+    var errorDescription: String? {
+        "Operation timed out after \(Int(seconds.rounded())) seconds"
+    }
+}
+
+private struct CLIMessageError: LocalizedError {
+    let message: String
+
+    var errorDescription: String? { message }
+}
+
+private func withTimeout<T>(
+    seconds: TimeInterval,
+    operation: @Sendable @escaping () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask {
+            try await operation()
+        }
+        group.addTask {
+            let nanoseconds = UInt64(max(seconds, 0.001) * 1_000_000_000)
+            try await Task.sleep(nanoseconds: nanoseconds)
+            throw CLITimeoutError(seconds: seconds)
+        }
+
+        guard let result = try await group.next() else {
+            throw CLIMessageError(message: "Operation cancelled before producing a result")
+        }
+        group.cancelAll()
+        return result
+    }
+}
+
+private func fetchIdentifierForCLI(_ input: String, timeoutSeconds: TimeInterval) async throws -> Reference {
+    guard timeoutSeconds > 0 else {
+        throw CLIMessageError(message: "--timeout must be greater than 0")
+    }
+
+    guard let identifier = MetadataFetcher.extractIdentifier(from: input) else {
+        throw MetadataFetcher.FetchError.unrecognizedIdentifier
+    }
+
+    switch identifier {
+    case .doi(let doi):
+        printProgress("resolving DOI via Crossref: \(doi)")
+        do {
+            let ref = try await withTimeout(seconds: timeoutSeconds) {
+                try await MetadataFetcher.fetchFromDOI(doi)
+            }
+            printProgress("DOI resolved via Crossref")
+            return ref
+        } catch {
+            printProgress("Crossref lookup failed: \(error.localizedDescription); trying DOI CSL JSON")
+            do {
+                let ref = try await withTimeout(seconds: min(timeoutSeconds, 20)) {
+                    try await MetadataFetcher.fetchFromDOIContentNegotiation(doi)
+                }
+                printProgress("DOI resolved via DOI CSL JSON")
+                return ref
+            } catch {
+                throw CLIMessageError(message: "DOI lookup failed for \(doi): \(error.localizedDescription)")
+            }
+        }
+    default:
+        printProgress("resolving identifier")
+        return try await withTimeout(seconds: timeoutSeconds) {
+            try await MetadataFetcher.fetch(from: input)
+        }
     }
 }
 
@@ -301,11 +388,15 @@ struct Add: AsyncParsableCommand {
     @Option(name: .long, help: "添加到指定分组 ID")
     var collection: Int64?
 
+    @Option(name: .long, help: "网络解析超时秒数")
+    var timeout: Double = 45
+
     func run() async throws {
         if let id = identifier {
-            var ref = try await MetadataFetcher.fetch(from: id)
+            var ref = try await fetchIdentifierForCLI(id, timeoutSeconds: timeout)
             ref.collectionId = collection
             ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: "cli-identifier")
+            warnAuthorValidationIssues(ref.authors)
             try AppDatabase.shared.saveReference(&ref)
             printJSON(ReferenceDTO(from: ref))
         } else if let bib = bibtex {
@@ -317,6 +408,7 @@ struct Add: AsyncParsableCommand {
             var imported: [ReferenceDTO] = []
             for var ref in refs {
                 ref.collectionId = collection
+                warnAuthorValidationIssues(ref.authors)
                 try AppDatabase.shared.saveReference(&ref)
                 imported.append(ReferenceDTO(from: ref))
             }
@@ -404,7 +496,10 @@ struct Update: ParsableCommand {
         }
         if let t = title { ref.title = t }
         if let y = year { ref.year = y }
-        if let a = authors { ref.authors = AuthorName.parseList(a) }
+        if let a = authors {
+            ref.authors = AuthorName.parseList(a)
+            warnAuthorValidationIssues(ref.authors)
+        }
         if let rt = referenceType {
             guard let type = ReferenceType(rawValue: rt) else {
                 let valid = ReferenceType.allCases.map(\.rawValue).joined(separator: ", ")

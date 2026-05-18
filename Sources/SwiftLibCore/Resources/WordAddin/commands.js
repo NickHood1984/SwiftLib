@@ -15,6 +15,9 @@ const CMD_CC_TITLE_BIB = "SwiftLib Bibliography";
 const CMD_CC_TITLE_CITE = "SwiftLib Citation";
 const CMD_SWIFTLIB_XML_NS = "http://swiftlib.com/citations";
 const CMD_MAX_WORD_CC_TAG_LENGTH = 220;
+const CMD_DEFAULT_FETCH_TIMEOUT_MS = 8000;
+const CMD_RENDER_FETCH_TIMEOUT_MS = 20000;
+const CMD_DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE = "Normal";
 
 /** Share with taskpane when SharedRuntime is active; fall back to local store. */
 const cmdPendingCitationPayload = (typeof state !== "undefined" && state.pendingCitationPayload)
@@ -293,6 +296,17 @@ function cmdCitationFormattingForPayload(payload, citationID) {
     : null;
 }
 
+function cmdIsUsableCitationText(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function cmdMissingCitationTextIDs(payload, citations) {
+  const citationTexts = payload?.citationTexts || {};
+  return (citations || [])
+    .map((c) => c.citationID)
+    .filter((id) => id && !cmdIsUsableCitationText(citationTexts[id]));
+}
+
 function cmdShouldInsertCitationAsHTML(formatting) {
   if (!formatting) return false;
   return Object.values(formatting).some((value) => value === true);
@@ -345,10 +359,10 @@ function cmdRangeAfter() {
     : "After";
 }
 
-async function cmdFetchJSON(path, options) {
+async function cmdFetchJSON(path, options, timeoutMs) {
   const opts = options ? { ...options } : {};
   opts.headers = _cmdAuthHeaders(opts.headers);
-  const resp = await fetch(CMD_SERVER + path, opts);
+  const resp = await cmdFetchWithTimeout(CMD_SERVER + path, opts, timeoutMs || CMD_DEFAULT_FETCH_TIMEOUT_MS);
   if (!resp.ok) {
     const fallback = await resp.text();
     let message = fallback || `HTTP ${resp.status}`;
@@ -363,6 +377,26 @@ async function cmdFetchJSON(path, options) {
     throw new Error(message);
   }
   return resp.json();
+}
+
+async function cmdFetchWithTimeout(url, options, timeoutMs) {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const opts = options ? { ...options } : {};
+  let timer = null;
+  if (controller) {
+    opts.signal = controller.signal;
+    timer = setTimeout(() => controller.abort(), timeoutMs || CMD_DEFAULT_FETCH_TIMEOUT_MS);
+  }
+  try {
+    return await fetch(url, opts);
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      throw new Error("SwiftLib 本地服务响应超时，请确认 SwiftLib 应用正在运行后重试。");
+    }
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function cmdGetDefaultStyle() {
@@ -384,16 +418,21 @@ async function cmdCitationKindForStyle(styleId) {
   }
 }
 
-async function cmdFetchRenderPayload(styleId, scanCitations, embeddedItems) {
+async function cmdFetchRenderPayload(styleId, scanCitations, embeddedItems, options) {
   const scan = { citations: scanCitations };
   const kind = await cmdCitationKindForStyle(styleId);
+  const includeBibliography = options?.includeBibliography !== false;
   try {
     if (typeof SwiftLibCiteproc !== "undefined" && SwiftLibCiteproc.renderDocumentPayload) {
-      return await SwiftLibCiteproc.renderDocumentPayload(styleId, scan, {
+      const clientResult = await SwiftLibCiteproc.renderDocumentPayload(styleId, scan, {
         baseURL: CMD_SERVER,
         citationKind: kind,
         embeddedItems: embeddedItems || {},
+        includeBibliography,
       });
+      const missing = cmdMissingCitationTextIDs(clientResult, scanCitations);
+      if (!missing.length) return clientResult;
+      console.warn("SwiftLib citeproc (commands) missing citation texts, using server", missing);
     }
   } catch (e) {
     console.warn("SwiftLib citeproc (commands):", e);
@@ -406,12 +445,17 @@ async function cmdFetchRenderPayload(styleId, scanCitations, embeddedItems) {
     ...(c.citationItems ? { citationItems: c.citationItems } : {}),
   }));
   const reqBody = { style: styleId, citations: reqCitations };
+  reqBody.includeBibliography = includeBibliography;
   if (embeddedItems && Object.keys(embeddedItems).length) reqBody.items = embeddedItems;
   const payload = await cmdFetchJSON("/api/render-document", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(reqBody),
-  });
+  }, CMD_RENDER_FETCH_TIMEOUT_MS);
+  const missing = cmdMissingCitationTextIDs(payload, scanCitations);
+  if (missing.length && !payload.error) {
+    throw new Error(`渲染结果缺少引文文本：${missing.join(", ")}`);
+  }
   return payload;
 }
 
@@ -425,6 +469,85 @@ function cmdIsWordApi14() {
     );
   } catch {
     return false;
+  }
+}
+
+function cmdIsWordApi15() {
+  try {
+    return (
+      typeof Office !== "undefined" &&
+      Office.context &&
+      Office.context.requirements &&
+      Office.context.requirements.isSetSupported("WordApi", "1.5")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function cmdNormalizeBibliographyParagraphStyle(styleName) {
+  const name = String(styleName || "").trim();
+  return name || CMD_DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE;
+}
+
+function cmdBibliographyParagraphStyleFromSnapshot(snapshot) {
+  if (typeof globalThis.swiftLibGetBibliographyParagraphStyle === "function") {
+    try {
+      return cmdNormalizeBibliographyParagraphStyle(globalThis.swiftLibGetBibliographyParagraphStyle());
+    } catch (_) {
+      /* fall through to snapshot */
+    }
+  }
+  return cmdNormalizeBibliographyParagraphStyle(
+    snapshot?.preferences?.bibliographyStyle || CMD_DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE
+  );
+}
+
+function cmdIsParagraphStyleType(type) {
+  const value = String(type || "").toLowerCase();
+  return !value || value === "paragraph" || value.endsWith(".paragraph");
+}
+
+async function cmdResolveBibliographyParagraphStyleForDocument(ctx, requestedStyle) {
+  const requested = cmdNormalizeBibliographyParagraphStyle(requestedStyle);
+  if (requested.toLowerCase() === CMD_DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE.toLowerCase()) {
+    return CMD_DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE;
+  }
+  if (!cmdIsWordApi15() || !ctx?.document?.getStyles) return requested;
+
+  try {
+    const style = ctx.document.getStyles().getByNameOrNullObject(requested);
+    style.load("nameLocal,type");
+    await ctx.sync();
+    if (!style.isNullObject && cmdIsParagraphStyleType(style.type)) {
+      return cmdNormalizeBibliographyParagraphStyle(style.nameLocal || requested);
+    }
+  } catch (e) {
+    console.warn("SwiftLib commands validate bibliography paragraph style:", e);
+  }
+  return CMD_DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE;
+}
+
+function cmdApplyBibliographyParagraphStyle(para, styleName) {
+  const resolved = cmdNormalizeBibliographyParagraphStyle(styleName);
+  if (resolved.toLowerCase() === CMD_DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE.toLowerCase()) {
+    try {
+      para.styleBuiltIn = Word.Style.normal;
+      return;
+    } catch (_) {
+      /* fall back to style name */
+    }
+  }
+  try {
+    para.style = resolved;
+    return;
+  } catch (_) {
+    /* fallback below */
+  }
+  try {
+    para.styleBuiltIn = Word.Style.normal;
+  } catch (_) {
+    /* ignore */
   }
 }
 
@@ -524,12 +647,13 @@ function cmdUtf8ToBase64(str) {
   return btoa(bin);
 }
 
-function cmdBuildStoragePayloadFromScan(scan, style) {
+function cmdBuildStoragePayloadFromScan(scan, style, bibliographyStyle) {
   return {
     v: 4,
     // Document-level preferences: decoupled from UI state and per-citation style.
     preferences: {
       style,
+      bibliographyStyle: cmdNormalizeBibliographyParagraphStyle(bibliographyStyle),
     },
     citations: scan.citations.map((c) => ({
       citationId: c.citationID,
@@ -549,10 +673,10 @@ function cmdBuildStorageXml(payload) {
   return `<swiftlib xmlns="${CMD_SWIFTLIB_XML_NS}" version="1"><payload encoding="base64">${b64}</payload></swiftlib>`;
 }
 
-async function cmdPersistSwiftLibStorageInContext(ctx, scan, style) {
+async function cmdPersistSwiftLibStorageInContext(ctx, scan, style, bibliographyStyle) {
   if (!cmdIsWordApi14()) return;
 
-  const xml = cmdBuildStorageXml(cmdBuildStoragePayloadFromScan(scan, style));
+  const xml = cmdBuildStorageXml(cmdBuildStoragePayloadFromScan(scan, style, bibliographyStyle));
   const items = await cmdLoadSwiftLibCustomXmlParts(ctx);
 
   let didUpdate = false;
@@ -594,9 +718,9 @@ async function cmdScanDocument() {
   });
 }
 
-function cmdRenderBibliographyIntoCC(cc, bibliographyText, bibliographyHtml) {
-  // Always use plain-text paragraph insertion so we can force Word.Style.normal
-  // on every entry, regardless of the cursor's surrounding heading style.
+function cmdRenderBibliographyIntoCC(cc, bibliographyText, bibliographyHtml, paragraphStyle) {
+  // Always use plain-text paragraph insertion so each entry receives the selected
+  // Word paragraph style rather than inheriting the cursor's surrounding style.
   //
   // bibliographyText now contains only reference entries (no sentinel heading).
   // Both the client citeproc path and server exact CSL path return entries only.
@@ -610,7 +734,7 @@ function cmdRenderBibliographyIntoCC(cc, bibliographyText, bibliographyHtml) {
     const para = last
       ? last.insertParagraph(entries[i], Word.InsertLocation.after)
       : cc.insertParagraph(entries[i], Word.InsertLocation.start);
-    try { para.styleBuiltIn = Word.Style.normal; } catch (_) {}
+    cmdApplyBibliographyParagraphStyle(para, paragraphStyle);
     last = para;
   }
 }
@@ -618,6 +742,23 @@ function cmdRenderBibliographyIntoCC(cc, bibliographyText, bibliographyHtml) {
 
 let cmdRefreshDocumentBusy = false;
 let cmdRefreshDocumentQueued = false;
+let cmdDeferredBibliographyRefreshTimer = null;
+
+function cmdScheduleDeferredBibliographyRefresh() {
+  if (cmdDeferredBibliographyRefreshTimer) {
+    clearTimeout(cmdDeferredBibliographyRefreshTimer);
+  }
+  cmdDeferredBibliographyRefreshTimer = setTimeout(() => {
+    cmdDeferredBibliographyRefreshTimer = null;
+    if (cmdRefreshDocumentBusy || cmdRuntimeLocks.upsertCitation) {
+      cmdScheduleDeferredBibliographyRefresh();
+      return;
+    }
+    cmdRefreshDocumentFromRibbon({ skipGhostCleanup: true }).catch((error) => {
+      console.warn("SwiftLib commands deferred bibliography refresh:", error);
+    });
+  }, 900);
+}
 
 async function cmdRefreshDocumentFromRibbon(options) {
   if (cmdRuntimeLocks.upsertCitation && !(options && options.fromUpsert === true)) {
@@ -633,9 +774,12 @@ async function cmdRefreshDocumentFromRibbon(options) {
     let nextOptions = options;
     do {
       cmdRefreshDocumentQueued = false;
-      const clearedCitationIds = await cmdRefreshDocumentOnce(nextOptions);
-      if (clearedCitationIds) {
-        for (const cid of clearedCitationIds) delete cmdPendingCitationPayload[cid];
+      const refreshResult = await cmdRefreshDocumentOnce(nextOptions);
+      if (refreshResult?.citationIds) {
+        for (const cid of refreshResult.citationIds) delete cmdPendingCitationPayload[cid];
+      }
+      if (refreshResult?.deferredBibliographyRefresh) {
+        cmdScheduleDeferredBibliographyRefresh();
       }
       nextOptions = undefined;
     } while (cmdRefreshDocumentQueued);
@@ -647,6 +791,7 @@ async function cmdRefreshDocumentFromRibbon(options) {
 async function cmdRefreshDocumentOnce(options) {
   const skipGhostCleanup = options && options.skipGhostCleanup === true;
   const trustInitialScan = options && options.fromUpsert === true;
+  const includeBibliography = !trustInitialScan;
   return Word.run(async (ctx) => {
       if (!skipGhostCleanup) {
         await cmdDeleteSwiftLibGhostContentControlsInContext(ctx);
@@ -671,6 +816,8 @@ async function cmdRefreshDocumentOnce(options) {
 
       // Read snapshot once; used for both citation map and document preferences.style.
       const rawSnap = cmdIsWordApi14() ? await cmdReadSwiftLibStorage(ctx) : null;
+      const requestedBibliographyStyle = cmdBibliographyParagraphStyleFromSnapshot(rawSnap);
+      const bibliographyParagraphStyle = await cmdResolveBibliographyParagraphStyleForDocument(ctx, requestedBibliographyStyle);
       const snapMap = new Map();
       if (rawSnap?.citations) {
         const docStyle = rawSnap?.preferences?.style || rawSnap?.style || "";
@@ -707,7 +854,8 @@ async function cmdRefreshDocumentOnce(options) {
           position: c.position,
           citationItems: c.citationItems || null,
         })),
-        embeddedItems
+        embeddedItems,
+        { includeBibliography }
       );
       if (data.error) throw new Error(data.error);
 
@@ -744,7 +892,8 @@ async function cmdRefreshDocumentOnce(options) {
               position: c.position,
               citationItems: c.citationItems || null,
             })),
-            embeddedItems
+            embeddedItems,
+            { includeBibliography }
           );
           if (payload.error) throw new Error(payload.error);
         }
@@ -779,7 +928,7 @@ async function cmdRefreshDocumentOnce(options) {
       const pendingCitationFormattingApplications = [];
       for (const row of citationRows) {
         const text = payload.citationTexts?.[row.parsed.id];
-        if (text) {
+        if (cmdIsUsableCitationText(text)) {
           cmdSyncCitationFallbackPlaceholder(
             row.cc,
             row.parsed,
@@ -787,19 +936,15 @@ async function cmdRefreshDocumentOnce(options) {
             row.resolved?.ids || row.parsed.ids || []
           );
           const citationFormatting = cmdCitationFormattingForPayload(payload, row.parsed.id);
-          const citationHtml =
-            cmdShouldInsertCitationAsHTML(citationFormatting)
-            && typeof SwiftLibShared !== "undefined" && typeof SwiftLibShared.citationHtmlFromTextAndFormatting === "function"
-              ? SwiftLibShared.citationHtmlFromTextAndFormatting(text, citationFormatting)
-              : null;
-          const insertedRange = citationHtml
-            ? row.cc.insertHtml(citationHtml, Word.InsertLocation.replace)
-            : row.cc.insertText(text, Word.InsertLocation.replace);
+          const insertedRange = SwiftLibShared.replaceContentControlText(row.cc, text);
+          if (typeof SwiftLibShared !== "undefined" && typeof SwiftLibShared.applyCitationFormattingToInsertedRange === "function") {
+            SwiftLibShared.applyCitationFormattingToInsertedRange(insertedRange, citationFormatting);
+          }
           pendingCitationFormattingApplications.push({
             cc: row.cc,
             insertedRange,
             citationFormatting,
-            usedHtmlFormatting: !!citationHtml,
+            usedHtmlFormatting: false,
           });
         }
       }
@@ -829,19 +974,22 @@ async function cmdRefreshDocumentOnce(options) {
 
       if (primaryBibCC && (payload.bibliographyHtml || payload.bibliographyText)) {
         cmdTrySetPlaceholderEmpty(primaryBibCC);
-        cmdRenderBibliographyIntoCC(primaryBibCC, payload.bibliographyText, payload.bibliographyHtml);
+        cmdRenderBibliographyIntoCC(primaryBibCC, payload.bibliographyText, payload.bibliographyHtml, bibliographyParagraphStyle);
       }
       for (const stale of staleBibCCs) stale.delete(false);
 
       try {
-        await cmdPersistSwiftLibStorageInContext(ctx, finalScan, style);
+        await cmdPersistSwiftLibStorageInContext(ctx, finalScan, style, bibliographyParagraphStyle);
       } catch (persistErr) {
         console.warn("SwiftLib commands CustomXmlPart persist:", persistErr);
       }
 
       await ctx.sync();
       cmdTryTrackedObjectsRemoveAll(ctx);
-      return finalScan.citations.map((c) => c.citationID);
+      return {
+        citationIds: finalScan.citations.map((c) => c.citationID),
+        deferredBibliographyRefresh: trustInitialScan && finalScan.bibControls.length > 0,
+      };
     });
 }
 
@@ -892,7 +1040,7 @@ async function cmdUpsertCitationFromRibbon(refIds, styleId, citationItems) {
         cmdSyncCitationFallbackPlaceholder(cc, { kind: "citation", fromShortTag: true }, style, refIds);
         await ctx.sync();
       }
-      cc.insertText("[…]", Word.InsertLocation.replace);
+      SwiftLibShared.replaceContentControlText(cc, "[…]");
       await ctx.sync();
       try {
         await cmdInsertLightweightGuardAfterCitationCC(ctx, cc, citationID);
@@ -924,7 +1072,7 @@ async function cmdUpsertCitationFromRibbon(refIds, styleId, citationItems) {
  */
 async function cmdPerformInsertBibliography() {
   try {
-    const { citations, style } = await Word.run(async (ctx) => {
+    const { citations, style, bibliographyStyle } = await Word.run(async (ctx) => {
       const controls = ctx.document.contentControls;
       controls.load("items");
       await ctx.sync();
@@ -935,6 +1083,7 @@ async function cmdPerformInsertBibliography() {
         return { citations: [], style: null };
       }
 
+      const rawSnap = cmdIsWordApi14() ? await cmdReadSwiftLibStorage(ctx) : null;
       const snapMap = await cmdBuildSnapshotCitationMap(ctx);
       const scan = cmdCollectScanFromItems(controls.items, snapMap);
       return {
@@ -945,6 +1094,7 @@ async function cmdPerformInsertBibliography() {
           position: citation.position,
         })),
         style: scan.citations[0]?.style || null,
+        bibliographyStyle: cmdBibliographyParagraphStyleFromSnapshot(rawSnap),
       };
     });
 
@@ -960,6 +1110,7 @@ async function cmdPerformInsertBibliography() {
     }
 
     await Word.run(async (ctx) => {
+      const bibliographyParagraphStyle = await cmdResolveBibliographyParagraphStyleForDocument(ctx, bibliographyStyle);
       await cmdDeleteSwiftLibGhostContentControlsInContext(ctx);
 
       const controls = ctx.document.contentControls;
@@ -1010,7 +1161,7 @@ async function cmdPerformInsertBibliography() {
       const pendingCitationFormattingApplications = [];
       for (const row of citationCCRows) {
         const text = data.citationTexts?.[row.parsed.id];
-        if (text) {
+        if (cmdIsUsableCitationText(text)) {
           cmdSyncCitationFallbackPlaceholder(
             row.cc,
             row.parsed,
@@ -1018,19 +1169,15 @@ async function cmdPerformInsertBibliography() {
             row.resolved?.ids || row.parsed.ids || []
           );
           const citationFormatting = cmdCitationFormattingForPayload(data, row.parsed.id);
-          const citationHtml =
-            cmdShouldInsertCitationAsHTML(citationFormatting)
-            && typeof SwiftLibShared !== "undefined" && typeof SwiftLibShared.citationHtmlFromTextAndFormatting === "function"
-              ? SwiftLibShared.citationHtmlFromTextAndFormatting(text, citationFormatting)
-              : null;
-          const insertedRange = citationHtml
-            ? row.cc.insertHtml(citationHtml, Word.InsertLocation.replace)
-            : row.cc.insertText(text, Word.InsertLocation.replace);
+          const insertedRange = SwiftLibShared.replaceContentControlText(row.cc, text);
+          if (typeof SwiftLibShared !== "undefined" && typeof SwiftLibShared.applyCitationFormattingToInsertedRange === "function") {
+            SwiftLibShared.applyCitationFormattingToInsertedRange(insertedRange, citationFormatting);
+          }
           pendingCitationFormattingApplications.push({
             cc: row.cc,
             insertedRange,
             citationFormatting,
-            usedHtmlFormatting: !!citationHtml,
+            usedHtmlFormatting: false,
           });
         }
       }
@@ -1059,13 +1206,13 @@ async function cmdPerformInsertBibliography() {
       }
 
       if (data.bibliographyHtml || data.bibliographyText) {
-        cmdRenderBibliographyIntoCC(primaryBibCC, data.bibliographyText, data.bibliographyHtml);
+        cmdRenderBibliographyIntoCC(primaryBibCC, data.bibliographyText, data.bibliographyHtml, bibliographyParagraphStyle);
       }
       for (const stale of staleBibCCs) stale.delete(false);
 
       try {
         const bibScan = cmdCollectScanFromItems(controls.items, new Map());
-        await cmdPersistSwiftLibStorageInContext(ctx, bibScan, renderStyle);
+        await cmdPersistSwiftLibStorageInContext(ctx, bibScan, renderStyle, bibliographyParagraphStyle);
       } catch (persistErr) {
         console.warn("SwiftLib commands bib CustomXmlPart persist:", persistErr);
       }

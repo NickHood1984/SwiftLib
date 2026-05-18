@@ -64,6 +64,21 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertEqual(fetched[0].year, 2024)
     }
 
+    func testUpdateReferenceTouchesDateModified() throws {
+        let db = try makeDatabase()
+        var ref = Reference(title: "Original Title")
+        try db.saveReference(&ref)
+        let id = try XCTUnwrap(ref.id)
+
+        ref.title = "Updated Title"
+        ref.dateModified = Date(timeIntervalSince1970: 1)
+        try db.saveReference(&ref)
+
+        let stored = try XCTUnwrap(try db.fetchReferences(ids: [id]).first)
+        XCTAssertEqual(stored.title, "Updated Title")
+        XCTAssertGreaterThan(stored.dateModified, Date(timeIntervalSince1970: 1))
+    }
+
     func testDeleteReference() throws {
         let db = try makeDatabase()
         var ref = Reference(title: "To Delete")
@@ -447,6 +462,61 @@ final class AppDatabaseTests: XCTestCase {
         try db.deleteCollection(id: id)
         let all = try db.fetchAllCollections()
         XCTAssertFalse(all.contains(where: { $0.id == id }))
+    }
+
+    // MARK: - Workspace CRUD and Layout Snapshots
+
+    func testSystemWorkspaceCreatedByMigration() throws {
+        let db = try makeDatabase()
+
+        let allWorkspace = try XCTUnwrap(try db.fetchAllWorkspaces().first(where: { $0.kind == .all }))
+
+        XCTAssertEqual(allWorkspace.name, "全部文献")
+        XCTAssertEqual(allWorkspace.icon, "books.vertical")
+        XCTAssertTrue(allWorkspace.isSystem)
+    }
+
+    func testWorkspaceMembershipFiltersReferencesWithoutDuplicatingLibrary() throws {
+        let db = try makeDatabase()
+        var workspace = Workspace(name: "论文写作", icon: "graduationcap", kind: .manual)
+        try db.saveWorkspace(&workspace)
+
+        var included = Reference(title: "Included Reference")
+        var excluded = Reference(title: "Excluded Reference")
+        try db.saveReference(&included)
+        try db.saveReference(&excluded)
+
+        try db.addReferences(ids: [try XCTUnwrap(included.id)], toWorkspaceId: try XCTUnwrap(workspace.id))
+
+        var filter = ReferenceFilter()
+        filter.workspaceId = workspace.id
+        let rows = try db.fetchReferenceListRows(scope: .all, filter: filter, limit: 0)
+
+        XCTAssertEqual(rows.map(\.id), [included.id])
+        XCTAssertEqual(try db.referenceCount(), 2)
+    }
+
+    func testWorkspaceLayoutSnapshotRoundTrips() throws {
+        let db = try makeDatabase()
+        var workspace = Workspace(name: "阅读布局", icon: "book.closed", kind: .manual)
+        try db.saveWorkspace(&workspace)
+
+        let snapshot = WorkspaceLayoutSnapshot(
+            selectedReferenceId: 42,
+            sidebarSelection: .tag(7),
+            searchText: "transformer",
+            columnVisibility: .doubleColumn,
+            capturedAt: Date(timeIntervalSince1970: 1_800)
+        )
+
+        try db.saveWorkspaceLayoutSnapshot(snapshot, forWorkspaceId: try XCTUnwrap(workspace.id))
+
+        let restored = try XCTUnwrap(try db.fetchWorkspaceLayoutSnapshot(workspaceId: try XCTUnwrap(workspace.id)))
+        XCTAssertEqual(restored.selectedReferenceId, 42)
+        XCTAssertEqual(restored.sidebarSelection, .tag(7))
+        XCTAssertEqual(restored.searchText, "transformer")
+        XCTAssertEqual(restored.columnVisibility, .doubleColumn)
+        XCTAssertEqual(restored.capturedAt, Date(timeIntervalSince1970: 1_800))
     }
 
     // MARK: - Filter by Collection

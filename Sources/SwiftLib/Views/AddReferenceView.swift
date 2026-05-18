@@ -158,6 +158,7 @@ struct AddReferenceView: View {
             .formStyle(.grouped)
         }
         .frame(width: 550, height: 650)
+        .swiftLibElegantScrollersInSubtree()
     }
 
     private func save() {
