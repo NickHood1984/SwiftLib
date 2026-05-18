@@ -3,6 +3,18 @@
     <channel>
         <title>SwiftLib</title>
         <item>
+            <title>1.4.0</title>
+            <pubDate>Mon, 18 May 2026 14:39:22 +0800</pubDate>
+            <link>https://github.com/NickHood1984/SwiftLib</link>
+            <sparkle:fullReleaseNotesLink>https://github.com/NickHood1984/SwiftLib/releases/tag/v1.4.0</sparkle:fullReleaseNotesLink>
+            <sparkle:version>1.4.0</sparkle:version>
+            <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <sparkle:releaseNotesLink>https://NickHood1984.github.io/SwiftLib/releases/SwiftLib-1.4.0.md</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.4.0/SwiftLib-1.4.0.dmg" length="24631865" type="application/octet-stream" sparkle:edSignature="dpVTRKHGh5MW2MpXfLlkAQJlcJRTQ/8o5zNQ9Dn+pNRlvPLSZerC7oq7Aw9W1kyrF8n/iq4Rq9YHLcPjQvXcBg=="/>
+        </item>
+        <item>
             <title>1.3.0</title>
             <pubDate>Wed, 29 Apr 2026 23:14:53 +0800</pubDate>
             <link>https://github.com/NickHood1984/SwiftLib</link>
@@ -32,17 +44,6 @@
             <sparkle:deltas>
                 <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.2.1/SwiftLib1.2.1-1.2.0.delta" sparkle:deltaFrom="1.2.0" length="707422" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977616" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="IXnRo9cxSV7S2mJrdu29/yk6TIbbO/FiUrouyqWWkST9w8+IowG/Z3yIfQg6Mo2SUBws+ubo5Pc99rDIxa9sCg=="/>
             </sparkle:deltas>
-        </item>
-        <item>
-            <title>1.2.0</title>
-            <pubDate>Fri, 17 Apr 2026 02:59:00 +0800</pubDate>
-            <link>https://github.com/NickHood1984/SwiftLib</link>
-            <sparkle:fullReleaseNotesLink>https://github.com/NickHood1984/SwiftLib/releases/tag/v1.2.0</sparkle:fullReleaseNotesLink>
-            <sparkle:version>1.2.0</sparkle:version>
-            <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.2.0/SwiftLib-1.2.0.dmg" length="164554804" type="application/octet-stream" sparkle:edSignature="4BhI1wZwENTUPMXkmxeXKatKbiWz2Z67YEjwttawoKc8fGfgtxd1InyzwaFZqHAnNFo3nKqQYVQSN3IDPL0CDA=="/>
         </item>
     </channel>
 </rss>
