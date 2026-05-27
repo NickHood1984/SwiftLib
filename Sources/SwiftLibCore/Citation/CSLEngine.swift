@@ -1,7 +1,21 @@
 import Foundation
 
-/// CSL rendering engine — applies parsed CSL style rules to Reference objects
-/// Performance: <0.5ms per reference on Apple Silicon
+// ---------------------------------------------------------------------------
+// CSLEngine — INTERNAL DIAGNOSTICS ONLY
+//
+// This native Swift CSL renderer is NOT used for user-visible citation or
+// bibliography output. All production rendering goes through citeproc-js via
+// CitationRenderer / CiteprocJSCorePool.
+//
+// CSLEngine is retained because:
+//   1. CitationAndRenderingTests reference it directly.
+//   2. CSLManager.engine(for:) still exposes it for citationKind / formatting
+//      metadata queries (no text rendering involved).
+//
+// Do NOT call renderInlineCitation() or renderBibliographyEntry() from any
+// code path that produces output shown to the user.
+// ---------------------------------------------------------------------------
+
 public final class CSLEngine {
 
     public let style: CSLStyle
@@ -112,9 +126,16 @@ public final class CSLEngine {
         case "URL": return ref.url ?? ""
         case "abstract": return ref.abstract ?? ""
         case "note": return ref.notes ?? ""
-        case "publisher": return ""
-        case "publisher-place": return ""
-        case "edition": return ""
+        case "publisher": return ref.publisher ?? ""
+        case "publisher-place": return ref.publisherPlace ?? ""
+        case "edition": return ref.edition ?? ""
+        case "number": return ref.number ?? ""
+        case "event-title": return ref.eventTitle ?? ""
+        case "genre": return ref.genre ?? ""
+        case "collection-title": return ref.collectionTitle ?? ""
+        case "number-of-pages": return ref.numberOfPages ?? ""
+        case "ISBN": return ref.isbn ?? ""
+        case "ISSN": return ref.issn ?? ""
         case "year-suffix": return ""
         default: return ""
         }
@@ -124,6 +145,10 @@ public final class CSLEngine {
         switch variable {
         case "author":
             return ref.authors.map { PersonName(given: $0.given, family: $0.family) }
+        case "editor":
+            return ref.parsedEditors.map { PersonName(given: $0.given, family: $0.family) }
+        case "translator":
+            return ref.parsedTranslators.map { PersonName(given: $0.given, family: $0.family) }
         default:
             return []
         }

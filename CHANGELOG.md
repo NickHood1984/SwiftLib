@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## v1.4.1 — 2026-05-27
+
+### 新增
+
+- 新增统一的 `CitationRenderer`：列表、详情、预览和插件刷新统一走 citeproc-js，减少 App 与 Word/WPS 插件之间的 CSL 输出差异。
+- 新增 CSL 字段完整性诊断与“库体检”视图，可快速查看未补全的关键引用字段、验证状态和元数据来源分布。
+- Word 插件支持 CSL cite-item 选项（locator、label、prefix、suffix、suppress-author），并在 note/footnote 样式下生成真正的脚注引文。
+
+### 改进
+
+- 增强 DOI、ISBN、ISSN、PMID、PMCID、arXiv 等标识符归一化，提升去重、CSL 输出和 DOI 内容协商路径的一致性。
+- 批量导入与保存引用时返回更明确的新增、合并和更新结果，便于 UI 给出可解释的导入反馈。
+- DOCX 刷新可读取脚注中的 SwiftLib 引文，并从 Custom XML 回填 cite-item 选项，降低文档来回编辑时定位页码/前后缀丢失的风险。
+- CNKI 元数据刷新改为支持远程 selector 热更新，并以详情页解析为主，补齐搜索结果页可能缺失的卷、期、页码等字段。
+- 维普检索解析会从出版信息行读取年份、期号和页码，避免把标题里的年份范围误当作出版年。
+
+### 修复
+
+- 修复 `swift run SwiftLib` 开发运行时 Sparkle 启动路径可能干扰调试的问题。
+- 修复 SwiftPM 将 citation JSON fixture 当作未处理资源的警告。
+- 修复 CSL golden snapshot 测试因样式切换顺序导致 citeproc engine 反复重建、运行时间异常的问题。
+
 ## v1.4.0 — 2026-05-18
 
 ### 新增

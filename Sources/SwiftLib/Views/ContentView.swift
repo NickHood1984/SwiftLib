@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var showAddReference = false
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
     @State private var showWebImport = false
+    @State private var showLibraryHealth = false
     @State private var showAddCollection = false
     @State private var showAddWorkspace = false
     @State private var showAddByIdentifier = false
@@ -160,6 +161,12 @@ struct ContentView: View {
             .disabled(viewModel.pendingMetadataIntakes.isEmpty)
             .accessibilityLabel("待确认元数据队列")
 
+            Button(action: { showLibraryHealth = true }) {
+                Label("库体检", systemImage: "stethoscope")
+            }
+            .help("查看文献库健康度：验证状态、CSL 字段完整度、来源分布")
+            .accessibilityLabel("文献库体检")
+
             Button(action: { openSettings() }) {
                 Label("设置", systemImage: "gearshape")
             }
@@ -291,6 +298,12 @@ struct ContentView: View {
             }
             .swiftLibElegantScrollersInSubtree()
         }
+        .sheet(isPresented: $showLibraryHealth) {
+            NavigationStack {
+                LibraryHealthView()
+            }
+            .frame(minWidth: 500, minHeight: 460)
+        }
     }
 
     private var contentWithLifecycle: some View {
@@ -404,7 +417,8 @@ struct ContentView: View {
 
     @ViewBuilder
     private var importProgressOverlay: some View {
-        if let progress = viewModel.importProgress {
+        let message = viewModel.importProgress ?? viewModel.mergeBannerMessage
+        if let progress = message {
             FloatingProgressToast(
                 message: progress,
                 isSpinning: viewModel.isImporting,

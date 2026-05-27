@@ -59,6 +59,25 @@ function debounce(fn, ms) {
   };
 }
 
+// OOXML body for a Word footnote: hidden SwiftLib marker run + visible citation text run.
+function buildFootnoteBodyOoxml(markerTag, citationText) {
+  function escXml(s) {
+    return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  return (
+    `<pkg:package xmlns:pkg="http://schemas.microsoft.com/office/2006/xmlPackage">` +
+    `<pkg:part pkg:name="/word/document.xml"` +
+    ` pkg:contentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml">` +
+    `<pkg:xmlData>` +
+    `<w:document xmlns:w="${W}"><w:body><w:p>` +
+    `<w:r><w:rPr><w:vanish/></w:rPr><w:t>${escXml(markerTag)}</w:t></w:r>` +
+    `<w:r><w:t xml:space="preserve"> ${escXml(citationText)}</w:t></w:r>` +
+    `</w:p></w:body></w:document>` +
+    `</pkg:xmlData></pkg:part></pkg:package>`
+  );
+}
+
 /** Insertion-point font snapshot (before citation CC) → applied to boundary-guard ZWSP; avoids flaky “infer from next char” APIs. */
 const pendingCitationGuardFormatById = new Map();
 
@@ -573,7 +592,7 @@ function onSearchKeyDown(event) {
   }
 }
 
-function onStyleChange() {
+async function onStyleChange() {
   const newStyle = document.getElementById("styleSelect").value;
   state.preferredStyle = newStyle;
 
@@ -584,13 +603,67 @@ function onStyleChange() {
       swiftLibStorageCache.payload.preferences = {};
     }
     swiftLibStorageCache.payload.preferences.style = newStyle;
-    // Also clear the lastJson sentinel so the next persist actually writes.
     swiftLibStorageCache.lastJson = "";
   }
 
   preloadSwiftLibCiteprocForCurrentStyle();
-  // Re-render existing citations with the new style and persist the
-  // choice into the document's CustomXmlPart so it survives reopen.
+
+  // Detect cross-form transition (inline ↔ footnote).  When the new style's
+  // CSL class flips, every existing citation needs to change container.
+  const wasFootnote = swiftLibStorageCache.payload?.preferences?.citationMode === "footnote";
+  const willBeFootnote = state.styleCitationKind?.[newStyle] === "note";
+
+  if (wasFootnote !== willBeFootnote) {
+    try {
+      const counts = await countSwiftLibCitations();
+      const toMigrate = wasFootnote ? counts.footnote : counts.inline;
+      if (toMigrate > 0) {
+        const fromLabel = wasFootnote ? "脚注" : "正文内联";
+        const toLabel = willBeFootnote ? "脚注" : "正文内联";
+        const ok = window.confirm(
+          `切换样式将把文档中 ${toMigrate} 条引文从【${fromLabel}】转换为【${toLabel}】。\n\n` +
+          `此操作会修改文档结构，建议先保存或备份。是否继续？`
+        );
+        if (!ok) {
+          // Revert the select to the previous style.
+          const prevStyle = swiftLibStorageCache.payload?.preferences?.style;
+          if (prevStyle) {
+            const sel = document.getElementById("styleSelect");
+            // Restore prefs cache to previous mode (style was already overwritten above).
+            swiftLibStorageCache.payload.preferences.style = prevStyle;
+            if (sel) sel.value = prevStyle;
+            state.preferredStyle = prevStyle;
+          }
+          setStatus("已取消样式切换。");
+          return;
+        }
+        setStatus(`正在迁移 ${toMigrate} 条引文…`);
+        try {
+          const r = willBeFootnote
+            ? await migrateInlineToFootnotes(newStyle)
+            : await migrateFootnotesToInline(newStyle);
+          const failNote = r.fail > 0 ? `（${r.fail} 条失败）` : "";
+          setStatus(`引文迁移完成：${r.ok}/${r.total}${failNote}`);
+        } catch (e) {
+          console.error("SwiftLib migration:", e);
+          setStatus(`迁移失败：${e.message || e}`);
+          return;
+        }
+      } else {
+        // No citations yet — just mark the new mode so future inserts go to the right place.
+        try {
+          await Word.run(async (ctx) => {
+            await persistCitationModeChange(ctx, willBeFootnote ? "footnote" : null, newStyle);
+            await ctx.sync();
+          });
+        } catch (e) { console.warn("SwiftLib mode flip persist:", e); }
+      }
+    } catch (e) {
+      console.error("SwiftLib onStyleChange cross-form check:", e);
+    }
+  }
+
+  // Re-render with new style (and, for footnote mode, refresh footnote bodies).
   debouncedRefreshDocument();
 }
 
@@ -2165,6 +2238,45 @@ async function upsertCitation() {
         }
 
         if (!mergedIntoPrevious) {
+          const isNoteStyle = state.styleCitationKind?.[style] === "note";
+
+          if (isNoteStyle) {
+            // CSL note style → insert as a real Word footnote (the CSL engine has
+            // already rendered note-formatted text, so just place it in the footnote body).
+            await moveSelectionOutOfAllSwiftLibContentControls(ctx);
+            const range = ctx.document.getSelection();
+            if (typeof range.insertFootnote !== "function") {
+              throw new Error("Word host does not support footnote insertion (requires WordApi 1.5+).");
+            }
+            const noteItem = range.insertFootnote("");
+            await ctx.sync();
+            const initialText = preRenderedNew?.text || "…";
+            try {
+              noteItem.body.insertOoxml(buildFootnoteBodyOoxml(tag, initialText), Word.InsertLocation.replace);
+            } catch (ooxmlErr) {
+              console.warn("SwiftLib: footnote OOXML body failed, using insertText fallback:", ooxmlErr);
+              const markerRange = noteItem.body.insertText(tag, Word.InsertLocation.start);
+              try { markerRange.font.hidden = true; } catch (_) {}
+              noteItem.body.insertText(" " + initialText, Word.InsertLocation.end);
+            }
+            // Persist CustomXmlPart snapshot in the same Word.run + mark mode as footnote.
+            patchStorageCacheWithCitation(citationID, ids, citationItemsForPending, style, cslSnapshots);
+            if (!swiftLibStorageCache.payload) {
+              swiftLibStorageCache.payload = { v: 4, preferences: {}, items: {}, citations: [], bibliography: false };
+            }
+            if (!swiftLibStorageCache.payload.preferences) swiftLibStorageCache.payload.preferences = {};
+            swiftLibStorageCache.payload.preferences.citationMode = "footnote";
+            swiftLibStorageCache.lastJson = "";
+            try {
+              await persistSwiftLibStorageInContext(ctx, null, style, swiftLibStorageCache.payload);
+            } catch (persistErr) {
+              console.warn("SwiftLib: footnote CustomXmlPart persist:", persistErr);
+            }
+            usedFastPath = true;
+            await ctx.sync();
+            return;
+          }
+
           // --- Insert new citation ---
           await moveSelectionOutOfAllSwiftLibContentControls(ctx);
           const fmt = await captureFormatSnapshotAtCursor(ctx);
@@ -2332,6 +2444,277 @@ async function upsertCitation() {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-form support: CSL note-class styles (Chicago Notes, etc.) use Word
+// footnotes; in-text styles use inline content controls.  These helpers scan
+// existing SwiftLib footnotes, refresh their bodies in place, and migrate
+// citations between the two forms when the user switches styles across the
+// note ↔ in-text boundary.
+// ---------------------------------------------------------------------------
+
+const FOOTNOTE_MARKER_RE = /(swiftlib:v3:cite:[^\s<]+)/;
+
+function isFootnoteCapableHost(ctx) {
+  try {
+    return ctx && ctx.document && ctx.document.body && typeof ctx.document.body.footnotes !== "undefined";
+  } catch (_) { return false; }
+}
+
+// Returns [{noteItem, body, reference, tag, citationID, ids, style, bodyText}]
+async function scanSwiftLibFootnotesInContext(ctx) {
+  if (!isFootnoteCapableHost(ctx)) return [];
+  const fns = ctx.document.body.footnotes;
+  fns.load("items");
+  try { await ctx.sync(); } catch (_) { return []; }
+  if (!fns.items || !fns.items.length) return [];
+
+  const handles = fns.items.map((fn) => {
+    const body = fn.body;
+    body.load("text");
+    return { noteItem: fn, body, reference: fn.reference };
+  });
+  await ctx.sync();
+
+  const out = [];
+  for (const h of handles) {
+    const text = h.body.text || "";
+    const m = text.match(FOOTNOTE_MARKER_RE);
+    if (!m) continue;
+    const tag = m[1];
+    const parsed = parseCitationTag(tag);
+    if (!parsed || !parsed.id) continue;
+    out.push({
+      noteItem: h.noteItem,
+      body: h.body,
+      reference: h.reference,
+      tag,
+      citationID: parsed.id,
+      style: parsed.style || "",
+      ids: parsed.ids || [],
+      bodyText: text,
+    });
+  }
+  return out;
+}
+
+// Refresh footnote bodies in place (note → same-kind note style change).
+// Returns { ok, fail } counts.
+async function refreshFootnoteBodiesInContext(ctx, style, snapMap) {
+  const footnotes = await scanSwiftLibFootnotesInContext(ctx);
+  if (!footnotes.length) return { ok: 0, fail: 0, total: 0, citedIds: new Set() };
+  const citedIds = new Set();
+  for (const f of footnotes) for (const id of f.ids) citedIds.add(id);
+
+  const scan = { citations: footnotes.map((f, i) => ({
+    citationID: f.citationID,
+    ids: f.ids,
+    position: i,
+    citationItems: snapMap?.get(f.citationID)?.citationItems || null,
+  })), bibControls: [] };
+
+  let citationTexts = {};
+  try {
+    const data = await fetchDocumentRenderPayload(style, scan, { includeBibliography: false });
+    citationTexts = data?.citationTexts || {};
+  } catch (e) {
+    console.warn("SwiftLib refreshFootnoteBodies: pre-render failed:", e);
+  }
+
+  let ok = 0, fail = 0;
+  for (const f of footnotes) {
+    try {
+      const text = citationTexts[f.citationID];
+      if (!text) { fail++; continue; }
+      // Replace footnote body with marker + new text via OOXML
+      try {
+        f.body.insertOoxml(buildFootnoteBodyOoxml(f.tag, text), Word.InsertLocation.replace);
+      } catch (_) {
+        f.body.clear();
+        const mr = f.body.insertText(f.tag, Word.InsertLocation.start);
+        try { mr.font.hidden = true; } catch (_) {}
+        f.body.insertText(" " + text, Word.InsertLocation.end);
+      }
+      ok++;
+    } catch (e) {
+      console.warn("SwiftLib refreshFootnoteBodies item failed:", e);
+      fail++;
+    }
+  }
+  await ctx.sync();
+  return { ok, fail, total: footnotes.length, citedIds };
+}
+
+// Quick count of SwiftLib citations in either form — used for the migration
+// confirmation dialog.
+async function countSwiftLibCitations() {
+  return Word.run(async (ctx) => {
+    let ccCount = 0, fnCount = 0;
+    try {
+      const controls = ctx.document.contentControls;
+      controls.load("items");
+      await ctx.sync();
+      for (const cc of controls.items) {
+        const tag = cc.tag || "";
+        if (tag.startsWith(CITE_TAG_PREFIX) && !isBoundaryGuardTag(tag)) ccCount++;
+      }
+    } catch (e) { console.warn("countSwiftLibCitations CC:", e); }
+    try {
+      const fns = await scanSwiftLibFootnotesInContext(ctx);
+      fnCount = fns.length;
+    } catch (e) { console.warn("countSwiftLibCitations footnotes:", e); }
+    tryTrackedObjectsRemoveAll(ctx);
+    return { inline: ccCount, footnote: fnCount };
+  });
+}
+
+// Migrate inline CCs → Word footnotes.  Returns { ok, fail, total }.
+async function migrateInlineToFootnotes(newStyle) {
+  return Word.run(async (ctx) => {
+    if (!isFootnoteCapableHost(ctx)) {
+      throw new Error("当前 Word 版本不支持脚注 API（需要 WordApi 1.5+）。");
+    }
+    const controls = ctx.document.contentControls;
+    controls.load("items");
+    await ctx.sync();
+    const citeCCs = [];
+    const guardCCs = [];
+    for (const cc of controls.items) {
+      const tag = cc.tag || "";
+      if (isBoundaryGuardTag(tag)) { guardCCs.push(cc); continue; }
+      if (tag.startsWith(CITE_TAG_PREFIX)) citeCCs.push(cc);
+    }
+    if (!citeCCs.length) {
+      // Nothing to migrate — just mark the doc as footnote mode for future inserts.
+      await persistCitationModeChange(ctx, "footnote", newStyle);
+      return { ok: 0, fail: 0, total: 0 };
+    }
+
+    // Build scan from CCs for re-rendering with the new style.
+    for (const cc of citeCCs) cc.load("tag,id");
+    await ctx.sync();
+    const snapMap = await buildSnapshotCitationMap(ctx);
+    const scan = collectScanFromItems(citeCCs, snapMap);
+    let citationTexts = {};
+    try {
+      const data = await fetchDocumentRenderPayload(newStyle, scan, { includeBibliography: false });
+      citationTexts = data?.citationTexts || {};
+    } catch (e) {
+      console.warn("SwiftLib migrate inline→note: pre-render failed:", e);
+    }
+
+    let ok = 0, fail = 0;
+    for (const cc of citeCCs) {
+      try {
+        const tag = cc.tag || "";
+        const parsed = parseCitationTag(tag);
+        if (!parsed) { fail++; continue; }
+        // Reconstruct full marker tag if the CC has the short form.
+        const markerTag = parsed.fromShortTag
+          ? makeCitationTag(parsed.id, newStyle, snapMap?.get(parsed.id)?.refIds || parsed.ids || [])
+          : tag;
+        const text = citationTexts[parsed.id] || "…";
+        const noteItem = cc.getRange("End").insertFootnote("");
+        await ctx.sync();
+        try {
+          noteItem.body.insertOoxml(buildFootnoteBodyOoxml(markerTag, text), Word.InsertLocation.replace);
+        } catch (_) {
+          const mr = noteItem.body.insertText(markerTag, Word.InsertLocation.start);
+          try { mr.font.hidden = true; } catch (_) {}
+          noteItem.body.insertText(" " + text, Word.InsertLocation.end);
+        }
+        cc.delete(false);
+        await ctx.sync();
+        ok++;
+      } catch (e) {
+        console.warn("SwiftLib migrate inline→note item failed:", e);
+        fail++;
+      }
+    }
+    // Sweep boundary-guard CCs left behind — they're invisible but pollute scans.
+    for (const g of guardCCs) {
+      try { g.delete(false); } catch (_) {}
+    }
+    await persistCitationModeChange(ctx, "footnote", newStyle);
+    await ctx.sync();
+    return { ok, fail, total: citeCCs.length };
+  });
+}
+
+// Migrate Word footnotes → inline CCs.  Returns { ok, fail, total }.
+async function migrateFootnotesToInline(newStyle) {
+  return Word.run(async (ctx) => {
+    const footnotes = await scanSwiftLibFootnotesInContext(ctx);
+    if (!footnotes.length) {
+      await persistCitationModeChange(ctx, null, newStyle);
+      return { ok: 0, fail: 0, total: 0 };
+    }
+
+    const snapMap = await buildSnapshotCitationMap(ctx);
+    const scan = { citations: footnotes.map((f, i) => ({
+      citationID: f.citationID,
+      ids: f.ids,
+      position: i,
+      citationItems: snapMap?.get(f.citationID)?.citationItems || null,
+    })), bibControls: [] };
+
+    let citationTexts = {};
+    try {
+      const data = await fetchDocumentRenderPayload(newStyle, scan, { includeBibliography: false });
+      citationTexts = data?.citationTexts || {};
+    } catch (e) {
+      console.warn("SwiftLib migrate note→inline: pre-render failed:", e);
+    }
+
+    let ok = 0, fail = 0;
+    for (const f of footnotes) {
+      try {
+        const text = citationTexts[f.citationID] || "…";
+        // Wrap the footnote anchor character with a CC, then replace its content with
+        // the rendered inline citation text.  Replacing the CC's content removes the
+        // anchor character, which causes Word to drop the orphan footnote on save.
+        const cc = f.reference.insertContentControl();
+        cc.title = CC_TITLE_CITE;
+        cc.appearance = "Hidden";
+        const ids = f.ids;
+        const newTag = makeCitationTag(f.citationID, newStyle, ids);
+        cc.tag = newTag;
+        try { await ctx.sync(); }
+        catch (_) {
+          cc.tag = `${CITE_TAG_PREFIX}${f.citationID}`;
+          state.pendingCitationPayload[f.citationID] = { style: newStyle, ids: ids.slice() };
+          await ctx.sync();
+        }
+        SwiftLibShared.replaceContentControlText(cc, text);
+        await ctx.sync();
+        ok++;
+      } catch (e) {
+        console.warn("SwiftLib migrate note→inline item failed:", e);
+        fail++;
+      }
+    }
+    await persistCitationModeChange(ctx, null, newStyle);
+    await ctx.sync();
+    return { ok, fail, total: footnotes.length };
+  });
+}
+
+// Set citationMode in the CustomXmlPart snapshot.  Pass null to clear.
+async function persistCitationModeChange(ctx, mode, style) {
+  if (!swiftLibStorageCache.payload) {
+    swiftLibStorageCache.payload = { v: 4, preferences: {}, items: {}, citations: [], bibliography: false };
+  }
+  if (!swiftLibStorageCache.payload.preferences) swiftLibStorageCache.payload.preferences = {};
+  if (mode) swiftLibStorageCache.payload.preferences.citationMode = mode;
+  else delete swiftLibStorageCache.payload.preferences.citationMode;
+  swiftLibStorageCache.payload.preferences.style = style;
+  swiftLibStorageCache.lastJson = "";
+  try {
+    await persistSwiftLibStorageInContext(ctx, null, style, swiftLibStorageCache.payload);
+  } catch (e) {
+    console.warn("SwiftLib persistCitationModeChange:", e);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Refresh document — single Word.run: ghost cleanup → scan → fetch → reload CCs → (refetch if doc changed) → write → persist
 // After await fetch, document may have changed (e.g. insert citation); reload itemsW before building rows / writing.
 // ---------------------------------------------------------------------------
@@ -2400,6 +2783,17 @@ async function refreshDocumentOnce(options) {
       await ctx.sync();
 
       const items = controls.items;
+      const isFootnoteMode = swiftLibStorageCache.payload?.preferences?.citationMode === "footnote";
+      const hasSwiftCC = items.some((cc) => (cc.tag || "").startsWith(TAG_PREFIX));
+      if ((!items.length || !hasSwiftCC) && isFootnoteMode) {
+        const fnSnapMap = await buildSnapshotCitationMap(ctx);
+        const fnResult = await refreshFootnoteBodiesInContext(ctx, style, fnSnapMap);
+        tryTrackedObjectsRemoveAll(ctx);
+        if (fnResult.total > 0) {
+          return { kind: "footnoteOk", ok: fnResult.ok, fail: fnResult.fail, total: fnResult.total, citedIds: fnResult.citedIds };
+        }
+        return { kind: "empty" };
+      }
       if (!items.length) {
         tryTrackedObjectsRemoveAll(ctx);
         return { kind: "empty" };
@@ -2422,7 +2816,7 @@ async function refreshDocumentOnce(options) {
         if (cc.id != null) ccCurrentTextById.set(cc.id, rng.text ?? "");
       }
 
-      if (!items.some((cc) => (cc.tag || "").startsWith(TAG_PREFIX))) {
+      if (!hasSwiftCC) {
         tryTrackedObjectsRemoveAll(ctx);
         return { kind: "noSwiftLib" };
       }
@@ -2592,6 +2986,22 @@ async function refreshDocumentOnce(options) {
       await refreshCitedIds();
       renderResults(state.allResults);
       await refreshBibliographySummary();
+      return;
+    }
+    if (result.kind === "footnoteOk") {
+      state.citedIds = result.citedIds instanceof Set ? result.citedIds : new Set(result.citedIds || []);
+      state.citedCount = state.citedIds.size;
+      renderResults(state.allResults);
+      const failNote = result.fail > 0 ? ` （${result.fail} 条失败）` : "";
+      setStatus(`脚注引文已刷新（${result.ok}/${result.total}）${failNote}`);
+      const el = document.getElementById("docSummary");
+      if (el) {
+        el.textContent = state.citedIds.size
+          ? `已引用 ${state.citedIds.size} 条不重复文献 · 脚注模式`
+          : "文档中尚无 SwiftLib 引文";
+      }
+      updatePrimaryButton();
+      updateInsertBibliographyButton();
       return;
     }
     if (result.kind === "error") {
@@ -2957,11 +3367,19 @@ function renderResults(refs) {
       const typeBadge = ref.referenceType && REF_TYPE_LABELS[ref.referenceType]
         ? `<span class="ref-type-badge">${REF_TYPE_LABELS[ref.referenceType]}</span>`
         : "";
+      const cslBadge = (() => {
+        if (!ref.cslCompleteness || ref.cslCompleteness === "complete") return "";
+        const isCritical = ref.cslCompleteness === "critical";
+        const label = isCritical ? "缺必填字段" : "建议补全";
+        const cls = isCritical ? "csl-badge-critical" : "csl-badge-incomplete";
+        const tip = (ref.cslMissingFields || []).join("、") || label;
+        return `<span class="csl-field-badge ${cls}" title="${escapeHtml(tip)}">${label}</span>`;
+      })();
       const checkMark = selected ? `<span class="ref-item-check" aria-label="已选中">✓</span>` : "";
       return `
         <div class="ref-item ${selected ? "selected" : ""} ${active ? "active" : ""} ${cited ? "ref-cited" : ""}" data-id="${ref.id}" style="display:flex;align-items:flex-start;gap:8px;">
           <div style="flex:1;min-width:0;">
-            <div class="ref-title">${typeBadge}${escapeHtml(ref.title)}${citedBadge}</div>
+            <div class="ref-title">${typeBadge}${escapeHtml(ref.title)}${citedBadge}${cslBadge}</div>
             <div class="ref-meta">${escapeHtml(ref.authors)}${year}${journal}</div>
           </div>
           ${checkMark}

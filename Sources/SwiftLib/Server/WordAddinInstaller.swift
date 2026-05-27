@@ -80,7 +80,7 @@ enum WordAddinInstaller {
                    xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
                    xsi:type="TaskPaneApp">
           <Id>a1b2c3d4-e5f6-7890-abcd-ef1234567890</Id>
-          <Version>1.2.1.0</Version>
+          <Version>1.4.0.0</Version>
           <ProviderName>SwiftLib</ProviderName>
           <DefaultLocale>zh-CN</DefaultLocale>
           <DisplayName DefaultValue="SwiftLib 引文"/>
@@ -120,8 +120,9 @@ enum WordAddinInstaller {
                             <bt:Image size="32" resid="icon32"/>
                             <bt:Image size="80" resid="icon80"/>
                           </Icon>
-                          <Action xsi:type="ExecuteFunction">
-                            <FunctionName>insertCitationCommand</FunctionName>
+                          <Action xsi:type="ShowTaskpane">
+                            <TaskpaneId>SwiftLibPane</TaskpaneId>
+                            <SourceLocation resid="taskpaneURL"/>
                           </Action>
                         </Control>
                         <Control xsi:type="Button" id="insertBibBtn">
@@ -154,22 +155,6 @@ enum WordAddinInstaller {
                             <FunctionName>refreshAllCommand</FunctionName>
                           </Action>
                         </Control>
-                        <Control xsi:type="Button" id="showPaneBtn">
-                          <Label resid="showPaneLabel"/>
-                          <Supertip>
-                            <Title resid="showPaneLabel"/>
-                            <Description resid="showPaneDesc"/>
-                          </Supertip>
-                          <Icon>
-                            <bt:Image size="16" resid="icon16"/>
-                            <bt:Image size="32" resid="icon32"/>
-                            <bt:Image size="80" resid="icon80"/>
-                          </Icon>
-                          <Action xsi:type="ShowTaskpane">
-                            <TaskpaneId>SwiftLibPane</TaskpaneId>
-                            <SourceLocation resid="taskpaneURL"/>
-                          </Action>
-                        </Control>
                       </Group>
                     </OfficeTab>
                   </ExtensionPoint>
@@ -191,13 +176,11 @@ enum WordAddinInstaller {
                 <bt:String id="insertCitLabel" DefaultValue="插入引文"/>
                 <bt:String id="insertBibLabel" DefaultValue="插入参考文献"/>
                 <bt:String id="refreshLabel" DefaultValue="刷新引文"/>
-                <bt:String id="showPaneLabel" DefaultValue="SwiftLib 面板"/>
               </bt:ShortStrings>
               <bt:LongStrings>
-                <bt:String id="insertCitDesc" DefaultValue="在光标处插入引文"/>
-                <bt:String id="insertBibDesc" DefaultValue="在光标处插入参考文献表"/>
+                <bt:String id="insertCitDesc" DefaultValue="打开 SwiftLib 侧边栏，搜索并插入引文"/>
+                <bt:String id="insertBibDesc" DefaultValue="在光标处插入或更新参考文献表"/>
                 <bt:String id="refreshDesc" DefaultValue="刷新文档中所有引文与参考文献"/>
-                <bt:String id="showPaneDesc" DefaultValue="显示 SwiftLib 侧边栏"/>
               </bt:LongStrings>
             </Resources>
           </VersionOverrides>

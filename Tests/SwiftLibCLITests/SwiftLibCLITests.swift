@@ -5,6 +5,22 @@ import Foundation
 /// These tests invoke the compiled CLI executable and verify its output.
 /// Requires the CLI to be built first: `swift build --product swiftlib-cli`
 final class SwiftLibCLITests: XCTestCase {
+    private var storageRoot: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SwiftLibCLITests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        if let storageRoot {
+            try? FileManager.default.removeItem(at: storageRoot)
+        }
+        storageRoot = nil
+        try super.tearDownWithError()
+    }
 
     /// Path to the built CLI binary
     private var cliBinaryPath: String {
@@ -28,17 +44,60 @@ final class SwiftLibCLITests: XCTestCase {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cliBinaryPath)
         process.arguments = arguments
+        process.environment = ProcessInfo.processInfo.environment.merging(
+            ["SWIFTLIB_STORAGE_ROOT": storageRoot.path],
+            uniquingKeysWith: { _, testValue in testValue }
+        )
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        try process.run()
-        process.waitUntilExit()
+        var stdoutData = Data()
+        var stderrData = Data()
+        let stdoutGroup = DispatchGroup()
+        let stderrGroup = DispatchGroup()
 
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        stdoutGroup.enter()
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                stdoutGroup.leave()
+            } else {
+                stdoutData.append(data)
+            }
+        }
+
+        stderrGroup.enter()
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                stderrGroup.leave()
+            } else {
+                stderrData.append(data)
+            }
+        }
+
+        try process.run()
+        let deadline = Date().addingTimeInterval(10)
+        while process.isRunning && Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        if process.isRunning {
+            process.terminate()
+            process.waitUntilExit()
+            XCTFail("CLI command timed out: swiftlib-cli \(arguments.joined(separator: " "))")
+        } else {
+            process.waitUntilExit()
+        }
+
+        _ = stdoutGroup.wait(timeout: .now() + 1)
+        _ = stderrGroup.wait(timeout: .now() + 1)
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
 
         return (
             stdout: String(data: stdoutData, encoding: .utf8) ?? "",

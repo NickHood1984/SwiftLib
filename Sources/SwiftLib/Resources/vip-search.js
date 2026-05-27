@@ -10,6 +10,10 @@
         try { return new URL(href, location.href).href; } catch (_) { return href; }
     }
 
+    function toInt(value) {
+        return Number.parseInt ? Number.parseInt(value, 10) : Number(value);
+    }
+
     function isBlocked() {
         var marker = clean([document.title, location.href, document.body && document.body.innerText].join(' ')).toLowerCase();
         return marker.indexOf('412 precondition') >= 0
@@ -31,39 +35,91 @@
         return clean(parts.join(' '));
     }
 
+    function publicationText(root) {
+        var authorBlock = root && root.querySelector('.author');
+        if (authorBlock) {
+            var authorText = clean(authorBlock.innerText || authorBlock.textContent || '');
+            if (authorText.indexOf('《') >= 0 && /(?:19|20)\d{2}\s*年/.test(authorText)) {
+                return authorText;
+            }
+        }
+
+        var nodes = Array.prototype.slice.call(root ? root.querySelectorAll('dd') : []);
+        for (var i = 0; i < nodes.length; i++) {
+            var text = clean(nodes[i].innerText || nodes[i].textContent || '');
+            if (text.indexOf('《') >= 0 && /(?:19|20)\d{2}\s*年/.test(text)) return text;
+        }
+        return '';
+    }
+
+    function parsePublicationYear(text) {
+        text = clean(text);
+        var patterns = [
+            /《[^》]+》\s*((?:19|20)\d{2})\s*年第?\s*([0-9A-Za-z增刊特刊-]+)?\s*期?/,
+            /(?:出处|来源|期刊|发表时间|出版日期|年份)\s*[:：]?\s*((?:19|20)\d{2})/,
+            /(?:^|[^\d])((?:19|20)\d{2})\s*年第?\s*([0-9A-Za-z增刊特刊-]+)?\s*期/
+        ];
+        for (var i = 0; i < patterns.length; i++) {
+            var match = text.match(patterns[i]);
+            if (match) {
+                return {
+                    year: toInt(match[1]),
+                    issue: match[2] ? clean(match[2]) : null
+                };
+            }
+        }
+        return { year: null, issue: null };
+    }
+
+    function extractAbstract(root, text) {
+        var abstractBlock = root && root.querySelector('.abstract');
+        if (abstractBlock) {
+            var candidates = Array.prototype.slice.call(abstractBlock.querySelectorAll('span'))
+                .map(function (node) {
+                    return clean(node.textContent || '').replace(/\s*展开更多\s*$/, '');
+                })
+                .filter(function (value) {
+                    return value && value !== '展开更多';
+                })
+                .sort(function (a, b) { return b.length - a.length; });
+            if (candidates.length > 0) return candidates[0];
+        }
+
+        var abstractMatch = text.match(/共\d+页\s*([\s\S]*?)(?:关键词\s*:|关键词[:：]|关键词\s+|在线阅读|下载PDF|免费下载|$)/);
+        if (abstractMatch) return clean(abstractMatch[1]);
+        return null;
+    }
+
     function parseArticle(link) {
         var term = link.closest('dt') || link.parentElement;
+        var root = term.closest('dl') || term.parentElement || document;
         var text = siblingText(term);
         var title = clean(link.innerText || link.textContent || '');
         if (!title || title.length < 6) return null;
 
-        var authors = Array.prototype.slice.call((term.parentElement || document).querySelectorAll('a[href*="key=A"]'))
+        var authors = Array.prototype.slice.call(root.querySelectorAll('a[href*="key=A"]'))
             .map(function (a) { return clean(a.innerText || a.textContent || ''); })
             .filter(function (name) { return name && name.length <= 20 && name.indexOf('+') !== 0; });
 
         var journal = null;
-        var journalLink = (term.parentElement || document).querySelector('a[href*="/Qikan/Journal/Summary"]');
+        var journalLink = root.querySelector('a[href*="/Qikan/Journal/Summary"]');
         if (journalLink) journal = clean(journalLink.innerText || journalLink.textContent || '').replace(/^《|》$/g, '');
         if (!journal) {
             var journalMatch = text.match(/《([^》]+)》/);
             if (journalMatch) journal = clean(journalMatch[1]);
         }
 
-        var year = null;
-        var yearMatch = text.match(/((?:19|20)\d{2})年第?(\d+)?期?/);
-        if (yearMatch) year = parseInt(yearMatch[1], 10);
-
-        var issue = null;
-        if (yearMatch && yearMatch[2]) issue = yearMatch[2];
+        var publication = parsePublicationYear(publicationText(root));
+        var year = publication.year;
+        var issue = publication.issue;
 
         var pages = null;
-        var pageMatch = text.match(/第\d+期\s*([0-9]+[-－][0-9]+)/);
-        if (!pageMatch) pageMatch = text.match(/([0-9]+[-－][0-9]+),共\d+页/);
+        var publicationLine = publicationText(root) || text;
+        var pageMatch = publicationLine.match(/第\d+期\s*([0-9]+[-－][0-9]+)/);
+        if (!pageMatch) pageMatch = publicationLine.match(/([0-9]+[-－][0-9]+),共\d+页/);
         if (pageMatch) pages = clean(pageMatch[1]).replace('－', '-');
 
-        var abstract = null;
-        var abstractMatch = text.match(/共\d+页\s*([\s\S]*?)(?:关键词\s*:|关键词[:：]|在线阅读|下载PDF|$)/);
-        if (abstractMatch) abstract = clean(abstractMatch[1]);
+        var abstract = extractAbstract(root, text);
 
         var sourceRecordID = null;
         var idMatch = (link.getAttribute('href') || '').match(/[?&]id=([^&]+)/);

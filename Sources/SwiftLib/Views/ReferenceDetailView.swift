@@ -120,6 +120,7 @@ struct ReferenceDetailView: View {
                         .padding(.vertical, 4)
                         .background(.quaternary)
                         .clipShape(Capsule())
+                    CSLCompletenessLabel(reference: reference)
                 }
 
                 Text(reference.title.decodingHTMLEntities())

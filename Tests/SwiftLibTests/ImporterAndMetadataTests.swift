@@ -1,9 +1,26 @@
 import Foundation
 import XCTest
+import WebKit
 @testable import SwiftLib
 @testable import SwiftLibCore
 
 final class ImporterAndMetadataTests: XCTestCase {
+    private struct VIPSearchScriptPayload: Decodable {
+        struct Result: Decodable {
+            var title: String
+            var url: String?
+            var authors: [String]
+            var journal: String?
+            var year: Int?
+            var issue: String?
+            var pages: String?
+            var abstract: String
+            var sourceRecordID: String?
+        }
+
+        var results: [Result]
+    }
+
     func testBibTeXParseMapsEntryTypesAndPreservesNestedBraceContent() throws {
         let bibtex = """
         @article{smith2024,
@@ -345,6 +362,71 @@ final class ImporterAndMetadataTests: XCTestCase {
         XCTAssertEqual(record.reference.issue, "06")
         XCTAssertEqual(record.reference.pages, "1639-1650")
         XCTAssertTrue(record.evidence.verificationHints.hasStructuredPages)
+    }
+
+    @MainActor
+    func testVIPSearchScriptIgnoresYearRangeInTitleWhenParsingPublicationYear() async throws {
+        let scriptURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/SwiftLib/Resources/vip-search.js")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+        let html = """
+        <html>
+          <body>
+            <dl>
+              <dt>
+                <a href="/Qikan/Article/Detail?id=HS725032017004002&amp;from=Qikan_Search_Index">
+                  <u>2015~</u><u>2016</u><u>年</u><u>洱海</u><u>水质</u><u>参数</u><u>季节性</u><u>变化</u>
+                </a>
+              </dt>
+              <dd>
+                <span class="author">
+                  <span class="label">作者</span>
+                  <span><a href="/Qikan/Search/Index?key=A%3d%e6%9c%b1%e6%a2%a6%e5%a7%9d"><span>朱梦姝</span></a></span>
+                  <span><a href="/Qikan/Search/Index?key=A%3d%e5%bc%a0%e8%99%8e%e6%89%8d"><span>张虎才</span></a></span>
+                  <span style="display:none"><a href="/Qikan/Search/Index?key=A%3d%e5%b8%b8%e5%87%a4%e7%90%b4"><span>常凤琴</span></a></span>
+                </span>
+                <a href="/Qikan/Journal/Summary?gch=72503X">《环境保护前沿》</a>
+                2017年第4期297-308,共12页
+              </dd>
+              <dd>
+                <span class="abstract">
+                  <span>随着洱海流域建设和生产、生活规模的快速扩展,对洱海水质的影响也日益增强。为了解和认识其水质现状和变化过程,我们对洱海进行了定位水质监测。</span>
+                  <span style="display:none;">随着洱海流域建设和生产、生活规模的快速扩展,对洱海水质的影响也日益增强。为了解和认识其水质现状和变化过程,我们对洱海进行了定位水质监测。洱海不同湖区水体的温度、叶绿素-a、溶解氧、pH以及浊度的季节性变化特征显著,并存在明显的空间异质性。 展开更多</span>
+                </span>
+              </dd>
+              <dd>
+                <span class="subject"><span class="label">关键词</span> 洱海 水质参数 气温 风浪扰动 空间异质性</span>
+              </dd>
+            </dl>
+          </body>
+        </html>
+        """
+
+        let webView = WKWebView(frame: .zero)
+        let loader = HTMLLoadDelegate()
+        webView.navigationDelegate = loader
+        try await loader.load(
+            html: html,
+            in: webView,
+            baseURL: URL(string: "https://qikan.cqvip.com/Qikan/Search/Index")!
+        )
+
+        let raw = try await webView.evaluateJavaScript(script) as? String
+        let data = try XCTUnwrap(raw?.data(using: .utf8))
+        let payload = try JSONDecoder().decode(VIPSearchScriptPayload.self, from: data)
+        let result = try XCTUnwrap(payload.results.first)
+
+        XCTAssertEqual(result.title, "2015~2016年洱海水质参数季节性变化")
+        XCTAssertEqual(result.year, 2017)
+        XCTAssertEqual(result.issue, "4")
+        XCTAssertEqual(result.pages, "297-308")
+        XCTAssertEqual(result.journal, "环境保护前沿")
+        XCTAssertEqual(result.sourceRecordID, "HS725032017004002")
+        XCTAssertEqual(result.authors.prefix(3), ["朱梦姝", "张虎才", "常凤琴"])
+        XCTAssertFalse(result.abstract.contains("关键词"))
     }
 
     @MainActor

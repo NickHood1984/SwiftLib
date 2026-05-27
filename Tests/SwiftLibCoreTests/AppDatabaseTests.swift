@@ -175,10 +175,10 @@ final class AppDatabaseTests: XCTestCase {
             Reference(title: "Second Import", abstract: "Merged abstract", pmid: "123456")
         ]
 
-        let count = try db.batchImportReferences(refs)
+        let result = try db.batchImportReferences(refs)
         let all = try db.fetchAllReferences()
 
-        XCTAssertEqual(count, 2)
+        XCTAssertEqual(result.total, 2)
         XCTAssertEqual(all.count, 1)
         XCTAssertEqual(all[0].pmid, "123456")
         XCTAssertEqual(all[0].abstract, "Merged abstract")
@@ -595,8 +595,8 @@ final class AppDatabaseTests: XCTestCase {
             Reference(title: "Batch 3"),
         ]
 
-        let count = try db.batchImportReferences(refs)
-        XCTAssertEqual(count, 3)
+        let result = try db.batchImportReferences(refs)
+        XCTAssertEqual(result.total, 3)
 
         let all = try db.fetchAllReferences()
         XCTAssertEqual(all.count, 3)
@@ -604,8 +604,8 @@ final class AppDatabaseTests: XCTestCase {
 
     func testBatchImportEmptyArray() throws {
         let db = try makeDatabase()
-        let count = try db.batchImportReferences([])
-        XCTAssertEqual(count, 0)
+        let result = try db.batchImportReferences([])
+        XCTAssertEqual(result.total, 0)
     }
 
     // MARK: - Reference Count

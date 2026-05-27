@@ -1083,7 +1083,9 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
 
     public static func normalizeForDedupDOI(_ value: String?) -> String? {
         guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
-        return raw.lowercased()
+        // Use DOIIdentifier for full normalization: strips https://doi.org/, dx.doi.org/,
+        // doi: prefixes, URL encoding, and fragments before lowercasing.
+        return DOIIdentifier.canonical(for: raw) ?? raw.lowercased()
     }
 
     public static func normalizeForDedupISBN(_ value: String?) -> String? {

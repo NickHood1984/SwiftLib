@@ -48,6 +48,8 @@ PAGES_BASE_URL="${PAGES_BASE_URL:-https://${GITHUB_OWNER}.github.io/${GITHUB_REP
 DOWNLOAD_URL_PREFIX="${DOWNLOAD_URL_PREFIX:-${REPO_URL}/releases/download/${RELEASE_TAG}/}"
 FULL_RELEASE_NOTES_URL="${FULL_RELEASE_NOTES_URL:-${REPO_URL}/releases/tag/${RELEASE_TAG}}"
 RELEASE_NOTES_URL_PREFIX="${RELEASE_NOTES_URL_PREFIX:-${PAGES_BASE_URL}/releases/}"
+SPARKLE_MAXIMUM_VERSIONS="${SPARKLE_MAXIMUM_VERSIONS:-3}"
+SPARKLE_MAXIMUM_DELTAS="${SPARKLE_MAXIMUM_DELTAS:-5}"
 
 ARCHIVES_DIR="${ARCHIVES_DIR:-$PROJECT_DIR/build/sparkle-archives}"
 APPCAST_PATH="${APPCAST_PATH:-$PROJECT_DIR/Docs/appcast.xml}"
@@ -72,6 +74,21 @@ normalize_historical_release_urls() {
     done
 }
 
+copy_if_changed() {
+    local source_path="$1"
+    local destination_path="$2"
+
+    if [ "$source_path" = "$destination_path" ]; then
+        return 0
+    fi
+
+    if [ -f "$destination_path" ] && cmp -s "$source_path" "$destination_path"; then
+        return 0
+    fi
+
+    cp -f "$source_path" "$destination_path"
+}
+
 if [ ! -f "$DMG_PATH" ]; then
     APP_VERSION="$APP_VERSION" APP_BUILD_VERSION="$APP_BUILD_VERSION" "$SCRIPT_DIR/build-app.sh" release
 fi
@@ -91,8 +108,8 @@ cp -f "$DMG_PATH" "$ARCHIVES_DIR/$ARCHIVE_BASENAME"
 
 if [ -n "$NOTES_SOURCE_FILE" ]; then
     NOTES_EXT="${NOTES_SOURCE_FILE##*.}"
-    cp -f "$NOTES_SOURCE_FILE" "$ARCHIVES_DIR/${ARCHIVE_BASENAME%.*}.$NOTES_EXT"
-    cp -f "$NOTES_SOURCE_FILE" "$PAGES_RELEASE_NOTES_DIR/${ARCHIVE_BASENAME%.*}.$NOTES_EXT"
+    copy_if_changed "$NOTES_SOURCE_FILE" "$ARCHIVES_DIR/${ARCHIVE_BASENAME%.*}.$NOTES_EXT"
+    copy_if_changed "$NOTES_SOURCE_FILE" "$PAGES_RELEASE_NOTES_DIR/${ARCHIVE_BASENAME%.*}.$NOTES_EXT"
 fi
 
 key_args=(--account "$SPARKLE_KEYS_ACCOUNT")
@@ -106,6 +123,8 @@ fi
     --release-notes-url-prefix "$RELEASE_NOTES_URL_PREFIX" \
     --full-release-notes-url "$FULL_RELEASE_NOTES_URL" \
     --link "$REPO_URL" \
+    --maximum-versions "$SPARKLE_MAXIMUM_VERSIONS" \
+    --maximum-deltas "$SPARKLE_MAXIMUM_DELTAS" \
     -o "$APPCAST_PATH" \
     "$ARCHIVES_DIR"
 

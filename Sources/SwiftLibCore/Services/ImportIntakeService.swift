@@ -51,9 +51,19 @@ public enum ImportIntakeService {
                 ref.collectionId = cid
             }
 
-            if skipVerify {
-                // Legacy path: import directly without verification
-                refsToImport.append(ref)
+        if skipVerify {
+                // Legacy path: import directly without verification.
+                // Explicitly mark as .legacy so LibraryHealth can surface
+                // these records and let the user trigger re-verification.
+                var legacyRef = ref
+                if legacyRef.verificationStatus == .verifiedAuto
+                    || legacyRef.verificationStatus == .verifiedManual {
+                    // Preserve existing verified status from the source file
+                    // (BibTeX/RIS may carry their own provenance signals).
+                } else {
+                    legacyRef.verificationStatus = .legacy
+                }
+                refsToImport.append(legacyRef)
                 continue
             }
 
@@ -131,8 +141,8 @@ public enum ImportIntakeService {
 
         if !refsToImport.isEmpty {
             do {
-                let count = try database.batchImportReferences(refsToImport)
-                result.imported += count
+                let batchResult = try database.batchImportReferences(refsToImport)
+                result.imported += batchResult.total
             } catch {
                 result.errors.append(error.localizedDescription)
             }

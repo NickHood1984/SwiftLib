@@ -15,43 +15,173 @@ struct AddCollectionSheet: View {
         "flask", "atom", "brain", "leaf"
     ]
 
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     var body: some View {
-        VStack(spacing: 16) {
-            Text("New Collection")
-                .font(.headline)
+        ZStack {
+            Color.black.opacity(0.18)
+                .ignoresSafeArea()
 
-            TextField("Collection Name", text: $name)
-                .textFieldStyle(.roundedBorder)
+            VStack(spacing: 0) {
+                headerBar
 
-            LazyVGrid(columns: Array(repeating: GridItem(.fixed(40)), count: 8), spacing: 8) {
+                VStack(spacing: 20) {
+                    VStack(spacing: 8) {
+                        Text("新建分组")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.primary)
+
+                        Text("按主题整理文献资料")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .multilineTextAlignment(.center)
+                    .padding(.bottom, 4)
+
+                    collectionNameField
+
+                    iconGrid
+
+                    HStack(spacing: 10) {
+                        Button("取消") {
+                            dismiss()
+                        }
+                        .buttonStyle(SLSecondaryButtonStyle())
+
+                        Spacer()
+
+                        Button("创建") {
+                            createCollection()
+                        }
+                        .buttonStyle(SLPrimaryButtonStyle())
+                        .disabled(trimmedName.isEmpty)
+                    }
+                    .padding(.top, 4)
+                }
+                .padding(.horizontal, 42)
+                .padding(.bottom, 34)
+            }
+            .frame(width: 520)
+            .background(notionModalBackground)
+            .overlay(notionModalBorder)
+            .shadow(color: .black.opacity(0.34), radius: 30, x: 0, y: 20)
+            .padding(28)
+        }
+        .frame(width: 580)
+    }
+
+    private var headerBar: some View {
+        HStack {
+            Spacer()
+
+            iconButton(systemName: "xmark", help: "关闭") {
+                dismiss()
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 20)
+        .padding(.bottom, 4)
+    }
+
+    private var collectionNameField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("名称")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            TextField("例如：论文精读", text: $name)
+                .textFieldStyle(.plain)
+                .font(.system(size: 15, weight: .medium))
+                .padding(.horizontal, 13)
+                .padding(.vertical, 11)
+                .background(controlBackground)
+                .overlay(controlBorder)
+                .onSubmit(createCollection)
+        }
+    }
+
+    private var iconGrid: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("图标")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(42), spacing: 8), count: 8), spacing: 8) {
                 ForEach(icons, id: \.self) { icon in
                     Button {
                         selectedIcon = icon
                     } label: {
                         Image(systemName: icon)
-                            .font(.title3)
-                            .frame(width: 36, height: 36)
-                            .background(selectedIcon == icon ? Color.accentColor.opacity(0.2) : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .font(.system(size: 18, weight: .regular))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(selectedIcon == icon ? Color.accentColor : Color.secondary)
+                            .frame(width: 40, height: 40)
+                            .background(
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .fill(selectedIcon == icon
+                                        ? Color.accentColor.opacity(0.14)
+                                        : Color.primary.opacity(0.035))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .strokeBorder(selectedIcon == icon
+                                        ? Color.accentColor.opacity(0.65)
+                                        : Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 1)
+                            )
                     }
                     .buttonStyle(.plain)
                 }
             }
-
-            HStack {
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Create") {
-                    let col = Collection(name: name, icon: selectedIcon)
-                    onSave(col)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
         }
-        .padding(20)
-        .frame(width: 380)
+    }
+
+    private var notionModalBackground: some View {
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color(nsColor: .windowBackgroundColor).opacity(0.98),
+                        Color(nsColor: .controlBackgroundColor).opacity(0.96)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+    }
+
+    private var notionModalBorder: some View {
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .strokeBorder(Color(nsColor: .separatorColor).opacity(0.75), lineWidth: 1)
+    }
+
+    private var controlBackground: some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(Color.primary.opacity(0.035))
+    }
+
+    private var controlBorder: some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 1)
+    }
+
+    private func iconButton(systemName: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 30, height: 30)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private func createCollection() {
+        guard !trimmedName.isEmpty else { return }
+        let col = Collection(name: trimmedName, icon: selectedIcon)
+        onSave(col)
+        dismiss()
     }
 }

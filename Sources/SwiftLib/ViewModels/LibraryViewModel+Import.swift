@@ -19,11 +19,12 @@ extension LibraryViewModel {
                 let refs = BibTeXImporter.parse(content)
                 await MainActor.run { self.importProgress = "正在导入 \(refs.count) 条条目…" }
 
-                let count = try self.db.batchImportReferences(refs)
+                let result = try self.db.batchImportReferences(refs)
                 await MainActor.run {
-                    self.importProgress = "已导入 \(count) 条条目"
+                    self.lastBatchResult = result
+                    self.importProgress = Self.importSummary(result)
                     self.isImporting = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
                         self.importProgress = nil
                     }
                 }
@@ -52,11 +53,12 @@ extension LibraryViewModel {
                 let refs = RISImporter.parse(content)
                 await MainActor.run { self.importProgress = "正在导入 \(refs.count) 条条目…" }
 
-                let count = try self.db.batchImportReferences(refs)
+                let result = try self.db.batchImportReferences(refs)
                 await MainActor.run {
-                    self.importProgress = "已导入 \(count) 条条目"
+                    self.lastBatchResult = result
+                    self.importProgress = Self.importSummary(result)
                     self.isImporting = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
                         self.importProgress = nil
                     }
                 }
@@ -67,5 +69,13 @@ extension LibraryViewModel {
                 }
             }
         }
+    }
+
+    static func importSummary(_ result: BatchImportResult) -> String {
+        var parts = ["新增 \(result.inserted) 条"]
+        if result.merged > 0 {
+            parts.append("合并重复 \(result.merged) 条")
+        }
+        return parts.joined(separator: " · ")
     }
 }

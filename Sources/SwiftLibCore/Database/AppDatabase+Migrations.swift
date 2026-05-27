@@ -669,6 +669,37 @@ extension AppDatabase {
             }
         }
 
+        // ── v17: Citation item options (locator/prefix/suffix per document) ─────
+        migrator.registerMigration("v17-citation-item-options") { db in
+            try db.create(table: "citationItemOption", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                // Stable document identifier: UUID from CustomXmlPart (preferred)
+                // or file path as fallback.
+                t.column("documentURI", .text).notNull()
+                // citationID matches the UUID in the SDT tag (swiftlib:v3:cite:<uuid>:...)
+                t.column("citationID", .text).notNull()
+                // Reference DB id this item belongs to
+                t.column("refID", .integer).notNull()
+                // CSL cite-item options
+                t.column("locator", .text)
+                t.column("label", .text)   // "page", "chapter", etc.
+                t.column("prefix", .text)
+                t.column("suffix", .text)
+                t.column("suppressAuthor", .boolean).notNull().defaults(to: false)
+                t.column("updatedAt", .datetime).notNull()
+            }
+            // Primary lookup: by document + citation
+            try db.create(index: "citationItemOption_docURI_citID",
+                          on: "citationItemOption",
+                          columns: ["documentURI", "citationID"],
+                          ifNotExists: true)
+            // Secondary: all locators for a specific reference across documents
+            try db.create(index: "citationItemOption_refID",
+                          on: "citationItemOption",
+                          columns: ["refID"],
+                          ifNotExists: true)
+        }
+
         return migrator
     }
 

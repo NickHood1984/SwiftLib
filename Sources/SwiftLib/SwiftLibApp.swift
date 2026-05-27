@@ -49,6 +49,9 @@ struct SwiftLibApp: App {
         )
         glassDriver = driver
         updater = upd
+        // Sparkle requires a valid bundle identifier. When running via `swift run`
+        // in development there is no .app bundle, so skip starting the updater.
+        guard Bundle.main.bundleIdentifier != nil else { return }
         do {
             try upd.start()
         } catch {

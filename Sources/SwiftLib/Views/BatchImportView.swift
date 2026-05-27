@@ -39,6 +39,7 @@ struct BatchImportView: View {
             HStack {
                 Button("取消") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .buttonStyle(SLSecondaryButtonStyle())
                 Spacer()
                 Text("批量元数据导入")
                     .font(.headline)
@@ -54,10 +55,12 @@ struct BatchImportView: View {
                     }
                     .keyboardShortcut(.defaultAction)
                     .disabled(results.filter(\.isSuccess).isEmpty)
+                    .buttonStyle(SLPrimaryButtonStyle())
                 } else {
                     Button("全部抓取") { startBatchFetch() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(identifiers.isEmpty || isProcessing)
+                        .buttonStyle(SLPrimaryButtonStyle())
                 }
             }
             .padding()
@@ -73,7 +76,13 @@ struct BatchImportView: View {
                     TextEditor(text: $inputText)
                         .font(.system(.body, design: .monospaced))
                         .frame(minHeight: 220)
-                        .border(Color.secondary.opacity(0.3))
+                        .scrollContentBackground(.hidden)
+                        .background(Color.primary.opacity(0.035))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 1)
+                        )
 
                     HStack {
                         Text("已识别 \(identifiers.count) 条输入")

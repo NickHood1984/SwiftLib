@@ -32,7 +32,12 @@ extension AppDatabase {
 
     private static func preferredStorageRoot(named leaf: String) -> URL {
         let fm = FileManager.default
+        let overrideRoot = ProcessInfo.processInfo.environment["SWIFTLIB_STORAGE_ROOT"]
+            .flatMap { $0.swiftlib_nilIfBlank }
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+
         let candidates: [URL] = [
+            overrideRoot,
             (try? fm.url(
                 for: .applicationSupportDirectory,
                 in: .userDomainMask,

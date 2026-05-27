@@ -755,6 +755,18 @@ final class WordAddinServer {
         if let v = ref.url { dict["url"] = v }
         if let v = ref.abstract { dict["abstract"] = v }
         if let v = ref.siteName { dict["siteName"] = v }
+        // CSL field completeness — lets the taskpane show a field-quality indicator
+        let completeness: String
+        switch ref.cslCompleteness {
+        case .complete:    completeness = "complete"
+        case .incomplete:  completeness = "incomplete"
+        case .critical:    completeness = "critical"
+        }
+        dict["cslCompleteness"] = completeness
+        let missingLabels = ref.cslFieldIssues.map { "\($0.displayName)(\($0.severity == .critical ? "必填" : "建议"))" }
+        if !missingLabels.isEmpty {
+            dict["cslMissingFields"] = missingLabels
+        }
         return dict
     }
 

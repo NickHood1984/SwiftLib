@@ -45,7 +45,7 @@ final class DatabaseTests: XCTestCase {
             Reference(title: "Three"),
         ])
 
-        XCTAssertEqual(imported, 3)
+        XCTAssertEqual(imported.total, 3)
         XCTAssertEqual(try db.referenceCount(), 3)
         XCTAssertEqual(try db.referenceCount(collectionId: try XCTUnwrap(collection.id)), 2)
         XCTAssertEqual(try db.fetchAllCollections().map(\.name), ["Reading List"])

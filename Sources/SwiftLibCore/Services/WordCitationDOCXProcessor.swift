@@ -67,7 +67,11 @@ public enum WordCitationDOCXProcessor {
         }
 
         let xml = try String(contentsOf: documentURL, encoding: .utf8)
-        return auditDocumentXML(xml, inputPath: inputURL.path, references: references)
+        let footnotesURL = unpacked.unpackedURL.appendingPathComponent("word/footnotes.xml")
+        let footnotesXML = FileManager.default.fileExists(atPath: footnotesURL.path)
+            ? (try? String(contentsOf: footnotesURL, encoding: .utf8))
+            : nil
+        return auditDocumentXML(xml, footnotesXML: footnotesXML, inputPath: inputURL.path, references: references)
     }
 
     public static func refreshDOCX(
@@ -85,7 +89,16 @@ public enum WordCitationDOCXProcessor {
         }
 
         let xml = try String(contentsOf: documentURL, encoding: .utf8)
-        let audit = auditDocumentXML(xml, inputPath: inputURL.path, references: references)
+
+        // Load footnotes.xml if present
+        let footnotesURL = unpacked.unpackedURL.appendingPathComponent("word/footnotes.xml")
+        let footnotesXMLOriginal: String? = FileManager.default.fileExists(atPath: footnotesURL.path)
+            ? (try? String(contentsOf: footnotesURL, encoding: .utf8))
+            : nil
+
+        let footnoteCitations = footnotesXMLOriginal.map { scanFootnoteCitations(in: $0) } ?? []
+
+        let audit = auditDocumentXML(xml, footnotesXML: footnotesXMLOriginal, inputPath: inputURL.path, references: references)
         guard audit.citationControlCount > 0 else {
             throw WordCitationDOCXProcessorError.noSwiftLibCitations
         }
@@ -99,17 +112,61 @@ public enum WordCitationDOCXProcessor {
         })
         let citations = scanCitationControls(in: xml)
         let bibliographyControls = scanBibliographyControls(in: xml)
-        let style = preferredStyle(citations: citations, bibliographyControls: bibliographyControls, defaultStyle: defaultStyle)
-        let groups = citations.map {
-            WordCitationGroup(
-                citationID: $0.citationID,
-                start: $0.range.location,
-                end: $0.range.location + $0.range.length,
-                referenceIDs: $0.referenceIDs,
-                styleID: style
-            )
+        let style = preferredStyle(
+            citations: citations,
+            bibliographyControls: bibliographyControls,
+            footnoteCitations: footnoteCitations,
+            defaultStyle: defaultStyle
+        )
+
+        // Combine SDT citations and footnote citations for rendering (footnotes follow body in order)
+        let sdtRefIDs = orderedUnique(citations.flatMap(\.referenceIDs))
+        let fnRefIDs = orderedUnique(footnoteCitations.flatMap(\.referenceIDs))
+        let allRefIDs = orderedUnique(sdtRefIDs + fnRefIDs)
+        let cslItems = allRefIDs.compactMap { referencesByID[$0] }.map { $0.cslJSONObject() }
+
+        // Read locator/prefix/suffix data stored in the document's CustomXmlPart by the Word add-in
+        let citationItemsMap = readCitationItemsMap(from: unpacked.unpackedURL)
+
+        // SDT citations use byte offsets as positions; footnote citations follow with offsets beyond body
+        let bodyLength = xml.utf16.count
+        let citeprocCitations: [(id: String, itemIDs: [String], position: Int, citationItems: [[String: Any]]?)] =
+            citations.map { c in
+                (id: c.citationID,
+                 itemIDs: orderedUnique(c.referenceIDs).map { String($0) },
+                 position: c.range.location,
+                 citationItems: citationItemsMap[c.citationID])
+            } +
+            footnoteCitations.enumerated().map { index, c in
+                (id: c.citationID,
+                 itemIDs: orderedUnique(c.referenceIDs).map { String($0) },
+                 position: bodyLength + index * 1000,
+                 citationItems: citationItemsMap[c.citationID])
+            }
+
+        let renderResult: (citationTexts: [String: String], bibliographyText: String, superscriptIDs: Set<String>, citationFormatting: CitationTextFormatting?)
+        do {
+            guard let r = try CiteprocJSCorePool.shared.withEngine(forStyleId: style, { engine in
+                engine.setItems(cslItems)
+                return try engine.renderDocument(citations: citeprocCitations)
+            }) else {
+                throw WordCitationDOCXProcessorError.processFailed("无法加载引文样式「\(style)」，请在样式管理中确认该样式已导入。")
+            }
+            renderResult = r
+        } catch let err as WordCitationDOCXProcessorError {
+            throw err
+        } catch {
+            throw WordCitationDOCXProcessorError.processFailed("引文渲染失败：\(error.localizedDescription)")
         }
-        let rendered = WordCitationRenderer.render(groups: groups, referencesByID: referencesByID, styleID: style)
+
+        let rendered = WordRenderedDocument(
+            citationTexts: renderResult.citationTexts,
+            superscriptCitationBookmarkNames: renderResult.superscriptIDs,
+            bibliographyText: renderResult.bibliographyText,
+            citationKind: CSLManager.shared.citationKind(for: style)
+        )
+
+        // Refresh SDT citations in document.xml
         let refreshedXML = refreshDocumentXML(
             xml,
             citations: citations,
@@ -117,15 +174,34 @@ public enum WordCitationDOCXProcessor {
             rendered: rendered,
             style: style
         )
-
         try refreshedXML.xml.write(to: documentURL, atomically: true, encoding: .utf8)
+
+        // Refresh footnote citations in footnotes.xml (if any)
+        var refreshedFootnoteCount = 0
+        if let fnXML = footnotesXMLOriginal, !footnoteCitations.isEmpty {
+            let (refreshedFnXML, count) = refreshFootnotesXML(fnXML, citationTexts: renderResult.citationTexts)
+            refreshedFootnoteCount = count
+            try refreshedFnXML.write(to: footnotesURL, atomically: true, encoding: .utf8)
+        }
+
         try zipDOCX(from: unpacked.unpackedURL, to: outputURL, tempRoot: unpacked.tempRoot)
+
+        // ── Back-fill cite-item options to the library ────────────────────
+        // Read locator/prefix/suffix from the document's citationItemsMap and
+        // persist them in citationItemOption so they survive document renaming
+        // or CustomXmlPart stripping by third-party tools.
+        let documentURI = inputURL.path
+        Self.backfillCitationItemOptions(
+            documentURI: documentURI,
+            citationsMap: citationItemsMap,
+            database: AppDatabase.shared
+        )
 
         return WordDOCXRefreshReport(
             inputPath: inputURL.path,
             outputPath: outputURL.path,
-            citationControlCount: citations.count,
-            refreshedCitationCount: refreshedXML.refreshedCitationCount,
+            citationControlCount: citations.count + footnoteCitations.count,
+            refreshedCitationCount: refreshedXML.refreshedCitationCount + refreshedFootnoteCount,
             bibliographyControlCount: bibliographyControls.count,
             refreshedBibliographyCount: refreshedXML.refreshedBibliographyCount,
             insertedBibliography: refreshedXML.insertedBibliography,
@@ -133,21 +209,84 @@ public enum WordCitationDOCXProcessor {
         )
     }
 
+    // MARK: - Back-fill cite-item options
+
+    /// Persist locator/prefix/suffix/suppressAuthor to the library database.
+    /// This is a best-effort call; failures are silently swallowed so they
+    /// never block the DOCX refresh operation.
+    private static func backfillCitationItemOptions(
+        documentURI: String,
+        citationsMap: [String: [[String: Any]]],
+        database: AppDatabase
+    ) {
+        guard !citationsMap.isEmpty else { return }
+        var options: [CitationItemOption] = []
+        for (citationID, items) in citationsMap {
+            for item in items {
+                // Resolve the reference DB id from the item payload.
+                let refID: Int64? = {
+                    if let ref = item["itemRef"] as? String, ref.hasPrefix("lib:"),
+                       let n = Int64(ref.dropFirst(4)) { return n }
+                    if let n = item["refId"] as? Int64 { return n }
+                    if let n = item["refId"] as? Int { return Int64(n) }
+                    if let s = item["refId"] as? String { return Int64(s) }
+                    if let n = item["id"] as? Int64 { return n }
+                    if let s = item["id"] as? String { return Int64(s) }
+                    return nil
+                }()
+                guard let rid = refID else { continue }
+
+                let locator = (item["locator"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let label   = (item["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let prefix  = (item["prefix"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let suffix  = (item["suffix"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let suppress = (item["suppress-author"] as? Bool)
+                    ?? (item["suppressAuthor"] as? Bool)
+                    ?? false
+
+                // Only store rows that actually carry non-trivial options.
+                let hasOptions = !(locator ?? "").isEmpty
+                    || !(prefix ?? "").isEmpty
+                    || !(suffix ?? "").isEmpty
+                    || suppress
+                guard hasOptions else { continue }
+
+                options.append(CitationItemOption(
+                    documentURI: documentURI,
+                    citationID: citationID,
+                    refID: rid,
+                    locator: locator?.swiftlib_nilIfBlank,
+                    label: label?.swiftlib_nilIfBlank,
+                    prefix: prefix?.swiftlib_nilIfBlank,
+                    suffix: suffix?.swiftlib_nilIfBlank,
+                    suppressAuthor: suppress
+                ))
+            }
+        }
+        guard !options.isEmpty else { return }
+        try? database.upsertCitationItemOptions(options)
+    }
+
     public static func auditDocumentXML(
         _ xml: String,
+        footnotesXML: String? = nil,
         inputPath: String = "",
         references: [Reference]
     ) -> WordDOCXAuditReport {
         let citations = scanCitationControls(in: xml)
+        let footnoteCitations = footnotesXML.map { scanFootnoteCitations(in: $0) } ?? []
         let bibliographyControls = scanBibliographyControls(in: xml)
         let referenceIDs = Set(references.compactMap(\.id))
-        let docUniqueIDs = orderedUnique(citations.flatMap(\.referenceIDs))
+        let docUniqueIDs = orderedUnique(
+            citations.flatMap(\.referenceIDs) + footnoteCitations.flatMap(\.referenceIDs)
+        )
         let docUniqueIDSet = Set(docUniqueIDs)
         let missingInLibrary = docUniqueIDs.filter { !referenceIDs.contains($0) }
         let unusedInLibrary = references.compactMap(\.id).filter { !docUniqueIDSet.contains($0) }.sorted()
         let bibliographyEntryCount = countBibliographyEntries(in: xml, bibliographyControls: bibliographyControls)
         var warnings: [String] = []
-        if bibliographyControls.isEmpty {
+        let totalCitationCount = citations.count + footnoteCitations.count
+        if bibliographyControls.isEmpty, totalCitationCount > 0, footnoteCitations.isEmpty {
             warnings.append("document has SwiftLib citations but no SwiftLib bibliography control")
         }
         if bibliographyEntryCount > 0, bibliographyEntryCount != docUniqueIDs.count {
@@ -156,7 +295,7 @@ public enum WordCitationDOCXProcessor {
 
         return WordDOCXAuditReport(
             inputPath: inputPath,
-            citationControlCount: citations.count,
+            citationControlCount: totalCitationCount,
             bibliographyControlCount: bibliographyControls.count,
             docUniqueIDs: docUniqueIDs,
             docUniqueIDCount: docUniqueIDs.count,
@@ -235,10 +374,12 @@ public enum WordCitationDOCXProcessor {
     private static func preferredStyle(
         citations: [CitationControl],
         bibliographyControls: [BibliographyControl],
+        footnoteCitations: [FootnoteSwiftLibCitation] = [],
         defaultStyle: String
     ) -> String {
         citations.first(where: { !$0.style.isEmpty })?.style
             ?? bibliographyControls.first(where: { !$0.style.isEmpty })?.style
+            ?? footnoteCitations.first(where: { !$0.style.isEmpty })?.style
             ?? defaultStyle
     }
 
@@ -454,6 +595,52 @@ public enum WordCitationDOCXProcessor {
             .replacingOccurrences(of: "&amp;", with: "&")
     }
 
+    // MARK: - CustomXmlPart: locator / prefix / suffix recovery
+
+    private static let swiftlibXmlNS = "http://swiftlib.com/citations"
+
+    /// Reads the SwiftLib CustomXmlPart stored by the Word add-in inside `customXml/item*.xml`.
+    /// Returns a map from citationId → citationItems array so that locators, prefixes, suffixes,
+    /// and suppress-author flags set in the add-in UI survive a CLI refresh.
+    private static func readCitationItemsMap(from unpackedURL: URL) -> [String: [[String: Any]]] {
+        let customXmlDir = unpackedURL.appendingPathComponent("customXml")
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: customXmlDir, includingPropertiesForKeys: nil
+        ) else { return [:] }
+
+        for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let name = file.lastPathComponent
+            // Skip *Props*.xml (metadata) — only read item content files
+            guard name.hasPrefix("item"), !name.contains("Props"), file.pathExtension == "xml" else { continue }
+            guard let content = try? String(contentsOf: file, encoding: .utf8),
+                  content.contains(swiftlibXmlNS) else { continue }
+
+            // Extract base64 payload between <payload encoding="base64">…</payload>
+            guard let openTag = content.range(of: "<payload", options: .caseInsensitive),
+                  let closeAngle = content.range(of: ">", range: openTag.upperBound..<content.endIndex),
+                  let closeTag = content.range(of: "</payload>", options: .caseInsensitive,
+                                               range: closeAngle.upperBound..<content.endIndex)
+            else { continue }
+
+            let b64 = content[closeAngle.upperBound..<closeTag.lowerBound]
+                .components(separatedBy: .whitespacesAndNewlines).joined()
+            guard let data = Data(base64Encoded: b64),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+
+            let storedCitations = json["citations"] as? [[String: Any]] ?? []
+            var map: [String: [[String: Any]]] = [:]
+            for c in storedCitations {
+                guard let citationId = c["citationId"] as? String,
+                      let items = c["citationItems"] as? [[String: Any]],
+                      !items.isEmpty else { continue }
+                map[citationId] = items
+            }
+            return map
+        }
+        return [:]
+    }
+
     private static func xmlEscaped(_ text: String) -> String {
         text
             .replacingOccurrences(of: "&", with: "&amp;")
@@ -601,6 +788,79 @@ public enum WordCitationDOCXProcessor {
 
     private static let pPrRegex = try! NSRegularExpression(
         pattern: #"<w:pPr\b[^>]*>.*?</w:pPr>"#,
+        options: [.dotMatchesLineSeparators]
+    )
+
+    // MARK: - Footnote citation support (word/footnotes.xml)
+
+    private struct FootnoteSwiftLibCitation {
+        let citationID: String
+        let style: String
+        let referenceIDs: [Int64]
+    }
+
+    /// Scans footnotes.xml for SwiftLib citation markers embedded as hidden (`<w:vanish/>`) runs.
+    /// Format inserted by the Word add-in:
+    ///   `<w:r><w:rPr><w:vanish/></w:rPr><w:t>swiftlib:v3:cite:UUID:style:ids</w:t></w:r>`
+    private static func scanFootnoteCitations(in xml: String) -> [FootnoteSwiftLibCitation] {
+        footnoteTagScanRegex.matches(in: xml, range: NSRange(xml.startIndex..., in: xml)).compactMap { match in
+            guard let tagRange = Range(match.range(at: 1), in: xml) else { return nil }
+            let rawTag = xmlUnescaped(String(xml[tagRange]))
+            guard let parsed = parseCitationTag(rawTag, controlXML: "") else { return nil }
+            return FootnoteSwiftLibCitation(
+                citationID: parsed.citationID,
+                style: parsed.style,
+                referenceIDs: parsed.referenceIDs
+            )
+        }
+    }
+
+    /// Refreshes the visible citation text in each SwiftLib footnote paragraph.
+    /// Replaces everything after the hidden marker run (up to `</w:p>`) with a new run
+    /// containing the rendered citation text. Returns the updated XML and the count of
+    /// successfully refreshed footnotes.
+    private static func refreshFootnotesXML(
+        _ xml: String,
+        citationTexts: [String: String]
+    ) -> (xml: String, count: Int) {
+        let matches = footnoteMarkerRunRegex.matches(
+            in: xml, range: NSRange(xml.startIndex..., in: xml)
+        ).sorted(by: { $0.range.location > $1.range.location })
+
+        let mutable = NSMutableString(string: xml)
+        var count = 0
+
+        for match in matches {
+            guard let tagRange = Range(match.range(at: 2), in: xml),
+                  let visibleRange = Range(match.range(at: 3), in: xml) else { continue }
+
+            let rawTag = xmlUnescaped(String(xml[tagRange]))
+            guard let parsed = parseCitationTag(rawTag, controlXML: ""),
+                  let text = citationTexts[parsed.citationID],
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+
+            let newRun = "<w:r><w:t xml:space=\"preserve\"> \(xmlEscaped(text))</w:t></w:r>"
+            mutable.replaceCharacters(in: NSRange(visibleRange, in: xml), with: newRun)
+            count += 1
+        }
+
+        return (mutable as String, count)
+    }
+
+    // Matches a vanished SwiftLib marker run in footnotes.xml and captures:
+    //   group 1 — the entire hidden run (to preserve)
+    //   group 2 — the SwiftLib tag text inside <w:t>
+    //   group 3 — everything after the hidden run before </w:p> (the visible text to replace)
+    private static let footnoteMarkerRunRegex = try! NSRegularExpression(
+        pattern: #"(<w:r\b[^>]*>(?:(?!</w:r>).)*?<w:vanish\b[^>]*/?>"# +
+                 #"(?:(?!</w:r>).)*?<w:t\b[^>]*>(swiftlib:v3:cite:[^<]+)</w:t>"# +
+                 #"(?:(?!</w:r>).)*?</w:r>)((?:(?!</w:p>).)*)"#,
+        options: [.dotMatchesLineSeparators]
+    )
+
+    // Lighter scan: just finds the tag text inside a hidden (vanished) run
+    private static let footnoteTagScanRegex = try! NSRegularExpression(
+        pattern: #"<w:vanish\b[^>]*/?>(?:(?!</w:r>).)*?<w:t\b[^>]*>(swiftlib:v3:cite:[^<]+)</w:t>"#,
         options: [.dotMatchesLineSeparators]
     )
 }

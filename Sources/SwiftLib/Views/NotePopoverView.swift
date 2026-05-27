@@ -60,9 +60,8 @@ struct NotePopoverView: View {
                 Button("保存") {
                     onSave(editingMarkdown.trimmingCharacters(in: .whitespacesAndNewlines))
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(SLPrimaryButtonStyle())
                 .controlSize(.small)
-                .font(.caption)
                 .keyboardShortcut(.defaultAction)
                 .disabled(editingMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }

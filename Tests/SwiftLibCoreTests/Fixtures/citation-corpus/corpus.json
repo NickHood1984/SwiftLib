@@ -1,0 +1,178 @@
+[
+  {
+    "id": "en-journal-1",
+    "label": "English journal article with DOI",
+    "title": "Quantum entanglement in macroscopic systems",
+    "type": "journalArticle",
+    "authors": [{"given": "Alice", "family": "Smith"}, {"given": "Bob", "family": "Jones"}, {"given": "Carol", "family": "Zhang"}],
+    "year": 2024,
+    "journal": "Physical Review Letters",
+    "volume": "132",
+    "issue": "4",
+    "pages": "041601",
+    "doi": "10.1103/PhysRevLett.132.041601"
+  },
+  {
+    "id": "en-journal-2",
+    "label": "English journal article without DOI",
+    "title": "Machine learning for protein structure prediction",
+    "type": "journalArticle",
+    "authors": [{"given": "David", "family": "Brown"}],
+    "year": 2022,
+    "journal": "Nature Methods",
+    "volume": "19",
+    "issue": "11",
+    "pages": "1362-1374"
+  },
+  {
+    "id": "zh-journal-1",
+    "label": "Chinese journal article (CNKI-style)",
+    "title": "人工智能在医疗诊断中的应用进展",
+    "type": "journalArticle",
+    "authors": [{"given": "伟", "family": "王"}, {"given": "磊", "family": "李"}, {"given": "华", "family": "张"}],
+    "year": 2023,
+    "journal": "中国生物医学工程学报",
+    "volume": "42",
+    "issue": "3",
+    "pages": "1-15",
+    "language": "zh-CN"
+  },
+  {
+    "id": "en-book-1",
+    "label": "English book",
+    "title": "Introduction to Algorithms",
+    "type": "book",
+    "authors": [{"given": "Thomas H.", "family": "Cormen"}, {"given": "Charles E.", "family": "Leiserson"}, {"given": "Ronald L.", "family": "Rivest"}, {"given": "Clifford", "family": "Stein"}],
+    "year": 2022,
+    "publisher": "MIT Press",
+    "publisherPlace": "Cambridge, MA",
+    "edition": "4th",
+    "isbn": "9780262046305"
+  },
+  {
+    "id": "zh-book-1",
+    "label": "Chinese book",
+    "title": "数据挖掘：概念与技术",
+    "type": "book",
+    "authors": [{"given": "Jiawei", "family": "Han"}, {"given": "Micheline", "family": "Kamber"}, {"given": "Jian", "family": "Pei"}],
+    "year": 2012,
+    "publisher": "机械工业出版社",
+    "publisherPlace": "北京",
+    "edition": "第3版",
+    "isbn": "9787111391401",
+    "language": "zh-CN"
+  },
+  {
+    "id": "en-book-chapter-1",
+    "label": "English book chapter",
+    "title": "Attention is All You Need",
+    "type": "bookSection",
+    "authors": [{"given": "Ashish", "family": "Vaswani"}, {"given": "Noam", "family": "Shazeer"}, {"given": "Niki", "family": "Parmar"}],
+    "year": 2017,
+    "journal": "Advances in Neural Information Processing Systems 30",
+    "pages": "5998-6008",
+    "publisher": "Curran Associates"
+  },
+  {
+    "id": "zh-thesis-1",
+    "label": "Chinese doctoral thesis",
+    "title": "深度卷积神经网络在图像识别中的关键问题研究",
+    "type": "thesis",
+    "authors": [{"given": "建国", "family": "陈"}],
+    "year": 2021,
+    "institution": "清华大学",
+    "genre": "博士学位论文",
+    "language": "zh-CN"
+  },
+  {
+    "id": "en-thesis-1",
+    "label": "English doctoral thesis",
+    "title": "Scalable Machine Learning for Large Language Models",
+    "type": "thesis",
+    "authors": [{"given": "Emily", "family": "Chen"}],
+    "year": 2023,
+    "institution": "Stanford University",
+    "genre": "PhD dissertation"
+  },
+  {
+    "id": "en-conference-1",
+    "label": "English conference paper",
+    "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+    "type": "conferencePaper",
+    "authors": [{"given": "Jacob", "family": "Devlin"}, {"given": "Ming-Wei", "family": "Chang"}, {"given": "Kenton", "family": "Lee"}, {"given": "Kristina", "family": "Toutanova"}],
+    "year": 2019,
+    "journal": "NAACL-HLT 2019",
+    "pages": "4171-4186",
+    "doi": "10.18653/v1/N19-1423"
+  },
+  {
+    "id": "en-preprint-1",
+    "label": "arXiv preprint",
+    "title": "GPT-4 Technical Report",
+    "type": "preprint",
+    "authors": [{"given": "", "family": "OpenAI"}],
+    "year": 2023,
+    "journal": "arXiv",
+    "url": "https://arxiv.org/abs/2303.08774"
+  },
+  {
+    "id": "en-webpage-1",
+    "label": "Web page",
+    "title": "PyTorch: An Imperative Style, High-Performance Deep Learning Library",
+    "type": "webpage",
+    "authors": [{"given": "Adam", "family": "Paszke"}],
+    "year": 2023,
+    "siteName": "PyTorch Documentation",
+    "url": "https://pytorch.org/docs/stable/index.html",
+    "accessedDate": "2024-01-15"
+  },
+  {
+    "id": "en-report-1",
+    "label": "Technical report",
+    "title": "A Survey of Large Language Models",
+    "type": "report",
+    "authors": [{"given": "Wayne Xin", "family": "Zhao"}, {"given": "Kun", "family": "Zhou"}],
+    "year": 2023,
+    "institution": "Renmin University of China",
+    "number": "arXiv:2303.18223"
+  },
+  {
+    "id": "en-patent-1",
+    "label": "Patent",
+    "title": "Method and system for training large language models",
+    "type": "patent",
+    "authors": [{"given": "John", "family": "Doe"}],
+    "year": 2023,
+    "number": "US11234567B2"
+  },
+  {
+    "id": "en-journal-many-authors",
+    "label": "Journal article with many authors (et al. test)",
+    "title": "The ATLAS Experiment at the CERN Large Hadron Collider",
+    "type": "journalArticle",
+    "authors": [
+      {"given": "G.", "family": "Aad"}, {"given": "E.", "family": "Abat"}, {"given": "B.", "family": "Abbott"},
+      {"given": "J. J.", "family": "Abdallah"}, {"given": "A. A.", "family": "Abdelalim"}, {"given": "A.", "family": "Abdesselam"},
+      {"given": "O.", "family": "Abdinov"}
+    ],
+    "year": 2008,
+    "journal": "Journal of Instrumentation",
+    "volume": "3",
+    "issue": "08",
+    "pages": "S08003",
+    "doi": "10.1088/1748-0221/3/08/S08003"
+  },
+  {
+    "id": "en-journal-numeric",
+    "label": "Journal article for IEEE/Vancouver numeric cite test",
+    "title": "Deep learning",
+    "type": "journalArticle",
+    "authors": [{"given": "Yann", "family": "LeCun"}, {"given": "Yoshua", "family": "Bengio"}, {"given": "Geoffrey", "family": "Hinton"}],
+    "year": 2015,
+    "journal": "Nature",
+    "volume": "521",
+    "issue": "7553",
+    "pages": "436-444",
+    "doi": "10.1038/nature14539"
+  }
+]

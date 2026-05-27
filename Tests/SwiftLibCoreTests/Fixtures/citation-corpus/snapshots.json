@@ -1,0 +1,122 @@
+{
+  "en-book-1" : {
+    "apa" : "Cormen, T. H., Leiserson, C. E., Rivest, R. L., & Stein, C. (2022). Introduction to Algorithms (4th ed.). MIT Press.",
+    "chicago" : "Cormen, Thomas H., Charles E. Leiserson, Ronald L. Rivest, and Clifford Stein. 2022. Introduction to Algorithms . 4th ed. Cambridge, MA: MIT Press.",
+    "harvard" : "Cormen, T.H. et al. (2022) Introduction to Algorithms . 4th edn. Cambridge, MA: MIT Press.",
+    "ieee" : "[1] T. H. Cormen, C. E. Leiserson, R. L. Rivest, and C. Stein, Introduction to Algorithms , 4th ed. Cambridge, MA: MIT Press, 2022.",
+    "nature" : "1. Cormen, T. H., Leiserson, C. E., Rivest, R. L. & Stein, C. Introduction to Algorithms . (MIT Press, Cambridge, MA, 2022).",
+    "vancouver" : "1. Cormen TH, Leiserson CE, Rivest RL, Stein C. Introduction to Algorithms . 4th ed. MIT Press; 2022."
+  },
+  "en-book-chapter-1" : {
+    "apa" : "Vaswani, A., Shazeer, N., & Parmar, N. (2017). Attention is All You Need. In Advances in Neural Information Processing Systems 30 (pp. 5998–6008). Curran Associates.",
+    "chicago" : "Vaswani, Ashish, Noam Shazeer, and Niki Parmar. 2017. “Attention Is All You Need.” In Advances in Neural Information Processing Systems 30 , 5998–6008. Curran Associates.",
+    "harvard" : "Vaswani, A., Shazeer, N. and Parmar, N. (2017) “Attention is All You Need,” in Advances in Neural Information Processing Systems 30 . Curran Associates, pp. 5998–6008.",
+    "ieee" : "[1] A. Vaswani, N. Shazeer, and N. Parmar, “Attention is All You Need,” in Advances in Neural Information Processing Systems 30 , Curran Associates, 2017, pp. 5998–6008.",
+    "nature" : "1. Vaswani, A., Shazeer, N. & Parmar, N. Attention is All You Need. in Advances in Neural Information Processing Systems 30 5998–6008 (Curran Associates, 2017).",
+    "vancouver" : "1. Vaswani A, Shazeer N, Parmar N. Attention is All You Need. In: Advances in Neural Information Processing Systems 30 . Curran Associates; 2017:5998-6008."
+  },
+  "en-conference-1" : {
+    "apa" : "Devlin, J., Chang, M.-W., Lee, K., & Toutanova, K. (2019). BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding. NAACL-HLT 2019 , 4171–4186. https:\/\/doi.org\/10.18653\/v1\/N19-1423",
+    "chicago" : "Devlin, Jacob, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. 2019. “BERT: Pre-Training of Deep Bidirectional Transformers for Language Understanding.” NAACL-HLT 2019 , 2019, 4171–86. https:\/\/doi.org\/10.18653\/v1\/N19-1423.",
+    "harvard" : "Devlin, J. et al. (2019) “BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding,” in NAACL-HLT 2019 , pp. 4171–4186. doi:10.18653\/v1\/N19-1423.",
+    "ieee" : "[1] J. Devlin, M.-W. Chang, K. Lee, and K. Toutanova, “BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding,” in NAACL-HLT 2019 , 2019, pp. 4171–4186. doi: 10.18653\/v1\/N19-1423.",
+    "nature" : "1. Devlin, J., Chang, M.-W., Lee, K. & Toutanova, K. BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding. in NAACL-HLT 2019 4171–4186 (2019). doi:10.18653\/v1\/N19-1423.",
+    "vancouver" : "1. Devlin J, Chang MW, Lee K, Toutanova K. BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding. In: NAACL-HLT 2019 . 2019:4171-4186. doi:10.18653\/v1\/N19-1423"
+  },
+  "en-journal-1" : {
+    "apa" : "Smith, A., Jones, B., & Zhang, C. (2024). Quantum entanglement in macroscopic systems. Physical Review Letters , 132 (4), 041601. https:\/\/doi.org\/10.1103\/PhysRevLett.132.041601",
+    "chicago" : "Smith, Alice, Bob Jones, and Carol Zhang. 2024. “Quantum Entanglement in Macroscopic Systems.” Physical Review Letters 132 (4): 041601. https:\/\/doi.org\/10.1103\/PhysRevLett.132.041601.",
+    "harvard" : "Smith, A., Jones, B. and Zhang, C. (2024) “Quantum entanglement in macroscopic systems,” Physical Review Letters , 132(4), p. 041601. doi:10.1103\/PhysRevLett.132.041601.",
+    "ieee" : "[1] A. Smith, B. Jones, and C. Zhang, “Quantum entanglement in macroscopic systems,” Physical Review Letters , vol. 132, no. 4, p. 041601, 2024, doi: 10.1103\/PhysRevLett.132.041601.",
+    "nature" : "1. Smith, A., Jones, B. & Zhang, C. Quantum entanglement in macroscopic systems. Physical Review Letters 132 , 041601 (2024).",
+    "vancouver" : "1. Smith A, Jones B, Zhang C. Quantum entanglement in macroscopic systems. Physical Review Letters . 2024;132(4):041601. doi:10.1103\/PhysRevLett.132.041601"
+  },
+  "en-journal-2" : {
+    "apa" : "Brown, D. (2022). Machine learning for protein structure prediction. Nature Methods , 19 (11), 1362–1374.",
+    "chicago" : "Brown, David. 2022. “Machine Learning for Protein Structure Prediction.” Nature Methods 19 (11): 1362–74.",
+    "harvard" : "Brown, D. (2022) “Machine learning for protein structure prediction,” Nature Methods , 19(11), pp. 1362–1374.",
+    "ieee" : "[1] D. Brown, “Machine learning for protein structure prediction,” Nature Methods , vol. 19, no. 11, pp. 1362–1374, 2022.",
+    "nature" : "1. Brown, D. Machine learning for protein structure prediction. Nature Methods 19 , 1362–1374 (2022).",
+    "vancouver" : "1. Brown D. Machine learning for protein structure prediction. Nature Methods . 2022;19(11):1362-1374."
+  },
+  "en-journal-many-authors" : {
+    "apa" : "Aad, G., Abat, E., Abbott, B., Abdallah, J. J., Abdelalim, A. A., Abdesselam, A., & Abdinov, O. (2008). The ATLAS Experiment at the CERN Large Hadron Collider. Journal of Instrumentation , 3 (08), S08003. https:\/\/doi.org\/10.1088\/1748-0221\/3\/08\/S08003",
+    "chicago" : "Aad, G., E. Abat, B. Abbott, J. J. Abdallah, A. A. Abdelalim, A. Abdesselam, and O. Abdinov. 2008. “The ATLAS Experiment at the CERN Large Hadron Collider.” Journal of Instrumentation 3 (08): S08003. https:\/\/doi.org\/10.1088\/1748-0221\/3\/08\/S08003.",
+    "harvard" : "Aad, G. et al. (2008) “The ATLAS Experiment at the CERN Large Hadron Collider,” Journal of Instrumentation , 3(08), p. S08003. doi:10.1088\/1748-0221\/3\/08\/S08003.",
+    "ieee" : "[1] G. Aad et al. , “The ATLAS Experiment at the CERN Large Hadron Collider,” Journal of Instrumentation , vol. 3, no. 08, p. S08003, 2008, doi: 10.1088\/1748-0221\/3\/08\/S08003.",
+    "nature" : "1. Aad, G. et al. The ATLAS Experiment at the CERN Large Hadron Collider. Journal of Instrumentation 3 , S08003 (2008).",
+    "vancouver" : "1. Aad G, Abat E, Abbott B, et al. The ATLAS Experiment at the CERN Large Hadron Collider. Journal of Instrumentation . 2008;3(08):S08003. doi:10.1088\/1748-0221\/3\/08\/S08003"
+  },
+  "en-journal-numeric" : {
+    "apa" : "LeCun, Y., Bengio, Y., & Hinton, G. (2015). Deep learning. Nature , 521 (7553), 436–444. https:\/\/doi.org\/10.1038\/nature14539",
+    "chicago" : "LeCun, Yann, Yoshua Bengio, and Geoffrey Hinton. 2015. “Deep Learning.” Nature 521 (7553): 436–44. https:\/\/doi.org\/10.1038\/nature14539.",
+    "harvard" : "LeCun, Y., Bengio, Y. and Hinton, G. (2015) “Deep learning,” Nature , 521(7553), pp. 436–444. doi:10.1038\/nature14539.",
+    "ieee" : "[1] Y. LeCun, Y. Bengio, and G. Hinton, “Deep learning,” Nature , vol. 521, no. 7553, pp. 436–444, 2015, doi: 10.1038\/nature14539.",
+    "nature" : "1. LeCun, Y., Bengio, Y. & Hinton, G. Deep learning. Nature 521 , 436–444 (2015).",
+    "vancouver" : "1. LeCun Y, Bengio Y, Hinton G. Deep learning. Nature . 2015;521(7553):436-444. doi:10.1038\/nature14539"
+  },
+  "en-patent-1" : {
+    "apa" : "Doe, J. (2023). Method and system for training large language models (Patent No. US11234567B2).",
+    "chicago" : "Doe, John. 2023. Method and system for training large language models. Patent US11234567B2, issued 2023.",
+    "harvard" : "Doe, J. (2023) “Method and system for training large language models.”",
+    "ieee" : "[1] J. Doe, “Method and system for training large language models,” US11234567B2, 2023",
+    "nature" : "1. Doe, J. Method and system for training large language models. (2023).",
+    "vancouver" : "1. Doe J. Method and system for training large language models. Published online 2023:US11234567B2."
+  },
+  "en-preprint-1" : {
+    "apa" : "OpenAI. (2023). GPT-4 Technical Report. In arXiv .",
+    "chicago" : "OpenAI. 2023. “GPT-4 Technical Report.” In arXiv . Preprint.",
+    "harvard" : "OpenAI (2023) “GPT-4 Technical Report,” arXiv [Preprint].",
+    "ieee" : "[1] OpenAI, “GPT-4 Technical Report,” 2023.",
+    "nature" : "1. OpenAI. GPT-4 Technical Report. arXiv Preprint at (2023).",
+    "vancouver" : "1. OpenAI. GPT-4 Technical Report. arXiv . Preprint posted online 2023."
+  },
+  "en-report-1" : {
+    "apa" : "Zhao, W. X., & Zhou, K. (2023). A Survey of Large Language Models (arXiv:2303.18223).",
+    "chicago" : "Zhao, Wayne Xin, and Kun Zhou. 2023. A Survey of Large Language Models . arXiv:2303.18223.",
+    "harvard" : "Zhao, W.X. and Zhou, K. (2023) A Survey of Large Language Models . arXiv:2303.18223.",
+    "ieee" : "[1] W. X. Zhao and K. Zhou, “A Survey of Large Language Models,” arXiv:2303.18223, 2023.",
+    "nature" : "1. Zhao, W. X. & Zhou, K. A Survey of Large Language Models . (2023).",
+    "vancouver" : "1. Zhao WX, Zhou K. A Survey of Large Language Models . 2023."
+  },
+  "en-thesis-1" : {
+    "apa" : "Chen, E. (2023). Scalable Machine Learning for Large Language Models [PhD dissertation, Stanford University]. Stanford University.",
+    "chicago" : "Chen, Emily. 2023. “Scalable Machine Learning for Large Language Models.” PhD dissertation, Stanford University. Stanford University.",
+    "harvard" : "Chen, E. (2023) Scalable Machine Learning for Large Language Models . PhD dissertation. Stanford University.",
+    "ieee" : "[1] E. Chen, “Scalable Machine Learning for Large Language Models,” PhD dissertation, Stanford University, 2023.",
+    "nature" : "1. Chen, E. Scalable Machine Learning for Large Language Models. (Stanford University, 2023).",
+    "vancouver" : "1. Chen E. Scalable Machine Learning for Large Language Models . PhD dissertation. Stanford University; 2023."
+  },
+  "en-webpage-1" : {
+    "apa" : "Paszke, A. (2023). PyTorch: An Imperative Style, High-Performance Deep Learning Library . https:\/\/pytorch.org\/docs\/stable\/index.html",
+    "chicago" : "Paszke, Adam. 2023. “PyTorch: An Imperative Style, High-Performance Deep Learning Library.” https:\/\/pytorch.org\/docs\/stable\/index.html.",
+    "harvard" : "Paszke, A. (2023) PyTorch: An Imperative Style, High-Performance Deep Learning Library . Available at: https:\/\/pytorch.org\/docs\/stable\/index.html (Accessed: January 15, 2024).",
+    "ieee" : "[1] A. Paszke, “PyTorch: An Imperative Style, High-Performance Deep Learning Library.” Accessed: Jan. 15, 2024. [Online]. Available: https:\/\/pytorch.org\/docs\/stable\/index.html",
+    "nature" : "1. Paszke, A. PyTorch: An Imperative Style, High-Performance Deep Learning Library. https:\/\/pytorch.org\/docs\/stable\/index.html (2023).",
+    "vancouver" : "1. Paszke A. PyTorch: An Imperative Style, High-Performance Deep Learning Library. 2023. Accessed January 15, 2024. https:\/\/pytorch.org\/docs\/stable\/index.html"
+  },
+  "zh-book-1" : {
+    "apa" : "Han J., Kamber M., & Pei J. (2012). 数据挖掘：概念与技术 (第3版). 机械工业出版社.",
+    "chicago" : "Han Jiawei, Kamber Micheline, and Pei Jian. 2012. 数据挖掘：概念与技术. 第3版. 北京: 机械工业出版社.",
+    "harvard" : "Han J., Kamber M. and Pei J. (2012) 数据挖掘：概念与技术. 第3版. 北京: 机械工业出版社.",
+    "ieee" : "[1] Han J., Kamber M., and Pei J., 数据挖掘：概念与技术, 第3版. 北京: 机械工业出版社, 2012.",
+    "nature" : "1. Han J., Kamber M. & Pei J. 数据挖掘：概念与技术. (机械工业出版社, 北京, 2012).",
+    "vancouver" : "1. Han J, Kamber M, Pei J. 数据挖掘：概念与技术. 第3版. 机械工业出版社; 2012."
+  },
+  "zh-journal-1" : {
+    "apa" : "王伟, 李磊, & 张华. (2023). 人工智能在医疗诊断中的应用进展. 中国生物医学工程学报 , 42 (3), 1–15.",
+    "chicago" : "王伟, 李磊, and 张华. 2023. “人工智能在医疗诊断中的应用进展.” 中国生物医学工程学报 42 (3): 1–15.",
+    "harvard" : "王伟, 李磊 and 张华 (2023) “人工智能在医疗诊断中的应用进展,” 中国生物医学工程学报, 42(3), pp. 1–15.",
+    "ieee" : "[1] 王伟, 李磊, and 张华, “人工智能在医疗诊断中的应用进展,” 中国生物医学工程学报, vol. 42, no. 3, pp. 1–15, 2023.",
+    "nature" : "1. 王伟, 李磊 & 张华. 人工智能在医疗诊断中的应用进展. 中国生物医学工程学报 42 , 1–15 (2023).",
+    "vancouver" : "1. 王伟, 李磊, 张华. 人工智能在医疗诊断中的应用进展. 中国生物医学工程学报. 2023;42(3):1-15."
+  },
+  "zh-thesis-1" : {
+    "apa" : "陈建国. (2021). 深度卷积神经网络在图像识别中的关键问题研究 [博士学位论文, 清华大学]. 清华大学.",
+    "chicago" : "陈建国. 2021. “深度卷积神经网络在图像识别中的关键问题研究.” 博士学位论文, 清华大学. 清华大学.",
+    "harvard" : "陈建国 (2021) 深度卷积神经网络在图像识别中的关键问题研究. 博士学位论文. 清华大学.",
+    "ieee" : "[1] 陈建国, “深度卷积神经网络在图像识别中的关键问题研究,” 博士学位论文, 清华大学, 2021.",
+    "nature" : "1. 陈建国. 深度卷积神经网络在图像识别中的关键问题研究. (清华大学, 2021).",
+    "vancouver" : "1. 陈建国. 深度卷积神经网络在图像识别中的关键问题研究. 博士学位论文. 清华大学; 2021."
+  }
+}

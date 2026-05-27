@@ -49,6 +49,8 @@ final class LibraryViewModel: ObservableObject {
     @Published var isImporting = false
     @Published var importProgress: String?
     @Published var errorMessage: String?
+    @Published var lastBatchResult: BatchImportResult? = nil
+    @Published var mergeBannerMessage: String? = nil
     @Published private(set) var allReferenceTitles: [String] = []
     @Published private(set) var titleKeywords: [(word: String, count: Int)] = []
 

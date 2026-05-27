@@ -44,6 +44,7 @@ struct WebImportView: View {
                     Button("取消") { dismiss() }
                         .keyboardShortcut(.cancelAction)
                         .disabled(isSaving)
+                        .buttonStyle(SLSecondaryButtonStyle())
                     Spacer()
                     Text("网页剪藏")
                         .font(.headline)
@@ -58,6 +59,7 @@ struct WebImportView: View {
                         }
                         .keyboardShortcut(.defaultAction)
                         .disabled(!urlValid || isSaving)
+                        .buttonStyle(SLPrimaryButtonStyle())
                     }
                 }
                 .padding()

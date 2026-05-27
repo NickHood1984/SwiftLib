@@ -1007,6 +1007,30 @@ async function cmdMoveOutOfSwiftLibCC(ctx) {
   }
 }
 
+function cmdEscapeXml(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// OOXML body for a Word footnote: hidden SwiftLib marker run + visible citation text run.
+function cmdBuildFootnoteBodyOoxml(markerTag, citationText) {
+  const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  return (
+    `<pkg:package xmlns:pkg="http://schemas.microsoft.com/office/2006/xmlPackage">` +
+    `<pkg:part pkg:name="/word/document.xml"` +
+    ` pkg:contentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml">` +
+    `<pkg:xmlData>` +
+    `<w:document xmlns:w="${W}"><w:body><w:p>` +
+    `<w:r><w:rPr><w:vanish/></w:rPr><w:t>${cmdEscapeXml(markerTag)}</w:t></w:r>` +
+    `<w:r><w:t xml:space="preserve"> ${cmdEscapeXml(citationText)}</w:t></w:r>` +
+    `</w:p></w:body></w:document>` +
+    `</pkg:xmlData></pkg:part></pkg:package>`
+  );
+}
+
 async function cmdUpsertCitationFromRibbon(refIds, styleId, citationItems) {
   const style = styleId || (await cmdGetDefaultStyle());
   const citationID = cmdGenerateUUID();
@@ -1020,46 +1044,121 @@ async function cmdUpsertCitationFromRibbon(refIds, styleId, citationItems) {
   }
   cmdRuntimeLocks.upsertCitation = true;
 
+  const citationKind = await cmdCitationKindForStyle(style);
+  const isNoteStyle = citationKind === "note";
+
   try {
-    await Word.run(async (ctx) => {
-      await cmdMoveOutOfSwiftLibCC(ctx);
-      const fmt = await cmdCaptureFormatSnapshotAtCursor(ctx);
-      if (fmt) cmdPendingCitationGuardFormatById.set(citationID, fmt);
-      const range = ctx.document.getSelection();
-      const cc = range.insertContentControl("RichText");
-      cc.title = CMD_CC_TITLE_CITE;
-      cc.appearance = "Hidden";
-      cmdSyncCitationFallbackPlaceholder(cc, { kind: "citation", fromShortTag: tagChoice.isShort }, style, refIds);
-      cc.tag = tag;
+    if (isNoteStyle) {
+      // CSL note style → insert as a real Word footnote.  Pre-render text so the
+      // footnote body shows real citation text instead of "[…]".
+      let initialText = "…";
       try {
+        const preData = await cmdFetchRenderPayload(
+          style,
+          [{ citationID, ids: refIds, position: 0, citationItems: citationItems || null }],
+          {},
+          { includeBibliography: false }
+        );
+        if (preData?.citationTexts?.[citationID]) initialText = preData.citationTexts[citationID];
+      } catch (e) {
+        console.warn("SwiftLib commands: footnote pre-render skipped:", e);
+      }
+
+      await Word.run(async (ctx) => {
+        await cmdMoveOutOfSwiftLibCC(ctx);
+        const range = ctx.document.getSelection();
+        if (typeof range.insertFootnote !== "function") {
+          // Host lacks WordApi 1.5 — let downstream fall back to CC path.
+          throw new Error("insertFootnote unavailable");
+        }
+        const noteItem = range.insertFootnote("");
         await ctx.sync();
-      } catch (e) {
-        console.warn("SwiftLib commands: ribbon citation tag sync failed, using short tag", e);
-        cc.tag = `${CMD_CITE_TAG_PREFIX}${citationID}`;
-        cmdPendingCitationPayload[citationID] = { style, ids: refIds.slice() };
-        cmdSyncCitationFallbackPlaceholder(cc, { kind: "citation", fromShortTag: true }, style, refIds);
+        try {
+          const footnoteOoxml = cmdBuildFootnoteBodyOoxml(tag, initialText);
+          noteItem.body.insertOoxml(footnoteOoxml, Word.InsertLocation.replace);
+        } catch (ooxmlErr) {
+          console.warn("SwiftLib commands: footnote OOXML body failed, using insertText fallback:", ooxmlErr);
+          const markerRange = noteItem.body.insertText(tag, Word.InsertLocation.start);
+          try { markerRange.font.hidden = true; } catch (_) {}
+          noteItem.body.insertText(" " + initialText, Word.InsertLocation.end);
+        }
         await ctx.sync();
-      }
-      SwiftLibShared.replaceContentControlText(cc, "[…]");
-      await ctx.sync();
-      try {
-        await cmdInsertLightweightGuardAfterCitationCC(ctx, cc, citationID);
-      } catch (e) {
-        console.warn("SwiftLib commands: lightweight guard skipped:", e);
-      }
-      try {
-        await cmdEnsureCaretOutsideSwiftLibAnchors(ctx);
-      } catch (e) {
-        console.warn("SwiftLib commands: caret hop skipped:", e);
-      }
-      await ctx.sync();
-    });
-    await cmdRefreshDocumentFromRibbon({ skipGhostCleanup: true, fromUpsert: true });
+        await cmdPersistCitationModeInContext(ctx, citationID, refIds, style, citationItems);
+        await ctx.sync();
+      });
+      delete cmdPendingCitationPayload[citationID];
+    } else {
+      // In-text style → original Content Control path.
+      await Word.run(async (ctx) => {
+        await cmdMoveOutOfSwiftLibCC(ctx);
+        const fmt = await cmdCaptureFormatSnapshotAtCursor(ctx);
+        if (fmt) cmdPendingCitationGuardFormatById.set(citationID, fmt);
+        const range = ctx.document.getSelection();
+        const cc = range.insertContentControl("RichText");
+        cc.title = CMD_CC_TITLE_CITE;
+        cc.appearance = "Hidden";
+        cmdSyncCitationFallbackPlaceholder(cc, { kind: "citation", fromShortTag: tagChoice.isShort }, style, refIds);
+        cc.tag = tag;
+        try {
+          await ctx.sync();
+        } catch (e) {
+          console.warn("SwiftLib commands: ribbon citation tag sync failed, using short tag", e);
+          cc.tag = `${CMD_CITE_TAG_PREFIX}${citationID}`;
+          cmdPendingCitationPayload[citationID] = { style, ids: refIds.slice() };
+          cmdSyncCitationFallbackPlaceholder(cc, { kind: "citation", fromShortTag: true }, style, refIds);
+          await ctx.sync();
+        }
+        SwiftLibShared.replaceContentControlText(cc, "[…]");
+        await ctx.sync();
+        try {
+          await cmdInsertLightweightGuardAfterCitationCC(ctx, cc, citationID);
+        } catch (e) {
+          console.warn("SwiftLib commands: lightweight guard skipped:", e);
+        }
+        try {
+          await cmdEnsureCaretOutsideSwiftLibAnchors(ctx);
+        } catch (e) {
+          console.warn("SwiftLib commands: caret hop skipped:", e);
+        }
+        await ctx.sync();
+      });
+      await cmdRefreshDocumentFromRibbon({ skipGhostCleanup: true, fromUpsert: true });
+    }
   } catch (e) {
     cmdPendingCitationGuardFormatById.delete(citationID);
     throw e;
   } finally {
     cmdRuntimeLocks.upsertCitation = false;
+  }
+}
+
+// Persist a single footnote-mode citation into the CustomXmlPart snapshot.
+// Must be called inside an existing Word.run context.
+async function cmdPersistCitationModeInContext(ctx, citationID, refIds, style, citationItems) {
+  if (!cmdIsWordApi14()) return;
+  try {
+    const rawSnap = await cmdReadSwiftLibStorage(ctx);
+    const snap = rawSnap || { v: 4, preferences: { style, citationMode: "footnote" }, items: {}, citations: [], bibliography: false };
+    if (!snap.preferences) snap.preferences = {};
+    snap.preferences.style = style;
+    snap.preferences.citationMode = "footnote";
+    const entry = {
+      citationId: citationID,
+      refIds: refIds.slice(),
+      citationItems: citationItems || refIds.map((id) => ({ itemRef: `lib:${id}`, refId: id })),
+      style,
+    };
+    snap.citations = Array.isArray(snap.citations) ? snap.citations.slice() : [];
+    const idx = snap.citations.findIndex((c) => String(c.citationId) === String(citationID));
+    if (idx >= 0) snap.citations[idx] = Object.assign({}, snap.citations[idx], entry);
+    else snap.citations.push(entry);
+    const xml = cmdBuildStorageXml(snap);
+    const items = await cmdLoadSwiftLibCustomXmlParts(ctx);
+    let updated = false;
+    for (const p of items) { p.setXml(xml); updated = true; break; }
+    if (!updated) ctx.document.customXmlParts.add(xml);
+  } catch (e) {
+    console.warn("SwiftLib commands: footnote CustomXmlPart persist:", e);
   }
 }
 
@@ -1399,7 +1498,29 @@ function insertCitationCommand(event) {
 
 async function refreshAllCommand(event) {
   try {
-    await cmdRefreshDocumentFromRibbon();
+    // Footnote-mode documents have no SwiftLib content controls — the inline scan finds nothing.
+    // Detect the marker in CustomXmlPart and tell the user to use the CLI instead.
+    let isFootnoteMode = false;
+    try {
+      isFootnoteMode = await Word.run(async (ctx) => {
+        const snap = await cmdReadSwiftLibStorage(ctx);
+        cmdTryTrackedObjectsRemoveAll(ctx);
+        return snap?.preferences?.citationMode === "footnote";
+      });
+    } catch (_) {}
+
+    if (isFootnoteMode) {
+      try {
+        window.alert(
+          "此文档使用脚注引文模式。\n\n" +
+          "请使用命令行工具刷新引文编号：\n" +
+          "  swiftlib refresh-docx 文档.docx\n\n" +
+          "保存文件到本地后运行上述命令，再重新打开即可。"
+        );
+      } catch (_) {}
+    } else {
+      await cmdRefreshDocumentFromRibbon();
+    }
   } catch (e) {
     console.error("SwiftLib refreshAllCommand:", e);
   }

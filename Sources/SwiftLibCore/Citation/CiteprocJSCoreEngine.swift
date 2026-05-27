@@ -562,15 +562,20 @@ public final class CiteprocJSCorePool {
     // MARK: - Engine access
 
     private func entry(forStyleId styleId: String) -> PooledEngineEntry? {
+        // Fast path: return existing entry without doing any I/O.
         lock.lock()
-        defer { lock.unlock() }
-
         if let existing = engines[styleId] {
             existing.lastUsed = Date()
+            lock.unlock()
             recordUsage(styleId: styleId)
             return existing
         }
+        lock.unlock()
 
+        // Slow path: load style + create JSContext outside the lock so that
+        // concurrent requests for *different* styles don't block each other,
+        // and requests for the *same* style at worst create two engines (one
+        // is discarded below — cheaper than stalling all callers).
         guard let styleXML = loadStyleXML(styleId: styleId) else {
             return nil
         }
@@ -585,28 +590,39 @@ public final class CiteprocJSCorePool {
         }
         guard !localeMap.isEmpty else { return nil }
 
+        let newEngine: CiteprocJSCoreEngine
         do {
-            let engine = try CiteprocJSCoreEngine(
+            newEngine = try CiteprocJSCoreEngine(
                 styleXML: styleXML,
                 localeXMLs: localeMap,
                 primaryLang: detectedLang
             )
-            let entry = PooledEngineEntry(engine: engine)
-            // Evict least-recently-used engine if pool is full
-            if engines.count >= maxEngines {
-                if let lruKey = engines.min(by: { $0.value.lastUsed < $1.value.lastUsed })?.key {
-                    engines.removeValue(forKey: lruKey)
-                }
-            }
-            engines[styleId] = entry
-            recordUsage(styleId: styleId)
-            return entry
         } catch {
             if SwiftLibCoreDebugLogging.runtimeVerbose {
                 print("[CiteprocJSCorePool] Failed to create engine for \(styleId): \(error)")
             }
             return nil
         }
+
+        // Re-acquire lock to store. If another thread beat us here, discard
+        // the engine we just built and return the winner's entry instead.
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = engines[styleId] {
+            existing.lastUsed = Date()
+            recordUsage(styleId: styleId)
+            return existing
+        }
+        // Evict least-recently-used engine if pool is full
+        if engines.count >= maxEngines {
+            if let lruKey = engines.min(by: { $0.value.lastUsed < $1.value.lastUsed })?.key {
+                engines.removeValue(forKey: lruKey)
+            }
+        }
+        let entry = PooledEngineEntry(engine: newEngine)
+        engines[styleId] = entry
+        recordUsage(styleId: styleId)
+        return entry
     }
 
     /// Runs the body with exclusive access to a style-specific engine.

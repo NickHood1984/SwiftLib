@@ -1,9 +1,24 @@
 import Foundation
 import GRDB
 
+// MARK: - Result types
+
+public enum SaveReferenceOutcome: Sendable {
+    case inserted
+    case updated
+    case mergedInto(existingId: Int64, existingTitle: String)
+}
+
+public struct BatchImportResult: Sendable {
+    public var inserted: Int = 0
+    public var merged: Int = 0
+    public var total: Int { inserted + merged }
+}
+
 // MARK: - Reference CRUD
 extension AppDatabase {
-    public func saveReference(_ reference: inout Reference) throws {
+    @discardableResult
+    public func saveReference(_ reference: inout Reference) throws -> SaveReferenceOutcome {
         try dbWriter.write { db in
             try normalizeForDirectLibrarySave(&reference)
             let isExistingReference = reference.id != nil
@@ -15,14 +30,19 @@ extension AppDatabase {
             if reference.id == nil,
                let duplicateId = try findDuplicateReferenceID(for: reference, db: db),
                var existing = try Reference.fetchOne(db, id: duplicateId) {
+                let existingTitle = existing.title
                 existing = mergedReference(existing: existing, incoming: reference)
                 try existing.save(db)
                 reference = existing
+                return .mergedInto(existingId: duplicateId, existingTitle: existingTitle)
             } else {
                 if isExistingReference {
                     reference.dateModified = Date()
+                    try reference.save(db)
+                    return .updated
                 }
                 try reference.save(db)
+                return .inserted
             }
         }
     }
@@ -167,10 +187,10 @@ extension AppDatabase {
 
     /// Batch import — uses single transaction for maximum speed
     /// 10,000 records in ~200ms on Apple Silicon
-    public func batchImportReferences(_ references: [Reference]) throws -> Int {
-        guard !references.isEmpty else { return 0 }
+    public func batchImportReferences(_ references: [Reference]) throws -> BatchImportResult {
+        guard !references.isEmpty else { return BatchImportResult() }
         return try dbWriter.write { db in
-            var count = 0
+            var result = BatchImportResult()
             for var ref in references {
                 try normalizeForDirectLibrarySave(&ref)
                 try ensureLibraryReady(ref)
@@ -178,12 +198,13 @@ extension AppDatabase {
                    var existing = try Reference.fetchOne(db, id: duplicateId) {
                     existing = mergedReference(existing: existing, incoming: ref)
                     try existing.save(db)
+                    result.merged += 1
                 } else {
                     try ref.insert(db)
+                    result.inserted += 1
                 }
-                count += 1
             }
-            return count
+            return result
         }
     }
 }

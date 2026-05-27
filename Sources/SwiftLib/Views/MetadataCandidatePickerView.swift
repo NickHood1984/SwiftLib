@@ -129,11 +129,13 @@ struct MetadataCandidatePickerView: View {
 
             HStack {
                 Button("取消", role: .cancel, action: onCancel)
+                    .buttonStyle(SLSecondaryButtonStyle())
                     .keyboardShortcut(.cancelAction)
 
                 Spacer()
 
                 Button(skipLabel, action: onSkip)
+                    .buttonStyle(SLSecondaryButtonStyle())
 
                 Button("导入所选结果") {
                     guard let selectedCandidate else { return }

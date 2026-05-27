@@ -61,6 +61,7 @@ struct AddReferenceView: View {
             HStack {
                 Button("取消") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .buttonStyle(SLSecondaryButtonStyle())
                 Spacer()
                 Text("手动新建")
                     .font(.headline)
@@ -70,75 +71,76 @@ struct AddReferenceView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(saveDisabled)
+                .buttonStyle(SLPrimaryButtonStyle())
             }
             .padding()
 
             Divider()
 
             Form {
-                Section("Type") {
-                    Picker("Reference Type", selection: $referenceType) {
+                Section("类型") {
+                    Picker("文献类型", selection: $referenceType) {
                         ForEach(ReferenceType.allCases, id: \.self) { type in
                             Label(type.rawValue, systemImage: type.icon).tag(type)
                         }
                     }
                 }
 
-                Section("Basic Info") {
-                    TextField("Title *", text: $title)
-                    TextField("Authors (comma or semicolon separated)", text: $authorsText)
-                    TextField("Year", value: $year, format: .number)
+                Section("基本信息") {
+                    TextField("标题 *", text: $title)
+                    TextField("作者（逗号或分号分隔）", text: $authorsText)
+                    TextField("年份", value: $year, format: .number)
                 }
 
-                Section("Publication") {
-                    TextField("Journal / Book Title", text: $journal)
+                Section("出版信息") {
+                    TextField("期刊 / 书名", text: $journal)
                     HStack {
-                        TextField("Volume", text: $volume)
-                        TextField("Issue", text: $issue)
-                        TextField("Pages", text: $pages)
+                        TextField("卷", text: $volume)
+                        TextField("期", text: $issue)
+                        TextField("页码", text: $pages)
                     }
-                    TextField("Publisher", text: $publisher)
+                    TextField("出版社", text: $publisher)
                     HStack {
-                        TextField("Publisher Place", text: $publisherPlace)
-                        TextField("Edition", text: $edition)
+                        TextField("出版地", text: $publisherPlace)
+                        TextField("版次", text: $edition)
                     }
                     if referenceType == .conferencePaper {
-                        TextField("Conference / Event", text: $eventTitle)
-                        TextField("Event Place", text: $eventPlace)
+                        TextField("会议名称", text: $eventTitle)
+                        TextField("会议地点", text: $eventPlace)
                     }
                     if referenceType == .thesis {
-                        TextField("Institution", text: $institution)
-                        TextField("Thesis Type / Genre", text: $genre)
+                        TextField("所属机构", text: $institution)
+                        TextField("学位类型", text: $genre)
                     }
                 }
 
-                Section("Identifiers") {
+                Section("标识符") {
                     TextField("DOI", text: $doi)
                     TextField("ISBN", text: $isbn)
                     TextField("ISSN", text: $issn)
-                    TextField("URL", text: $url, prompt: Text("Optional"))
+                    TextField("URL", text: $url, prompt: Text("选填"))
                 }
 
-                Section("Extended") {
-                    TextField("Language", text: $language)
-                    TextField("Number of Pages", text: $numberOfPages)
+                Section("扩展信息") {
+                    TextField("语言", text: $language)
+                    TextField("总页数", text: $numberOfPages)
                 }
 
-                Section("Collection") {
-                    Picker("Collection", selection: $collectionId) {
-                        Text("None").tag(nil as Int64?)
+                Section("分组") {
+                    Picker("所属分组", selection: $collectionId) {
+                        Text("无").tag(nil as Int64?)
                         ForEach(collections) { col in
                             Label(col.name, systemImage: col.icon).tag(col.id as Int64?)
                         }
                     }
                 }
 
-                Section("Abstract") {
+                Section("摘要") {
                     TextEditor(text: $abstract)
                         .frame(minHeight: 80)
                 }
 
-                Section("Notes") {
+                Section("备注") {
                     TextEditor(text: $notes)
                         .frame(minHeight: 60)
                 }
@@ -146,12 +148,12 @@ struct AddReferenceView: View {
                 Section("PDF") {
                     if pdfPath != nil {
                         HStack {
-                            Label("PDF Attached", systemImage: "doc.fill")
+                            Label("已附加 PDF", systemImage: "doc.fill")
                             Spacer()
-                            Button("Remove") { pdfPath = nil }
+                            Button("移除") { pdfPath = nil }
                         }
                     } else {
-                        Button("Attach PDF...") { attachPDF() }
+                        Button("附加 PDF…") { attachPDF() }
                     }
                 }
             }

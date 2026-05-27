@@ -19,9 +19,10 @@ struct AddByIdentifierView: View {
             Text("元数据导入")
                 .font(.headline)
 
-            HStack {
+            HStack(spacing: 8) {
                 TextField("DOI、ISBN、PMID、arXiv、CNKI 链接或中文题名", text: $inputText)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 15, weight: .medium))
                     .onSubmit { fetchMetadata() }
 
                 Button(action: fetchMetadata) {
@@ -30,10 +31,23 @@ struct AddByIdentifierView: View {
                             .controlSize(.small)
                     } else {
                         Image(systemName: "magnifyingglass")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
                     }
                 }
+                .buttonStyle(.plain)
                 .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isFetching)
             }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 11)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(0.035))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 1)
+            )
 
             Text("支持 DOI · ISBN · PMID · arXiv · CNKI 链接 · 中文题名")
                 .font(.caption2)

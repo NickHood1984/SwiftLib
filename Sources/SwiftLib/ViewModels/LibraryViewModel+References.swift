@@ -27,13 +27,26 @@ extension LibraryViewModel {
         }
     }
 
-    func saveReference(_ ref: inout Reference) {
+    @discardableResult
+    func saveReference(_ ref: inout Reference) -> SaveReferenceOutcome? {
         ref.dateModified = Date()
         do {
-            try db.saveReference(&ref)
+            let outcome = try db.saveReference(&ref)
             WordAddinServer.shared.invalidateRenderCache()
+            if case .mergedInto(_, let title) = outcome {
+                mergeBannerMessage = "已与现有条目「\(title.prefix(30))」合并"
+                scheduleClearMergeBanner()
+            }
+            return outcome
         } catch {
             errorMessage = "Save failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    private func scheduleClearMergeBanner() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            self?.mergeBannerMessage = nil
         }
     }
 
@@ -76,7 +89,9 @@ extension LibraryViewModel {
 
     func batchImportReferences(_ refs: [Reference]) {
         do {
-            _ = try db.batchImportReferences(refs)
+            let result = try db.batchImportReferences(refs)
+            lastBatchResult = result
+            WordAddinServer.shared.invalidateRenderCache()
         } catch {
             errorMessage = "Batch import failed: \(error.localizedDescription)"
         }

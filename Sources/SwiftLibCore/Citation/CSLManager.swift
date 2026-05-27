@@ -80,8 +80,9 @@ public final class CSLManager {
             throw CSLError.invalidStructure("missing style title")
         }
 
-        // Save to storage
-        let fileName = url.lastPathComponent
+        // Save to storage using the style ID as the filename to avoid collisions
+        // when two CSL files share the same filename but have different style IDs.
+        let fileName = "\(style.id).csl"
         let dest = storageDir.appendingPathComponent(fileName)
         try data.write(to: dest)
 
@@ -245,38 +246,43 @@ public final class CSLManager {
                 return data
             }
         }
-        // 2. Fall back to bundled built-in CSL styles
+        // 2. Fall back to bundled built-in CSL styles (BuiltinCSL directory)
         if let builtinDir = Bundle.module.url(forResource: "BuiltinCSL", withExtension: nil),
            let files = try? FileManager.default.contentsOfDirectory(at: builtinDir, includingPropertiesForKeys: nil) {
             for file in files where file.pathExtension == "csl" {
                 guard let data = try? Data(contentsOf: file),
                       let style = CSLXMLParser().parse(data: data),
                       style.id == styleId else { continue }
-                withCacheLock {
-                    cachedXmlData[styleId] = data
-                }
+                withCacheLock { cachedXmlData[styleId] = data }
                 return data
+            }
+        }
+        // 3. Fall back to bundled CSL files served to the Word add-in (WordAddin/CSL)
+        let subdirs = ["WordAddin/CSL", "CSL"]
+        for subdir in subdirs {
+            for bundle in [Bundle.module, Bundle.main] {
+                if let url = bundle.url(forResource: styleId, withExtension: "csl", subdirectory: subdir),
+                   let data = try? Data(contentsOf: url) {
+                    withCacheLock { cachedXmlData[styleId] = data }
+                    return data
+                }
             }
         }
         return nil
     }
 
 
-    /// Format inline citation — tries CSL engine first, falls back to built-in
+    /// Format inline citation using citeproc-js (via CitationRenderer).
+    /// This is the canonical path — output is identical to what the Word/WPS
+    /// add-in renders. Falls back to a plain-text approximation on engine failure.
     public func formatCitation(_ refs: [Reference], style: String) -> String {
-        if let engine = engine(for: style) {
-            return engine.renderInlineCitation(refs)
-        }
-        // Fallback to built-in formatter
-        return CitationFormatter.formatInlineCitation(refs, style: style)
+        CitationRenderer.renderInlineCitation(refs, styleID: style)
     }
 
-    /// Format bibliography entry — tries CSL engine first, falls back to built-in
+    /// Format bibliography entry using citeproc-js (via CitationRenderer).
+    /// Falls back to a plain-text approximation on engine failure.
     public func formatBibliography(_ ref: Reference, style: String) -> String {
-        if let engine = engine(for: style) {
-            return engine.renderBibliographyEntry(ref)
-        }
-        return CitationFormatter.formatBibliography(ref, style: style)
+        CitationRenderer.renderBibliographyEntry(ref, styleID: style)
     }
 
     public func citationKind(for styleId: String) -> CitationKind {

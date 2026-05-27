@@ -42,6 +42,7 @@ struct CNKIVerificationSheet: View {
                 Button("取消") {
                     provider.cancelVerification()
                 }
+                .buttonStyle(SLSecondaryButtonStyle())
                 .keyboardShortcut(.cancelAction)
 
                 Spacer()
