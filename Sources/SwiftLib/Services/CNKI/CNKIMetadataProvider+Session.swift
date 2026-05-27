@@ -59,6 +59,8 @@ extension CNKIMetadataProvider {
 
 
     func runOperation(_ operation: PendingOperation) async throws -> OperationOutput {
+        await CNKISelectorService.shared.autoUpdateIfNeeded()
+
         needsWebView = true
         let webView = try await requireWebView()
         var verificationAttempts = 0

@@ -4,13 +4,69 @@ extension MetadataResolution {
     public static func parseVolumeIssuePages(from text: String) -> (volume: String?, issue: String?, pages: String?) {
         let normalized = normalizeWhitespaceAndWidth(text)
 
-        let volume = firstMatch(in: normalized, pattern: #"(?:第?\s*([0-9]{1,4})\s*卷|vol\.?\s*([0-9]{1,4}))"#)
-        let issue = firstMatch(in: normalized, pattern: #"(?:第?\s*([0-9]{1,4})\s*期|no\.?\s*([0-9]{1,4}))"#)
-        let pagePattern = #"(?:页码|页码范围|pages?)\s*[:：]?\s*([0-9]{1,4}\s*[-–—]\s*[0-9]{1,4}|[0-9]{1,4})|([0-9]{1,4}\s*[-–—]\s*[0-9]{1,4})"#
-        let pages = firstMatch(in: normalized, pattern: pagePattern)?
-            .replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+        let compact = parseCompactPublicationSpan(from: normalized)
+        let volume = compact.volume
+            ?? firstMatch(in: normalized, pattern: #"(?:第?\s*([0-9]{1,4})\s*卷|vol\.?\s*([0-9]{1,4}))"#)
+        let issue = compact.issue
+            ?? firstMatch(in: normalized, pattern: #"(?:第?\s*([0-9A-Za-z]{1,12})\s*期|no\.?\s*([0-9A-Za-z]{1,12}))"#)
+        let labeledPagePattern = #"(?:页码|页码范围|pages?|pp\.?)\s*[:：]?\s*([0-9]{1,5}\s*[-–—]\s*[0-9]{1,5}|[0-9]{1,5})"#
+        let pages = firstMatch(in: normalized, pattern: labeledPagePattern)
+            .flatMap(normalizedPageSpan)
+            ?? compact.pages
+            ?? firstBarePageSpan(in: normalized)
 
         return (volume?.swiftlib_nilIfBlank, issue?.swiftlib_nilIfBlank, pages?.swiftlib_nilIfBlank)
+    }
+
+    private static func parseCompactPublicationSpan(from text: String) -> (volume: String?, issue: String?, pages: String?) {
+        let patterns = [
+            #"(?:^|[^\d])(?:19\d{2}|20\d{2})\s*[,，]\s*([0-9]{1,4})\s*[\(（]\s*([0-9A-Za-z增刊特刊\-]{1,12})\s*[\)）]\s*[:：]\s*([0-9]{1,5}\s*[-–—]\s*[0-9]{1,5}|[0-9]{1,5})"#,
+            #"(?:^|[^\d])([0-9]{1,4})\s*[.．]\s*([0-9A-Za-z]{1,12})\s*[\(（]\s*(?:19\d{2}|20\d{2})\s*[\)）]\s*[:：]\s*([0-9]{1,5}\s*[-–—]\s*[0-9]{1,5}|[0-9]{1,5})"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  match.numberOfRanges >= 4,
+                  let volume = capture(match, at: 1, in: text),
+                  let issue = capture(match, at: 2, in: text),
+                  let pages = capture(match, at: 3, in: text).flatMap(normalizedPageSpan) else {
+                continue
+            }
+            return (volume, issue, pages)
+        }
+
+        return (nil, nil, nil)
+    }
+
+    private static func firstBarePageSpan(in text: String) -> String? {
+        allMatches(in: text, pattern: #"([0-9]{1,5}\s*[-–—]\s*[0-9]{1,5})"#)
+            .compactMap(normalizedPageSpan)
+            .first { !looksLikeYearRange($0) }
+    }
+
+    private static func normalizedPageSpan(_ value: String) -> String? {
+        let normalized = value
+            .replacingOccurrences(of: #"\s*[-–—]\s*"#, with: "-", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.swiftlib_nilIfBlank
+    }
+
+    private static func looksLikeYearRange(_ value: String) -> Bool {
+        let parts = value.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 2 else { return false }
+        return parts.allSatisfy { (1800...2100).contains($0) }
+            && abs(parts[1] - parts[0]) <= 100
+    }
+
+    private static func capture(_ match: NSTextCheckingResult, at index: Int, in text: String) -> String? {
+        guard index < match.numberOfRanges,
+              let range = Range(match.range(at: index), in: text) else {
+            return nil
+        }
+        let value = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.swiftlib_nilIfBlank
     }
 
     public static func cleanPDFSeedFilename(_ fileName: String) -> String {

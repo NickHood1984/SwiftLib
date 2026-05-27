@@ -205,6 +205,31 @@ enum SwiftLibPreferences {
         set { UserDefaults.standard.set(newValue, forKey: siteAdaptersLastUpdateKey) }
     }
 
+    // MARK: - CNKI Selectors (知网选择器远程配置)
+
+    static let cnkiSelectorsRemoteURLKey = "SwiftLib.cnkiSelectorsRemoteURL"
+    static let defaultCNKISelectorsRemoteURL = "https://raw.githubusercontent.com/NickHood1984/SwiftLib/main/Sources/SwiftLib/Resources/cnki-selectors.json"
+
+    static var cnkiSelectorsRemoteURL: String {
+        get {
+            let stored = UserDefaults.standard.string(forKey: cnkiSelectorsRemoteURLKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (stored?.isEmpty == false) ? stored! : defaultCNKISelectorsRemoteURL
+        }
+        set {
+            UserDefaults.standard.set(
+                newValue.trimmingCharacters(in: .whitespacesAndNewlines),
+                forKey: cnkiSelectorsRemoteURLKey
+            )
+        }
+    }
+
+    static let cnkiSelectorsLastUpdateKey = "SwiftLib.cnkiSelectorsLastUpdate"
+    static var cnkiSelectorsLastUpdate: Date {
+        get { UserDefaults.standard.object(forKey: cnkiSelectorsLastUpdateKey) as? Date ?? .distantPast }
+        set { UserDefaults.standard.set(newValue, forKey: cnkiSelectorsLastUpdateKey) }
+    }
+
     // MARK: - PaddleOCR
 
     static let paddleOCRTokenKey = "SwiftLib.paddleOCRToken"

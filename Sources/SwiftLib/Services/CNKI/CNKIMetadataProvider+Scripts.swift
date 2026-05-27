@@ -1,8 +1,32 @@
 import Foundation
 
 extension CNKIMetadataProvider {
-    static let pageAssessmentScript = #"""
+    static var pageAssessmentScript: String {
+        scriptWithSelectorConfig(pageAssessmentScriptTemplate)
+    }
+
+    static var searchExtractionScript: String {
+        scriptWithSelectorConfig(searchExtractionScriptTemplate)
+    }
+
+    static var detailExtractionScript: String {
+        scriptWithSelectorConfig(detailExtractionScriptTemplate)
+    }
+
+    private static func scriptWithSelectorConfig(_ template: String) -> String {
+        let groups = CNKISelectorService.shared.config.groups
+        let data = (try? JSONEncoder().encode(groups)) ?? Data("{}".utf8)
+        let json = String(data: data, encoding: .utf8) ?? "{}"
+        return template.replacingOccurrences(of: "%%CNKI_SELECTORS%%", with: json)
+    }
+
+    private static let pageAssessmentScriptTemplate = #"""
     (() => {
+      const configuredSelectors = %%CNKI_SELECTORS%%;
+      const selectorGroup = (name, fallback) => {
+        const value = configuredSelectors?.[name];
+        return Array.isArray(value) && value.length > 0 ? value : fallback;
+      };
       const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
       const isVisible = (el) => {
         if (!el) return false;
@@ -51,6 +75,12 @@ extension CNKIMetadataProvider {
       };
       const rawPageText = String(document.body?.innerText || "");
       const marker = normalize((document.title || "") + " " + rawPageText.slice(0, 1800));
+      const searchRowCount = document.querySelectorAll(selectorGroup('searchRows', [
+        'table.result-table-list > tbody > tr',
+        '.result-table-list tbody tr',
+        '.result-table tbody tr',
+        'tr[data-dbcode]'
+      ]).join(',')).length;
       const hasVisibleVerificationUI = Array.from(document.querySelectorAll('input, iframe, img, div, span, p, a, button'))
         .filter(isVisible)
         .some((el) => {
@@ -64,7 +94,6 @@ extension CNKIMetadataProvider {
         || !!document.querySelector('.nodata, .no-data, .result-none, [class*="nodata"], [class*="no-data"], [class*="noresult"], [class*="no-result"], [class*="empty-data"]')
       );
       const blockedSignals = /安全验证|请完成验证|验证码|访问异常|异常访问|验证后继续访问/.test(marker) || hasVisibleVerificationUI;
-      const searchRowCount = document.querySelectorAll('table.result-table-list > tbody > tr, .result-table-list tbody tr, .result-table tbody tr, tr[data-dbcode]').length;
       const lines = rawPageText
         .replace(/\r/g, '')
         .split(/\n+/)
@@ -80,7 +109,13 @@ extension CNKIMetadataProvider {
         && !/[0-9]{4}.*\([0-9]{2}\)|查看该刊数据库收录/.test(line)
         && !/[:：]/.test(line)
       ) || "";
-      const headingTitles = Array.from(document.querySelectorAll('.wx-tit > h1, .xx_title > h1, .title > h1, .brief h1, h1'))
+      const headingTitles = Array.from(document.querySelectorAll(selectorGroup('detailTitle', [
+        '.wx-tit > h1',
+        '.xx_title > h1',
+        '.title > h1',
+        '.brief h1',
+        'h1'
+      ]).join(',')))
         .filter(isVisible)
         .map((el) => normalize(el.innerText || el.textContent || ""))
         .filter(Boolean);
@@ -93,10 +128,24 @@ extension CNKIMetadataProvider {
         .filter((value) => !!value && !isLikelyAuthorLine(value));
       const visibleTitle = titleCandidates.find((value) => !isSuspiciousTitle(value)) || titleCandidates[0] || "";
       const hasDetailTitle = !!visibleTitle && !isSuspiciousTitle(visibleTitle);
-      const hasDetailAuthors = document.querySelectorAll(
-        '.author a, .authors a, .wx-tit .author a, .author-list a, #authorpart a, .brief .author a, .xx_title .author a, meta[name="citation_author"]'
-      ).length > 0 || /[\u3400-\u9FFF]{2,4}(?:·[\u3400-\u9FFF]{1,6})?\s*[0-9０-９¹²³⁴⁵⁶⁷⁸⁹]/.test(rawPageText.slice(0, 1600));
-      const hasDetailSummary = !!document.querySelector('#ChDivSummary, .summary, .abstract, .abstract-text')
+      const hasDetailAuthors = document.querySelectorAll([
+        ...selectorGroup('detailAuthors', [
+          '.author a',
+          '.authors a',
+          '.wx-tit .author a',
+          '.author-list a',
+          '#authorpart a',
+          '.brief .author a',
+          '.xx_title .author a'
+        ]),
+        'meta[name="citation_author"]'
+      ].join(',')).length > 0 || /[\u3400-\u9FFF]{2,4}(?:·[\u3400-\u9FFF]{1,6})?\s*[0-9０-９¹²³⁴⁵⁶⁷⁸⁹]/.test(rawPageText.slice(0, 1600));
+      const hasDetailSummary = !!document.querySelector(selectorGroup('detailAbstract', [
+        '#ChDivSummary',
+        '.summary',
+        '.abstract',
+        '.abstract-text'
+      ]).join(','))
         || /(?:摘要|abstract)\s*[:：]/i.test(rawPageText.slice(0, 4000));
       const hasVisibleDetailScaffold = hasDetailTitle && (hasDetailAuthors || hasDetailSummary);
       const markerBlocked = blockedSignals && !hasVisibleDetailScaffold && !hasSearchEmptyState;
@@ -113,8 +162,13 @@ extension CNKIMetadataProvider {
     })();
     """#
 
-    static let searchExtractionScript = #"""
+    private static let searchExtractionScriptTemplate = #"""
     (() => {
+      const configuredSelectors = %%CNKI_SELECTORS%%;
+      const selectorGroup = (name, fallback) => {
+        const value = configuredSelectors?.[name];
+        return Array.isArray(value) && value.length > 0 ? value : fallback;
+      };
       const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
       const pageText = normalize(document.body?.innerText || "");
       const marker = normalize((document.title || "") + " " + pageText.slice(0, 4000));
@@ -131,7 +185,10 @@ extension CNKIMetadataProvider {
         return "";
       };
 
-      for (const anchor of Array.from(document.querySelectorAll('a[href], a[data-href]'))) {
+      for (const anchor of Array.from(document.querySelectorAll(selectorGroup('searchCandidateAnchors', [
+        'a[href]',
+        'a[data-href]'
+      ]).join(',')))) {
         const rawHref = anchor.getAttribute('href') || anchor.getAttribute('data-href') || '';
         if (!rawHref || rawHref.startsWith('javascript:')) continue;
 
@@ -148,14 +205,21 @@ extension CNKIMetadataProvider {
         if (!title || title.length < 4) continue;
 
         const container = anchor.closest('tr, li, article, .result-table-list, .result-table, .list-item, .record-item, .item, .brief, .result-item') || anchor.parentElement || document.body;
-        const authorText = firstText(container, ['td.author', '.author', '.authors', '[class*="author"]']);
-        const sourceText = firstText(container, ['td.source', '.source', '.journal', '[class*="source"]']);
-        const dateText = firstText(container, ['td.date', '.date', '.year', '[class*="date"]']);
-        const citationText = firstText(container, ['td.quote', '.quote', '.citation', '[class*="quote"]']);
+        const authorText = firstText(container, selectorGroup('searchAuthor', ['td.author', '.author', '.authors', '[class*="author"]']));
+        const sourceText = firstText(container, selectorGroup('searchSource', ['td.source', '.source', '.journal', '[class*="source"]']));
+        const dateText = firstText(container, selectorGroup('searchDate', ['td.date', '.date', '.year', '[class*="date"]']));
+        const citationText = firstText(container, selectorGroup('searchCitation', ['td.quote', '.quote', '.citation', '[class*="quote"]']));
         const metaText = [authorText, sourceText, dateText, citationText]
           .filter(Boolean)
           .join(' | ');
-        const snippetEl = container?.querySelector?.('.abstract, .summary, .brief, .item-summary, .item-abstract, p');
+        const snippetEl = container?.querySelector?.(selectorGroup('searchSnippet', [
+          '.abstract',
+          '.summary',
+          '.brief',
+          '.item-summary',
+          '.item-abstract',
+          'p'
+        ]).join(','));
         const snippet = normalize(snippetEl?.textContent || "");
         const exportNode = container?.querySelector?.('[data-dbname][data-filename]');
         const exportIDNode = container?.querySelector?.('td.seq input, .seq input, input[value]');
@@ -189,8 +253,13 @@ extension CNKIMetadataProvider {
     })();
     """#
 
-    static let detailExtractionScript = #"""
+    private static let detailExtractionScriptTemplate = #"""
     (() => {
+      const configuredSelectors = %%CNKI_SELECTORS%%;
+      const selectorGroup = (name, fallback) => {
+        const value = configuredSelectors?.[name];
+        return Array.isArray(value) && value.length > 0 ? value : fallback;
+      };
       const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
       const unique = (values) => Array.from(new Set(values.filter(Boolean)));
       const rawPageText = String(document.body?.innerText || "");
@@ -348,7 +417,13 @@ extension CNKIMetadataProvider {
       };
 
       const extractHeadingTitle = () => {
-        const selectors = ['.wx-tit > h1', '.xx_title > h1', '.title > h1', '.brief h1', 'h1'];
+        const selectors = selectorGroup('detailTitle', [
+          '.wx-tit > h1',
+          '.xx_title > h1',
+          '.title > h1',
+          '.brief h1',
+          'h1'
+        ]);
         const candidates = Array.from(document.querySelectorAll(selectors.join(',')))
           .filter(isVisible)
           .map((el) => {
@@ -451,7 +526,13 @@ extension CNKIMetadataProvider {
           }
         }
 
-        const selectors = ['.wx-tit > h1', '.xx_title > h1', '.title > h1', '.brief h1', 'h1'];
+        const selectors = selectorGroup('detailTitle', [
+          '.wx-tit > h1',
+          '.xx_title > h1',
+          '.title > h1',
+          '.brief h1',
+          'h1'
+        ]);
         const candidates = Array.from(document.querySelectorAll(selectors.join(',')))
           .filter(isVisible)
           .map((el) => ({ el, text: extractElementText(el) }))
@@ -537,14 +618,14 @@ extension CNKIMetadataProvider {
       const title = pickBestTitle([
         extractHeadingTitle(),
         ...metaValues(['citation_title', 'dc.title', 'DC.title']),
-        firstText(['.wx-tit > h1', '.xx_title > h1', '.title > h1', '.brief h1', 'h1']),
+        firstText(selectorGroup('detailTitle', ['.wx-tit > h1', '.xx_title > h1', '.title > h1', '.brief h1', 'h1'])),
         extractTitleFromContext(),
       ]);
       const titleRegionAuthors = extractAuthorsFromTitleRegion(title);
       const contextualAuthors = titleRegionAuthors.length > 0 ? titleRegionAuthors : extractAuthorsNearTitle(title);
       const authorCandidates = [
         ...metaValues(['citation_author', 'dc.creator', 'DC.creator']).map(cleanAuthor),
-        ...collectTexts([
+        ...collectTexts(selectorGroup('detailAuthors', [
           '.author a',
           '.authors a',
           '.wx-tit .author a',
@@ -553,9 +634,9 @@ extension CNKIMetadataProvider {
           '#authorpart a',
           '.brief .author a',
           '.xx_title .author a'
-        ], cleanAuthor)
+        ]), cleanAuthor)
       ].filter(isLikelyAuthorToken);
-      const authorBlock = firstText([
+      const authorBlock = firstText(selectorGroup('detailAuthorBlocks', [
         '.author',
         '.authors',
         '.wx-tit .author',
@@ -564,7 +645,7 @@ extension CNKIMetadataProvider {
         '#authorpart',
           '.brief .author',
           '.xx_title .author'
-        ]);
+        ]));
       const blockAuthors = authorBlock ? parseAuthorTokens(authorBlock) : [];
       let authors = [];
       let authorSource = 'none';
@@ -585,9 +666,9 @@ extension CNKIMetadataProvider {
         authorSource = 'none';
       }
       const journal = metaValues(['citation_journal_title', 'citation_publication_title'])[0]
-        || firstText(['.top-tip span a', '.wxBaseinfo .top-tip a', '.source a', '.source']);
+        || firstText(selectorGroup('detailJournal', ['.top-tip span a', '.wxBaseinfo .top-tip a', '.source a', '.source']));
       const doi = metaValues(['citation_doi', 'dc.identifier'])[0]
-        || firstText(['.doi', '.wxBaseinfo .doi']);
+        || firstText(selectorGroup('detailDOI', ['.doi', '.wxBaseinfo .doi']));
       // 知网用 AbstractFilter() 把完整摘要存入隐藏 input#abstract_text，
       // 再把 #ChDivSummary 截断为短文本；必须优先读 #abstract_text.value。
       const cnkiFullAbstract = normalize(
@@ -595,13 +676,13 @@ extension CNKIMetadataProvider {
       );
       const abstractText = cnkiFullAbstract
         || metaValues(['description', 'dc.description'])[0]
-        || firstText(['#ChDivSummary', '.summary', '.abstract', '.abstract-text', '.wxBaseinfo .abstract']);
+        || firstText(selectorGroup('detailAbstract', ['#ChDivSummary', '.summary', '.abstract', '.abstract-text', '.wxBaseinfo .abstract']));
       const volume = metaValues(['citation_volume'])[0] || "";
       const issue = metaValues(['citation_issue'])[0] || "";
       const firstPage = metaValues(['citation_firstpage'])[0] || "";
       const lastPage = metaValues(['citation_lastpage'])[0] || "";
       const yearText = metaValues(['citation_publication_date', 'citation_date'])[0]
-        || firstText(['.top-tip', '.source', '.wxBaseinfo']);
+        || firstText(selectorGroup('detailYearText', ['.top-tip', '.source', '.wxBaseinfo']));
       const hasVisibleVerificationUI = Array.from(document.querySelectorAll('input, iframe, img, div, span, p, a, button'))
         .filter(isVisible)
         .some((el) => {

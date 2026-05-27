@@ -127,6 +127,31 @@ final class MetadataResolutionTests: XCTestCase {
         XCTAssertEqual(parsed.pages, "120-128")
     }
 
+    func testParseVolumeIssuePagesHandlesCNKIDetailPublicationLine() {
+        let text = """
+        湖泊科学 . 2024 ,36 (06) : 1639-1650 查看该刊数据库收录来源 印刷版
+        2017—2022年洱海水体营养状态的时空变化趋势及其成因分析
+        """
+
+        let parsed = MetadataResolution.parseVolumeIssuePages(from: text)
+
+        XCTAssertEqual(parsed.volume, "36")
+        XCTAssertEqual(parsed.issue, "06")
+        XCTAssertEqual(parsed.pages, "1639-1650")
+    }
+
+    func testParseVolumeIssuePagesHandlesCNKIReferenceLine() {
+        let text = """
+        [1]华兆晖,李锐,杨智,等.2017—2022年洱海水体营养状态的时空变化趋势及其成因分析[J].湖泊科学,2024,36(06):1639-1650.
+        """
+
+        let parsed = MetadataResolution.parseVolumeIssuePages(from: text)
+
+        XCTAssertEqual(parsed.volume, "36")
+        XCTAssertEqual(parsed.issue, "06")
+        XCTAssertEqual(parsed.pages, "1639-1650")
+    }
+
     func testNormalizeJournalNameTrimsTrailingPunctuation() {
         XCTAssertEqual(MetadataResolution.normalizeJournalName("湖泊科学 ."), "湖泊科学")
     }

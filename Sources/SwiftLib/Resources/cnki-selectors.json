@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "lastUpdated": "2026-05-27",
+  "groups": {
+    "searchRows": [
+      "table.result-table-list > tbody > tr",
+      ".result-table-list tbody tr",
+      ".result-table tbody tr",
+      "tr[data-dbcode]"
+    ],
+    "searchCandidateAnchors": [
+      "a[href]",
+      "a[data-href]"
+    ],
+    "searchAuthor": [
+      "td.author",
+      ".author",
+      ".authors",
+      "[class*=\"author\"]"
+    ],
+    "searchSource": [
+      "td.source",
+      ".source",
+      ".journal",
+      "[class*=\"source\"]"
+    ],
+    "searchDate": [
+      "td.date",
+      ".date",
+      ".year",
+      "[class*=\"date\"]"
+    ],
+    "searchCitation": [
+      "td.quote",
+      ".quote",
+      ".citation",
+      "[class*=\"quote\"]"
+    ],
+    "searchSnippet": [
+      ".abstract",
+      ".summary",
+      ".brief",
+      ".item-summary",
+      ".item-abstract",
+      "p"
+    ],
+    "detailTitle": [
+      ".wx-tit > h1",
+      ".xx_title > h1",
+      ".title > h1",
+      ".brief h1",
+      "h1"
+    ],
+    "detailAuthors": [
+      ".author a",
+      ".authors a",
+      ".wx-tit .author a",
+      ".wx-tit [class*=\"author\"] a",
+      ".author-list a",
+      "#authorpart a",
+      ".brief .author a",
+      ".xx_title .author a"
+    ],
+    "detailAuthorBlocks": [
+      ".author",
+      ".authors",
+      ".wx-tit .author",
+      ".wx-tit [class*=\"author\"]",
+      ".author-list",
+      "#authorpart",
+      ".brief .author",
+      ".xx_title .author"
+    ],
+    "detailJournal": [
+      ".top-tip span a",
+      ".wxBaseinfo .top-tip a",
+      ".source a",
+      ".source"
+    ],
+    "detailDOI": [
+      ".doi",
+      ".wxBaseinfo .doi"
+    ],
+    "detailAbstract": [
+      "#ChDivSummary",
+      ".summary",
+      ".abstract",
+      ".abstract-text",
+      ".wxBaseinfo .abstract"
+    ],
+    "detailYearText": [
+      ".top-tip",
+      ".source",
+      ".wxBaseinfo"
+    ]
+  }
+}

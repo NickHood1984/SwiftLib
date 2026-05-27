@@ -4,6 +4,8 @@ import WebKit
 
 extension CNKIMetadataProvider {
     func searchViaGridRequest(seed: MetadataResolutionSeed) async throws -> [MetadataCandidate] {
+        await CNKISelectorService.shared.autoUpdateIfNeeded()
+
         var verificationAttempts = 0
         var attemptedHiddenBootstrap = false
 

@@ -294,6 +294,71 @@ final class ImporterAndMetadataTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testCNKIDetailReferenceFillsVolumeIssuePagesFromVisiblePublicationLine() {
+        let provider = CNKIMetadataProvider()
+        let candidate = MetadataCandidate(
+            source: .cnki,
+            title: "2017—2022年洱海水体营养状态的时空变化趋势及其成因分析",
+            authors: [
+                AuthorName(given: "", family: "华兆晖"),
+                AuthorName(given: "", family: "李锐"),
+            ],
+            journal: "湖泊科学",
+            year: 2024,
+            detailURL: "https://kns.cnki.net/kcms2/article/abstract?v=sample",
+            score: 1,
+            workKind: .journalArticle,
+            cnkiExport: CNKIExportLocator(dbname: "CJFQ", filename: "FLKX202406003")
+        )
+        let payload = CNKIMetadataProvider.DetailPayload(
+            blocked: false,
+            blockedReason: nil,
+            title: "2017—2022年洱海水体营养状态的时空变化趋势及其成因分析",
+            authors: ["华兆晖", "李锐", "杨智"],
+            authorSource: "titleRegion",
+            journal: "湖泊科学 .",
+            doi: nil,
+            abstract: "洱海是我国重要高原湖泊，水体营养状态长期变化具有显著生态意义。",
+            volume: nil,
+            issue: nil,
+            firstPage: nil,
+            lastPage: nil,
+            yearText: nil,
+            bodyText: """
+            湖泊科学 . 2024 ,36 (06) : 1639-1650 查看该刊数据库收录来源
+            2017—2022年洱海水体营养状态的时空变化趋势及其成因分析
+            华兆晖 李锐 杨智
+            """,
+            url: candidate.detailURL
+        )
+
+        let record = provider.reference(
+            from: payload,
+            fallbackCandidate: candidate,
+            resolvedTitle: candidate.title,
+            resolvedAuthors: CNKIMetadataProvider.resolveAuthors(extractedAuthors: payload.authors),
+            displayAuthors: CNKIMetadataProvider.resolveAuthors(extractedAuthors: payload.authors)
+        )
+
+        XCTAssertEqual(record.reference.volume, "36")
+        XCTAssertEqual(record.reference.issue, "06")
+        XCTAssertEqual(record.reference.pages, "1639-1650")
+        XCTAssertTrue(record.evidence.verificationHints.hasStructuredPages)
+    }
+
+    @MainActor
+    func testCNKISelectorConfigLoadsBundledSelectorsIntoScripts() {
+        let config = CNKISelectorService.shared.config
+
+        XCTAssertGreaterThanOrEqual(config.version, 1)
+        XCTAssertEqual(config.groups["detailTitle"]?.contains(".wx-tit > h1"), true)
+        XCTAssertEqual(config.groups["searchRows"]?.contains("tr[data-dbcode]"), true)
+        XCTAssertFalse(CNKIMetadataProvider.detailExtractionScript.contains("%%CNKI_SELECTORS%%"))
+        XCTAssertTrue(CNKIMetadataProvider.detailExtractionScript.contains("\"detailTitle\""))
+        XCTAssertTrue(CNKIMetadataProvider.searchExtractionScript.contains("\"searchRows\""))
+    }
+
     func testCNKIDetailResolutionRejectsBodyTextOnlyFallback() {
         XCTAssertFalse(
             CNKIMetadataProvider.shouldAcceptResolvedDetail(
