@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "lastUpdated": "2026-06-01",
+  "adapters": [
+    {
+      "id": "cnki-ebooks",
+      "name": "CNKI e-Books",
+      "urlPatterns": [
+        "book.oversea.cnki.net",
+        "/ccgbweb/book/",
+        "/pubdetail?"
+      ],
+      "referenceType": "book",
+      "selectors": {},
+      "script": "@resource:cnki-ebook-adapter.js"
+    },
+    {
+      "id": "cqvip-article-detail",
+      "name": "CQVIP Article Detail",
+      "urlPatterns": [
+        "qikan.cqvip.com/qikan/article/detail",
+        "qikan.cqvip.com/Qikan/Article/Detail"
+      ],
+      "referenceType": "journalArticle",
+      "selectors": {
+        "title": "meta[name=\"citation_title\"], h1, .article-title, .detail-title, .detailtitle, .title",
+        "authors": "meta[name=\"citation_author\"], .author a, .authors a, .author span, .authors span, [class*=\"author\"] a",
+        "journal": "meta[name=\"citation_journal_title\"], a[href*=\"/Qikan/Journal/Summary\"], .journal a, .journal, .source a, .source",
+        "year": "meta[name=\"citation_publication_date\"], .journal, .source, .info, .baseinfo, body",
+        "doi": "meta[name=\"citation_doi\"], .doi, body",
+        "abstract": "meta[name=\"citation_abstract\"], .abstract, #abstract, [class*=\"abstract\"]",
+        "issue": ".journal, .source, .info, .baseinfo, body",
+        "pages": ".journal, .source, .info, .baseinfo, body"
+      },
+      "transforms": {
+        "year": "match:((?:19|20)\\d{2})",
+        "doi": "match:(10\\.\\d{4,9}/[^\\s，。；;]+)",
+        "issue": "match:年第?\\s*([0-9A-Za-z增刊特刊-]+)\\s*期",
+        "pages": "match:([0-9]+[-－][0-9]+)"
+      }
+    },
+    {
+      "id": "highwire-journal-page",
+      "name": "Highwire/Citation Meta Journal Page",
+      "urlPatterns": [
+        "ere.ac.cn",
+        "ihb.ac.cn",
+        "/cn/article/",
+        "/article/doi/"
+      ],
+      "referenceType": "journalArticle",
+      "selectors": {
+        "title": "meta[name=\"citation_title\"], h1, .article-title, .title",
+        "authors": "meta[name=\"citation_author\"], .author a, .authors a, [class*=\"author\"] a",
+        "journal": "meta[name=\"citation_journal_title\"], meta[name=\"citation_journal_abbrev\"], .journal, .source",
+        "year": "meta[name=\"citation_publication_date\"], meta[name=\"citation_date\"], .journal, .source, body",
+        "doi": "meta[name=\"citation_doi\"], .doi, body",
+        "volume": "meta[name=\"citation_volume\"], .journal, .source, body",
+        "issue": "meta[name=\"citation_issue\"], .journal, .source, body",
+        "pages": "meta[name=\"citation_firstpage\"], .journal, .source, body",
+        "abstract": "meta[name=\"citation_abstract\"], .abstract, #abstract, [class*=\"abstract\"]",
+        "issn": "meta[name=\"citation_issn\"]",
+        "pdfURL": "meta[name=\"citation_pdf_url\"]",
+        "keywords": "meta[name=\"citation_keywords\"], .keywords a, .keyword a"
+      },
+      "transforms": {
+        "year": "match:((?:19|20)\\d{2})",
+        "doi": "match:(10\\.\\d{4,9}/[^\\s，。；;]+)",
+        "volume": "match:第?\\s*([0-9A-Za-z]+)\\s*卷",
+        "issue": "match:第?\\s*([0-9A-Za-z增刊特刊-]+)\\s*期",
+        "pages": "match:([0-9]+[-－][0-9]+)",
+        "keywords": "split:[,，;；]\\s*"
+      }
+    }
+  ]
+}
