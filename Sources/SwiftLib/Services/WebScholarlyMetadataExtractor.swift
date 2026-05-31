@@ -71,6 +71,8 @@ final class WebScholarlyMetadataExtractor: NSObject, ObservableObject {
             throw ExtractionError.invalidURL
         }
 
+        await SiteAdapterService.shared.autoUpdateIfNeeded()
+
         let profile = WebSessionBroker.shared.scholarlyProfile(for: url)
         let wv = ensureWebView(for: url, profile: profile)
 

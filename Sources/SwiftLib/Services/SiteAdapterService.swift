@@ -98,6 +98,9 @@ final class SiteAdapterService: ObservableObject {
         let lastUpdate = SwiftLibPreferences.siteAdaptersLastUpdate
         if Date().timeIntervalSince(lastUpdate) > 86400 {
             await updateFromRemote()
+            if SwiftLibPreferences.siteAdaptersLastUpdate == lastUpdate {
+                SwiftLibPreferences.siteAdaptersLastUpdate = Date()
+            }
         }
     }
 
