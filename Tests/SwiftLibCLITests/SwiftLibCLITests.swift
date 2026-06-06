@@ -161,6 +161,26 @@ final class SwiftLibCLITests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0)
     }
 
+    // MARK: - Audit Library
+
+    func testAuditLibraryCommandOutputsReportJSON() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["audit-library", "--limit", "5"])
+        XCTAssertEqual(result.exitCode, 0)
+        let data = Data(result.stdout.utf8)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(json?["referenceCount"] as? Int, 0)
+        XCTAssertEqual(json?["issueCount"] as? Int, 0)
+        XCTAssertTrue(json?["issues"] is [Any], "Audit output should include an issues array")
+    }
+
+    func testAuditLibraryRejectsUnknownKind() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["audit-library", "--kind", "notARealKind"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("Unknown audit issue kind"))
+    }
+
     // MARK: - Search
 
     func testSearchCommand() throws {
@@ -235,6 +255,14 @@ final class SwiftLibCLITests: XCTestCase {
         try skipIfBinaryMissing()
         let result = try runCLI(["import", "--help"])
         XCTAssertEqual(result.exitCode, 0)
+    }
+
+    func testDocxAuditHelp() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["docx-audit", "--help"])
+        XCTAssertEqual(result.exitCode, 0)
+        let output = result.stdout + result.stderr
+        XCTAssertTrue(output.contains(".docx"), "docx-audit help should mention .docx input")
     }
 
     // MARK: - Invalid Subcommand
@@ -321,5 +349,58 @@ final class SwiftLibCLITests: XCTestCase {
         try skipIfBinaryMissing()
         let result = try runCLI(["cite", "1", "--style", "nonexistent-style"])
         XCTAssertNotEqual(result.exitCode, 0, "Invalid citation style should fail")
+    }
+
+    func testCiteAcceptsBundledGBTShortStyleID() throws {
+        try skipIfBinaryMissing()
+
+        let addResult = try runCLI(["add", "--title", "GBT CLI Test Reference \(UUID().uuidString)"])
+        XCTAssertEqual(addResult.exitCode, 0, "Add should succeed")
+        let addData = Data(addResult.stdout.utf8)
+        let addJson = try JSONSerialization.jsonObject(with: addData) as? [String: Any]
+        guard let refId = addJson?["id"] as? Int64 ?? (addJson?["id"] as? Int).map(Int64.init) else {
+            XCTFail("Add output should contain an integer 'id'")
+            return
+        }
+
+        let citeResult = try runCLI([
+            "cite",
+            "\(refId)",
+            "--style",
+            "china-national-standard-gb-t-7714-2015-numeric",
+            "--format",
+            "bibliography",
+        ])
+        XCTAssertEqual(citeResult.exitCode, 0, citeResult.stderr)
+        let data = Data(citeResult.stdout.utf8)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(json?["style"] as? String, "china-national-standard-gb-t-7714-2015-numeric")
+
+        _ = try runCLI(["delete", "\(refId)", "--force"])
+    }
+
+    func testRepairLibraryDryRunAndApply() throws {
+        try skipIfBinaryMissing()
+
+        let dryRun = try runCLI(["repair-library", "--limit", "5"])
+        XCTAssertEqual(dryRun.exitCode, 0)
+        let dryRunData = Data(dryRun.stdout.utf8)
+        let dryRunJSON = try JSONSerialization.jsonObject(with: dryRunData) as? [String: Any]
+        let dryRunCandidateCount = dryRunJSON?["candidateCount"] as? Int
+        let dryRunDisplayedCount = dryRunJSON?["displayedCount"] as? Int
+        XCTAssertNotNil(dryRunCandidateCount)
+        XCTAssertNotNil(dryRunDisplayedCount)
+        XCTAssertEqual(dryRunJSON?["appliedCount"] as? Int, 0)
+        if let dryRunCandidateCount, let dryRunDisplayedCount {
+            XCTAssertLessThanOrEqual(dryRunDisplayedCount, dryRunCandidateCount)
+        }
+
+        let apply = try runCLI(["repair-library", "--apply", "--limit", "5"])
+        XCTAssertEqual(apply.exitCode, 0)
+        let applyData = Data(apply.stdout.utf8)
+        let applyJSON = try JSONSerialization.jsonObject(with: applyData) as? [String: Any]
+        XCTAssertNotNil(applyJSON?["appliedCount"])
+        XCTAssertNotNil(applyJSON?["candidateCount"])
+        XCTAssertNotNil(applyJSON?["displayedCount"])
     }
 }

@@ -189,6 +189,8 @@ public struct CSLItem: Codable, Sendable {
     public var eventPlace: String?
     /// Genre / document sub-type (e.g. "Doctoral dissertation", "Technical Report").
     public var genre: String?
+    /// Archive or holding institution. Used by some thesis/report styles.
+    public var archive: String?
     /// Abstract text.
     public var abstract: String?
     /// BCP-47 language tag (e.g. "en-US", "zh-CN").
@@ -228,7 +230,7 @@ public struct CSLItem: Codable, Sendable {
         case publisherPlace = "publisher-place"
         case eventTitle = "event-title"
         case eventPlace = "event-place"
-        case genre, abstract, language
+        case genre, archive, abstract, language
         case DOI, URL, ISBN, ISSN, PMID, PMCID
         case note
     }
@@ -258,6 +260,7 @@ public struct CSLItem: Codable, Sendable {
         eventTitle: String? = nil,
         eventPlace: String? = nil,
         genre: String? = nil,
+        archive: String? = nil,
         abstract: String? = nil,
         language: String? = nil,
         DOI: String? = nil,
@@ -292,6 +295,7 @@ public struct CSLItem: Codable, Sendable {
         self.eventTitle = eventTitle
         self.eventPlace = eventPlace
         self.genre = genre
+        self.archive = archive
         self.abstract = abstract
         self.language = language
         self.DOI = DOI

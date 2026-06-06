@@ -45,6 +45,13 @@ final class WordAddinServer {
         do {
             let params = NWParameters.tcp
             params.allowLocalEndpointReuse = true
+            // Restrict to loopback so the service is not reachable from the LAN.
+            // NWParameters.tcp binds to all interfaces by default. Pinning the
+            // required interface type to .loopback keeps the listener bound to
+            // 127.0.0.1 only. (Do NOT set requiredLocalEndpoint here — combined
+            // with the port passed to NWListener(on:) it makes the listener fail
+            // to reach the .ready state, so nothing ends up listening.)
+            params.requiredInterfaceType = .loopback
             let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: Self.port)!)
             listener.stateUpdateHandler = { [weak self] state in
                 switch state {
@@ -78,83 +85,79 @@ final class WordAddinServer {
 
     private func handleConnection(_ conn: NWConnection) {
         conn.start(queue: queue)
-        receiveHTTP(conn)
+        receiveHTTP(conn, buffer: Data())
     }
 
-    private func receiveHTTP(_ conn: NWConnection) {
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { [weak self] data, _, isComplete, error in
+    private func receiveHTTP(_ conn: NWConnection, buffer: Data) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { conn.cancel(); return }
             if let error {
                 print("[WordAddinServer] recv error: \(error)")
                 conn.cancel()
                 return
             }
-            guard let data, !data.isEmpty else {
-                if isComplete { conn.cancel() }
+            var nextBuffer = buffer
+            if let data, !data.isEmpty {
+                nextBuffer.append(data)
+            }
+            if let request = self.completeHTTPRequest(from: nextBuffer) {
+                self.route(conn, request: request)
                 return
             }
-            guard let raw = String(data: data, encoding: .utf8) else {
-                self.sendResponse(conn, status: 400, body: "Bad Request")
+            guard !isComplete else {
+                self.sendResponse(conn, status: 400, body: "Incomplete HTTP request")
                 return
             }
-            self.route(conn, raw: raw)
+            self.receiveHTTP(conn, buffer: nextBuffer)
         }
     }
 
-    // MARK: - Auth helpers
-
-    /// Parse raw HTTP headers into a dictionary (lowercased keys).
-    private func parseHeaders(_ raw: String) -> [String: String] {
-        let lines = raw.components(separatedBy: "\r\n")
-        var headers: [String: String] = [:]
-        // Skip request line (index 0), stop at empty line
-        for i in 1..<lines.count {
-            let line = lines[i]
-            if line.isEmpty { break }
-            if let colonIdx = line.firstIndex(of: ":") {
-                let key = line[..<colonIdx].trimmingCharacters(in: .whitespaces).lowercased()
-                let value = line[line.index(after: colonIdx)...].trimmingCharacters(in: .whitespaces)
-                headers[key] = value
-            }
-        }
-        return headers
+    private struct HTTPRequest {
+        var requestLine: String
+        var headers: [String: String]
+        var body: Data?
     }
 
-    /// Check bearer token in the Authorization header. Returns true if valid.
-    private func verifyAuth(headers: [String: String]) -> Bool {
-        guard let authHeader = headers["authorization"] else { return false }
-        return authHeader == "Bearer \(authToken)"
+    private func completeHTTPRequest(from data: Data) -> HTTPRequest? {
+        guard let headerEnd = data.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+        let headerData = data[..<headerEnd.lowerBound]
+        guard let headerText = String(data: headerData, encoding: .utf8) else { return nil }
+        let lines = headerText.components(separatedBy: "\r\n")
+        guard let requestLine = lines.first else { return nil }
+        let headers = parseHeaders(lines: lines)
+        let bodyStart = headerEnd.upperBound
+        let contentLength = Int(headers["content-length"] ?? "") ?? 0
+        guard data.count - bodyStart >= contentLength else { return nil }
+        let body = contentLength > 0 ? Data(data[bodyStart..<bodyStart + contentLength]) : nil
+        return HTTPRequest(requestLine: requestLine, headers: headers, body: body)
     }
 
-    // MARK: - Routing
+    // MARK: - Legacy raw routing entry point used by older tests.
 
     private func route(_ conn: NWConnection, raw: String) {
         let lines = raw.components(separatedBy: "\r\n")
         guard let requestLine = lines.first else {
             sendResponse(conn, status: 400, body: "Bad Request"); return
         }
-        let parts = requestLine.split(separator: " ", maxSplits: 2)
+        let headers = parseHeaders(lines: lines)
+        let body: Data? = {
+            guard let range = raw.range(of: "\r\n\r\n") else { return nil }
+            let bodyStr = String(raw[range.upperBound...])
+            return bodyStr.data(using: .utf8)
+        }()
+        route(conn, request: HTTPRequest(requestLine: requestLine, headers: headers, body: body))
+    }
+
+    private func route(_ conn: NWConnection, request: HTTPRequest) {
+        let parts = request.requestLine.split(separator: " ", maxSplits: 2)
         guard parts.count >= 2 else {
             sendResponse(conn, status: 400, body: "Bad Request"); return
         }
         let method = String(parts[0])
         let rawPath = String(parts[1])
 
-        let headers = parseHeaders(raw)
-
-        // Extract body for POST — validate Content-Length when present
-        let body: Data? = {
-            guard method == "POST", let range = raw.range(of: "\r\n\r\n") else { return nil }
-            let bodyStr = String(raw[range.upperBound...])
-            return bodyStr.data(using: .utf8)
-        }()
-
-        if method == "POST", let clStr = headers["content-length"], let cl = Int(clStr) {
-            let actualLength = body?.count ?? 0
-            if actualLength != cl {
-                sendResponse(conn, status: 400, body: "Content-Length mismatch"); return
-            }
-        }
+        let headers = request.headers
+        let body = request.body
 
         // Split path and query
         let (path, queryString) = splitPathQuery(rawPath)
@@ -200,6 +203,36 @@ final class WordAddinServer {
             sendResponse(conn, status: 404, body: "Not Found")
         }
     }
+
+    // MARK: - Auth helpers
+
+    /// Parse raw HTTP headers into a dictionary (lowercased keys).
+    private func parseHeaders(_ raw: String) -> [String: String] {
+        parseHeaders(lines: raw.components(separatedBy: "\r\n"))
+    }
+
+    private func parseHeaders(lines: [String]) -> [String: String] {
+        var headers: [String: String] = [:]
+        // Skip request line (index 0), stop at empty line
+        for i in 1..<lines.count {
+            let line = lines[i]
+            if line.isEmpty { break }
+            if let colonIdx = line.firstIndex(of: ":") {
+                let key = line[..<colonIdx].trimmingCharacters(in: .whitespaces).lowercased()
+                let value = line[line.index(after: colonIdx)...].trimmingCharacters(in: .whitespaces)
+                headers[key] = value
+            }
+        }
+        return headers
+    }
+
+    /// Check bearer token in the Authorization header. Returns true if valid.
+    private func verifyAuth(headers: [String: String]) -> Bool {
+        guard let authHeader = headers["authorization"] else { return false }
+        return authHeader == "Bearer \(authToken)"
+    }
+
+    // MARK: - Routing
 
     // MARK: - API: Search
 
@@ -250,7 +283,7 @@ final class WordAddinServer {
             // which the client uses as the dictionary key for the embedded snapshot.
             let arr: [[String: Any]] = refs.compactMap { ref -> [String: Any]? in
                 guard let id = ref.id else { return nil }
-                var item = ref.cslJSONObject()
+                var item = CSLExportService.cslJSONObject(for: ref)
                 item["_swiftlibRefId"] = String(id)
                 return item
             }
@@ -362,6 +395,7 @@ final class WordAddinServer {
         // Client may send embedded CSL-JSON snapshots keyed by docItemKey ("lib:<id>" etc.)
         let providedItems = json["items"] as? [String: [String: Any]]
         let includeBibliography = (json["includeBibliography"] as? Bool) ?? true
+        let strictPreflight = (json["strictPreflight"] as? Bool) ?? false
 
         if citationsRaw.isEmpty {
             sendJSONObject(conn, [
@@ -372,16 +406,13 @@ final class WordAddinServer {
             return
         }
 
-        // Collect all numeric reference IDs mentioned in the citations
+        // Collect all numeric reference IDs mentioned in either the legacy ids
+        // array or the v4 typed citationItems contract.
         var allRefIDs = Set<Int64>()
         for c in citationsRaw {
-            if let ids = c["ids"] as? [Any] {
-                for rawId in ids {
-                    if let n = rawId as? Int64 { allRefIDs.insert(n) }
-                    else if let n = rawId as? Int { allRefIDs.insert(Int64(n)) }
-                    else if let s = rawId as? String, let n = Int64(s) { allRefIDs.insert(n) }
-                }
-            }
+            let citationItems = CitationDocumentItemOption.decodeArray(fromJSONObject: c["citationItems"])
+            allRefIDs.formUnion(referenceIDs(from: c["ids"]))
+            allRefIDs.formUnion(referenceIDs(from: citationItems))
         }
 
         // Build CSL items array:
@@ -390,13 +421,15 @@ final class WordAddinServer {
         //    the embedded snapshot sent by the client (providedItems). These are "orphan" items.
         // 3. Return orphanIds in the response so the UI can show a relink banner.
         var cslItems: [[String: Any]] = []
+        var refsForPreflight: [Reference] = []
         var orphanStringIDs: [String] = []
         do {
             let refs = try AppDatabase.shared.fetchReferences(ids: Array(allRefIDs))
+            refsForPreflight = refs
             let fetchedIDs = Set(refs.compactMap { $0.id })
             cslItems = refs.compactMap { ref -> [String: Any]? in
                 guard ref.id != nil else { return nil }
-                return ref.cslJSONObject()
+                return CSLExportService.cslJSONObject(for: ref)
             }
             // Detect orphan IDs: referenced in the document but missing from the DB
             let missingIDs = allRefIDs.subtracting(fetchedIDs)
@@ -409,11 +442,16 @@ final class WordAddinServer {
                 for item in snapshotValues {
                     if let itemId = item["id"] as? String { snapshotByID[itemId] = item }
                 }
+                let cslItemIDs = Set(cslItems.compactMap { $0["id"] as? String })
                 for orphanID in orphanStringIDs {
                     if let fallback = snapshotByID[orphanID] {
                         cslItems.append(fallback)
+                    } else if !cslItemIDs.contains(orphanID) {
+                        // No snapshot available — inject a minimal placeholder so the render
+                        // can still produce output for the other citations. The orphan banner
+                        // in the UI will prompt the user to relink or remove this citation.
+                        cslItems.append(["id": orphanID, "type": "article-journal", "title": ""])
                     }
-                    // If no embedding is available, the render will throw with a clear message
                 }
             }
         } catch {
@@ -421,17 +459,12 @@ final class WordAddinServer {
         }
 
         // Build citation tuples
-        let citations: [(id: String, itemIDs: [String], position: Int, citationItems: [[String: Any]]?)] = citationsRaw.compactMap { c in
+        let citations: [CitationDocumentCluster] = citationsRaw.compactMap { c in
             guard let key = c["key"] as? String else { return nil }
             let position = c["position"] as? Int ?? 0
-            let ids: [String] = (c["ids"] as? [Any])?.compactMap { rawId -> String? in
-                if let n = rawId as? Int64 { return String(n) }
-                if let n = rawId as? Int { return String(n) }
-                if let s = rawId as? String { return s }
-                return nil
-            } ?? []
-            let citationItems = c["citationItems"] as? [[String: Any]]
-            return (id: key, itemIDs: ids, position: position, citationItems: citationItems)
+            let citationItems = CitationDocumentItemOption.decodeArray(fromJSONObject: c["citationItems"])
+            let ids = referenceIDStrings(from: c["ids"], citationItems: citationItems)
+            return CitationDocumentCluster(id: key, itemIDs: ids, position: position, citationItems: citationItems)
         }
 
         // Render using pool (thread-safe).
@@ -442,7 +475,7 @@ final class WordAddinServer {
         do {
             guard let r = try CiteprocJSCorePool.shared.withEngine(forStyleId: styleId, { engine in
                 engine.setItems(cslItems)
-                return try engine.renderDocument(citations: citations, includeBibliography: includeBibliography)
+                return try engine.renderDocument(citationClusters: citations, includeBibliography: includeBibliography)
             }) else {
                 sendJSON(conn, status: 500, json: ["error": "无法加载引文样式 \(styleId)，请在样式管理中重新导入该样式。"]); return
             }
@@ -456,10 +489,28 @@ final class WordAddinServer {
         }
 
         let (citationTexts, bibliographyText, superscriptIDs, citationFormatting) = renderResult
+        let preflightReport = CitationPreflightValidator.validate(
+            styleID: styleId,
+            references: refsForPreflight,
+            citationClusters: citations,
+            citationTexts: citationTexts,
+            bibliographyText: bibliographyText,
+            includeBibliography: includeBibliography
+        )
+        if strictPreflight && preflightReport.isBlocked {
+            sendJSON(conn, status: 422, json: [
+                "error": preflightReport.blockingMessage,
+                "preflight": preflightReport.jsonObject(),
+                "orphanIds": orphanStringIDs,
+            ])
+            return
+        }
+
         var response: [String: Any] = [
             "citationTexts": citationTexts,
             "bibliographyText": bibliographyText,
             "superscriptCitationIDs": Array(superscriptIDs),
+            "preflight": preflightReport.jsonObject(),
         ]
         if !orphanStringIDs.isEmpty {
             response["orphanIds"] = orphanStringIDs
@@ -477,7 +528,8 @@ final class WordAddinServer {
         sendJSONObject(conn, response)
 
         // Store in cache
-        if let responseData = try? JSONSerialization.data(withJSONObject: response) {
+        if !strictPreflight,
+           let responseData = try? JSONSerialization.data(withJSONObject: response) {
             renderCacheLock.lock()
             lastRenderBody = body
             lastRenderGeneration = gen
@@ -789,6 +841,45 @@ final class WordAddinServer {
             result[String(key)] = value.removingPercentEncoding ?? value
         }
         return result
+    }
+
+    private func referenceIDs(from rawIDs: Any?) -> Set<Int64> {
+        Set(referenceIDStrings(from: rawIDs).compactMap(Int64.init))
+    }
+
+    private func referenceIDs(from citationItems: [CitationDocumentItemOption]?) -> Set<Int64> {
+        Set((citationItems ?? []).compactMap { item in
+            item.resolvedItemID.flatMap(Int64.init)
+        })
+    }
+
+    private func referenceIDStrings(
+        from rawIDs: Any?,
+        citationItems: [CitationDocumentItemOption]? = nil
+    ) -> [String] {
+        var seen = Set<String>()
+        var ids: [String] = []
+
+        func append(_ value: String?) {
+            guard let normalized = value?.swiftlib_nilIfBlank,
+                  seen.insert(normalized).inserted else { return }
+            ids.append(normalized)
+        }
+
+        if let rawArray = rawIDs as? [Any] {
+            for rawID in rawArray {
+                if let n = rawID as? Int64 { append(String(n)) }
+                else if let n = rawID as? Int { append(String(n)) }
+                else if let n = rawID as? NSNumber { append(n.stringValue) }
+                else if let s = rawID as? String { append(s) }
+            }
+        }
+
+        for item in citationItems ?? [] {
+            append(item.resolvedItemID)
+        }
+
+        return ids
     }
 
     private func mimeType(for path: String) -> String {

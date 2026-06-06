@@ -204,6 +204,25 @@ public final class CiteprocJSCoreEngine {
             citationFormatting: CitationTextFormatting?
         )
     {
+        let normalizedCitations = citations.map { citation in
+            CitationDocumentCluster(
+                id: citation.id,
+                itemIDs: citation.itemIDs,
+                position: citation.position,
+                citationItems: CitationDocumentItemOption.decodeArray(fromJSONObject: citation.citationItems)
+            )
+        }
+        return try renderDocument(citationClusters: normalizedCitations, includeBibliography: includeBibliography)
+    }
+
+    public func renderDocument(citationClusters: [CitationDocumentCluster], includeBibliography: Bool = true) throws
+        -> (
+            citationTexts: [String: String],
+            bibliographyText: String,
+            superscriptIDs: Set<String>,
+            citationFormatting: CitationTextFormatting?
+        )
+    {
         var citationTexts: [String: String] = [:]
         var superscriptIDs: Set<String> = []
         var citationFormatting = defaultCitationFormatting
@@ -211,7 +230,7 @@ public final class CiteprocJSCoreEngine {
         try resetProcessorState()
         try syncRegisteredItems()
 
-        let referencedIDs = Set(citations.flatMap(\.itemIDs))
+        let referencedIDs = Set(citationClusters.flatMap(\.itemIDs))
         let availableIDs = Set(itemStore.keys)
         let missingIDs = referencedIDs.subtracting(availableIDs).sorted()
         if !missingIDs.isEmpty {
@@ -224,37 +243,13 @@ public final class CiteprocJSCoreEngine {
         // literally in the document.
         jsContext.evaluateScript("__swiftlib_engine.setOutputFormat('text');")
 
-        let sortedCitations = citations.sorted(by: { $0.position < $1.position })
+        let sortedCitations = citationClusters.sorted(by: { $0.position < $1.position })
         var priorCitationRefs: [String] = []
 
         // Process citations in order using processCitationCluster
         for (index, citation) in sortedCitations.enumerated() {
             // Build citationItems JSON: use rich options if provided, else plain {"id":"..."}
-            let citationItems: String
-            if let richItems = citation.citationItems, !richItems.isEmpty {
-                // Merge each rich item with its id (itemRef → id mapping)
-                let richJSON = richItems.compactMap { item -> String? in
-                    var merged = item
-                    // itemRef is "lib:<refId>" — extract the numeric id
-                    if let itemRef = item["itemRef"] as? String, itemRef.hasPrefix("lib:") {
-                        merged["id"] = String(itemRef.dropFirst(4))
-                    } else if let refId = item["refId"] {
-                        merged["id"] = refId
-                    }
-                    guard merged["id"] != nil else { return nil }
-                    // Remove internal fields not needed by citeproc-js
-                    merged.removeValue(forKey: "itemRef")
-                    merged.removeValue(forKey: "refId")
-                    guard let data = try? JSONSerialization.data(withJSONObject: merged),
-                          let str = String(data: data, encoding: .utf8) else { return nil }
-                    return str
-                }.joined(separator: ",")
-                citationItems = richJSON.isEmpty
-                    ? citation.itemIDs.map { "{\"id\":\"\($0)\"}" }.joined(separator: ",")
-                    : richJSON
-            } else {
-                citationItems = citation.itemIDs.map { "{\"id\":\"\($0)\"}" }.joined(separator: ",")
-            }
+            let citationItems = citationItemsJSONString(for: citation)
             let citationObj = """
                 {
                     "citationID": "\(citation.id)",
@@ -359,6 +354,25 @@ public final class CiteprocJSCoreEngine {
         }
 
         return (citationTexts, bibliographyText, superscriptIDs, citationFormatting)
+    }
+
+    private func citationItemsJSONString(for citation: CitationDocumentCluster) -> String {
+        if let items = citation.citeprocCitationItems, !items.isEmpty {
+            let richJSON = items.compactMap { item -> String? in
+                guard JSONSerialization.isValidJSONObject(item),
+                      let data = try? JSONSerialization.data(withJSONObject: item),
+                      let str = String(data: data, encoding: .utf8) else { return nil }
+                return str
+            }
+            if !richJSON.isEmpty {
+                return richJSON.joined(separator: ",")
+            }
+        }
+        return citation.itemIDs.compactMap { id in
+            guard let data = try? JSONSerialization.data(withJSONObject: ["id": id]),
+                  let str = String(data: data, encoding: .utf8) else { return nil }
+            return str
+        }.joined(separator: ",")
     }
 
     // MARK: - Helpers
@@ -678,13 +692,15 @@ public final class CiteprocJSCorePool {
         "harvard": "harvard",
         "vancouver": "vancouver",
         "nature": "nature",
+        "gb-t-7714-2015-numeric": "china-national-standard-gb-t-7714-2015-numeric",
+        "china-national-standard-gb-t-7714-2015-numeric": "china-national-standard-gb-t-7714-2015-numeric",
     ]
 
     private func loadStyleXML(styleId: String) -> String? {
         let stem = Self._bundledCSLStem[styleId] ?? styleId
 
         // Try bundled CSL files
-        let subdirs = ["WordAddin/CSL", "CSL"]
+        let subdirs = ["WordAddin/CSL", "CSL", "BuiltinCSL"]
         for subdir in subdirs {
             for bundle in [Bundle.module, Bundle.main] {
                 if let url = bundle.url(forResource: stem, withExtension: "csl", subdirectory: subdir),
@@ -694,7 +710,7 @@ public final class CiteprocJSCorePool {
             }
         }
 
-        // Try user-imported CSL via CSLManager
+        // Try user-imported and bundled built-in CSL via CSLManager.
         if let data = CSLManager.shared.cslXmlData(forStyleId: styleId),
            let content = String(data: data, encoding: .utf8) {
             return content

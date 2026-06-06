@@ -33,6 +33,38 @@ final class CiteprocJSCoreEngineTests: XCTestCase {
     </locale>
     """
 
+    private let authorDateStyleXML = """
+    <?xml version="1.0" encoding="utf-8"?>
+    <style xmlns="http://purl.org/net/xbiblio/csl" version="1.0">
+      <info>
+        <title>Author Date Test</title>
+        <id>author-date-test</id>
+      </info>
+      <citation>
+        <layout prefix="(" suffix=")" delimiter="; ">
+          <group delimiter=", ">
+            <date variable="issued">
+              <date-part name="year"/>
+            </date>
+            <group delimiter=" ">
+              <label variable="locator" form="short"/>
+              <text variable="locator"/>
+            </group>
+          </group>
+        </layout>
+      </citation>
+      <bibliography>
+        <layout suffix=".">
+          <names variable="author"/>
+          <date variable="issued" prefix=" (" suffix=")">
+            <date-part name="year"/>
+          </date>
+          <text variable="title" prefix=". "/>
+        </layout>
+      </bibliography>
+    </style>
+    """
+
     func testRenderDocumentMarksSuperscriptCitationsWhenStyleUsesVerticalAlignSup() throws {
         let styleXML = """
         <?xml version="1.0" encoding="utf-8"?>
@@ -108,6 +140,29 @@ final class CiteprocJSCoreEngineTests: XCTestCase {
         XCTAssertFalse(second.bibliographyText.contains("First Document Item"))
     }
 
+    func testRenderDocumentBibliographyOnlyIncludesCitedItems() throws {
+        let engine = try CiteprocJSCoreEngine(styleXML: numericStyleXML, localeXML: localeXML)
+        engine.setItems([
+            [
+                "id": "87",
+                "type": "article-journal",
+                "title": "Cited Item",
+            ],
+            [
+                "id": "88",
+                "type": "article-journal",
+                "title": "Uncited Item",
+            ],
+        ])
+
+        let rendered = try engine.renderDocument(citations: [
+            (id: "citation-87", itemIDs: ["87"], position: 0)
+        ])
+
+        XCTAssertTrue(rendered.bibliographyText.contains("Cited Item"))
+        XCTAssertFalse(rendered.bibliographyText.contains("Uncited Item"))
+    }
+
     func testRenderDocumentFailsClearlyWhenCitationReferencesMissingItem() throws {
         let engine = try CiteprocJSCoreEngine(styleXML: numericStyleXML, localeXML: localeXML)
         engine.setItems([
@@ -145,5 +200,67 @@ final class CiteprocJSCoreEngineTests: XCTestCase {
 
         XCTAssertEqual(rendered.citationTexts["citation-1"], "[1]")
         XCTAssertEqual(rendered.bibliographyText, "")
+    }
+
+    func testRenderDocumentNormalizesRichCitationItemOptions() throws {
+        let engine = try CiteprocJSCoreEngine(styleXML: authorDateStyleXML, localeXML: localeXML)
+        engine.setItems([
+            [
+                "id": "1",
+                "type": "article-journal",
+                "title": "Rich Options",
+                "author": [["family": "Smith", "given": "Jane"]],
+                "issued": ["date-parts": [[2024]]],
+            ]
+        ])
+
+        let rendered = try engine.renderDocument(citationClusters: [
+            CitationDocumentCluster(
+                id: "citation-1",
+                itemIDs: ["1"],
+                position: 0,
+                citationItems: [
+                    CitationDocumentItemOption(
+                        itemRef: "lib:1",
+                        locator: "42",
+                        label: "page",
+                        prefix: "see",
+                        suffix: "for details",
+                        suppressAuthor: true
+                    ),
+                ]
+            )
+        ], includeBibliography: false)
+
+        let text = rendered.citationTexts["citation-1"] ?? ""
+        XCTAssertTrue(text.contains("2024"))
+        XCTAssertTrue(text.contains("42"))
+        XCTAssertTrue(text.contains("see"))
+        XCTAssertTrue(text.contains("for details"))
+    }
+
+    func testCitationDocumentItemOptionNormalizesCSLAndCamelCaseFields() throws {
+        let raw: [[String: Any]] = [
+            [
+                "itemRef": "lib:42",
+                "locator": "15",
+                "label": "page",
+                "prefix": "see",
+                "suffix": "note",
+                "suppressAuthor": true,
+            ]
+        ]
+
+        let decoded = try XCTUnwrap(CitationDocumentItemOption.decodeArray(fromJSONObject: raw)?.first)
+        let citeproc = decoded.citeprocJSONObject()
+
+        XCTAssertEqual(decoded.resolvedItemID, "42")
+        XCTAssertEqual(citeproc["id"] as? String, "42")
+        XCTAssertEqual(citeproc["locator"] as? String, "15")
+        XCTAssertEqual(citeproc["label"] as? String, "page")
+        XCTAssertEqual(citeproc["prefix"] as? String, "see")
+        XCTAssertEqual(citeproc["suffix"] as? String, "note")
+        XCTAssertEqual(citeproc["suppress-author"] as? Bool, true)
+        XCTAssertNil(citeproc["suppressAuthor"])
     }
 }

@@ -137,6 +137,34 @@ public struct AuthorName: Codable, Hashable, Sendable {
         token.replacingOccurrences(of: ".", with: "")
     }
 
+    private static func normalizedInitialsPhrase(_ text: String) -> String? {
+        let tokens = normalizedWhitespace(text)
+            .components(separatedBy: " ")
+            .filter { !$0.isEmpty }
+        guard !tokens.isEmpty else { return nil }
+
+        var letters: [String] = []
+        for token in tokens {
+            let stripped = token
+                .replacingOccurrences(of: ".", with: "")
+                .replacingOccurrences(of: "-", with: "")
+            guard !stripped.isEmpty, stripped.count <= 5 else { return nil }
+            guard stripped.allSatisfy({ $0.isUppercase }) else { return nil }
+            letters.append(contentsOf: stripped.map { String($0) })
+        }
+
+        guard !letters.isEmpty, letters.count <= 5 else { return nil }
+        return letters.joined(separator: " ")
+    }
+
+    private static func containsLatinLetter(_ text: String) -> Bool {
+        text.range(of: #"[A-Za-z]"#, options: .regularExpression) != nil
+    }
+
+    private static func containsLowercaseLatinLetter(_ text: String) -> Bool {
+        text.range(of: #"[a-z]"#, options: .regularExpression) != nil
+    }
+
     private static func normalizedWhitespace(_ text: String) -> String {
         text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -237,6 +265,14 @@ public struct AuthorName: Codable, Hashable, Sendable {
     public static func validationIssues(in authors: [AuthorName]) -> [AuthorNameValidationIssue] {
         authors.enumerated().compactMap { offset, author in
             let display = author.displayName
+            if normalizedForCitation([author]) != [author] {
+                return AuthorNameValidationIssue(
+                    index: offset,
+                    displayName: display,
+                    message: "author fields appear malformed and will be normalized for citation output"
+                )
+            }
+
             let displayTokens = normalizedWhitespace(display)
                 .components(separatedBy: " ")
                 .filter { !$0.isEmpty }
@@ -271,6 +307,203 @@ public struct AuthorName: Codable, Hashable, Sendable {
 
             return nil
         }
+    }
+
+    public static func normalizedForCitation(_ authors: [AuthorName]) -> [AuthorName] {
+        authors.flatMap(normalizedForCitation)
+    }
+
+    public static func deduplicatingRepeatedSequence(_ authors: [AuthorName]) -> [AuthorName] {
+        guard authors.count >= 4 else { return authors }
+
+        for blockSize in 2...(authors.count / 2) where authors.count.isMultiple(of: blockSize) {
+            let block = Array(authors.prefix(blockSize))
+            var isRepeated = true
+            for offset in stride(from: blockSize, to: authors.count, by: blockSize) {
+                let nextBlock = Array(authors[offset..<(offset + blockSize)])
+                if nextBlock != block {
+                    isRepeated = false
+                    break
+                }
+            }
+            if isRepeated {
+                return block
+            }
+        }
+        return authors
+    }
+
+    private static func normalizedForCitation(_ author: AuthorName) -> [AuthorName] {
+        let family = normalizeHanWhitespace(author.family)
+        let given = normalizeHanWhitespace(author.given)
+
+        if let initials = normalizedInitialsPhrase(family),
+           !given.isEmpty,
+           containsLatinLetter(given),
+           containsLowercaseLatinLetter(given),
+           normalizedInitialsPhrase(given) == nil,
+           !isHanOnly(given) {
+            return [AuthorName(given: initials, family: normalizedWhitespace(given))]
+        }
+
+        if !given.isEmpty,
+           let primary = normalizedChinesePersonalName(family),
+           let extraAuthors = parseChineseAuthorSegments(given),
+           !extraAuthors.isEmpty {
+            return [AuthorName(given: "", family: primary)]
+                + extraAuthors.map { AuthorName(given: "", family: $0) }
+        }
+
+        if !given.isEmpty,
+           isHanOnly(family),
+           isHanOnly(given),
+           let combined = normalizedChinesePersonalName(family + given) {
+            return [AuthorName(given: "", family: combined)]
+        }
+
+        if given.isEmpty,
+           let normalized = normalizedChinesePersonalName(family) {
+            return [AuthorName(given: "", family: normalized)]
+        }
+
+        if family != author.family || given != author.given {
+            return [AuthorName(given: given, family: family)]
+        }
+        return [author]
+    }
+
+    private static func parseChineseAuthorSegments(_ text: String) -> [String]? {
+        let normalized = normalizeHanWhitespace(text)
+        let segments = normalized
+            .replacingOccurrences(of: #"[,，;；、/]+"#, with: "|", options: .regularExpression)
+            .split(separator: "|")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !segments.isEmpty else { return nil }
+
+        let names = segments.compactMap(normalizedChinesePersonalName)
+        return names.count == segments.count ? names : nil
+    }
+
+    private static func normalizedChinesePersonalName(_ text: String) -> String? {
+        let normalized = normalizeHanWhitespace(text)
+        guard looksLikeChinesePersonalName(normalized) else { return nil }
+        if normalized.count == 2 {
+            let chars = Array(normalized)
+            if isLikelyReversedTwoCharacterChineseName(first: chars[0], second: chars[1]) {
+                return String([chars[1], chars[0]])
+            }
+        }
+        return normalized
+    }
+
+    private static func normalizeHanWhitespace(_ text: String) -> String {
+        normalizedWhitespace(text)
+            .replacingOccurrences(of: #"(?<=\p{Han})\s+(?=\p{Han})"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func looksLikeChinesePersonalName(_ text: String) -> Bool {
+        text.range(of: #"^[\p{Han}]{2,4}(?:·[\p{Han}]{1,6})?$"#, options: .regularExpression) != nil
+    }
+
+    private static func isHanOnly(_ text: String) -> Bool {
+        !text.isEmpty && text.range(of: #"^[\p{Han}]+$"#, options: .regularExpression) != nil
+    }
+
+    private static func isLikelyReversedTwoCharacterChineseName(first: Character, second: Character) -> Bool {
+        guard singleCharacterChineseSurnames.contains(second) else { return false }
+        return !singleCharacterChineseSurnames.contains(first) || commonChineseGivenNameCharacters.contains(first)
+    }
+
+    private static let commonChineseGivenNameCharacters: Set<Character> = Set("娟勇鹏越昊媛谞斌泽")
+
+    private static let singleCharacterChineseSurnames: Set<Character> = Set(
+        "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜戚谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄和穆萧尹姚邵汪祁毛禹狄米贝明臧计伏成戴谈宋茅庞熊纪舒屈项祝董梁杜阮蓝闵席季麻强贾路娄危江童颜郭梅盛林钟徐邱骆高夏蔡田胡凌霍虞万支柯昝管卢莫经房裘缪干解应宗丁宣邓郁单杭洪包诸左石崔吉龚程邢裴陆荣翁荀羊於惠甄曲家封芮羿储靳汲邴糜松井段富巫乌焦巴弓牧隗山谷车侯宓蓬全郗班仰秋仲伊宫宁仇栾暴甘厉戎祖武符刘景詹束龙叶幸司韶郜黎蓟薄印宿白怀蒲邰从鄂索咸籍赖卓蔺屠蒙池乔阴胥能苍双闻莘党翟谭贡劳逄姬申扶堵冉宰郦雍郤璩桑桂濮牛寿通边扈燕冀郏浦尚农温别庄晏柴瞿阎充慕连茹习宦艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广禄阙东欧殳沃利蔚夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾毋沙乜养鞠须丰巢关蒯相查后荆红游竺权逯盖益桓公角"
+    )
+
+    // MARK: - Romanized CJK surname detection
+
+    /// Common romanized single-character Chinese surnames, lowercase.
+    ///
+    /// This is intentionally a compact surname list for metadata repair heuristics,
+    /// not a complete transliteration dictionary. It is used only when a source
+    /// gives unstructured display names or when CrossRef's structured given/family
+    /// fields look like a known CJK surname has been placed in the given slot.
+    static let romanizedChineseSurnames: Set<String> = [
+        "wang", "li", "zhang", "liu", "chen", "yang", "huang", "zhao", "wu", "zhou",
+        "xu", "sun", "ma", "zhu", "hu", "guo", "he", "lin", "gao", "luo",
+        "zheng", "liang", "xie", "tang", "han", "cao", "deng", "xiao", "feng",
+        "zeng", "cheng", "cai", "peng", "pan", "yuan", "lu", "dong", "su", "ye",
+        "qian", "jiang", "shen", "wei", "song", "yu", "gong", "qin", "fu",
+        "tao", "ren", "lei", "bai", "shi", "qiu", "yao", "shao",
+        "mao", "ji", "yan", "meng", "jin", "tian", "ding", "wen", "jia",
+        "fan", "yin", "kang", "gu", "ruan", "lan", "min", "lou", "long",
+        "xue", "kong", "ning", "dai", "xia", "nie", "hao", "liao", "zhong",
+        "hou", "lian", "rao", "shan", "hua", "pei", "qiao", "rui",
+        "xuan", "yue", "yun", "zou", "zuo",
+    ]
+
+    static func isRomanizedChineseSurname(_ word: String) -> Bool {
+        romanizedChineseSurnames.contains(word.lowercased())
+    }
+
+    /// Parse unstructured upstream display names with an extra romanized-CJK pass.
+    ///
+    /// Many APIs expose only a `display_name` such as "Zhang Sai" or "Gong Li".
+    /// `parse(_:)` treats those as western "Given Family" names and would render
+    /// `SAI Z` / `LI G`. For two-token ASCII names whose first token is a common
+    /// Chinese surname, preserve the CJK "Family Given" order.
+    public static func parseRomanizedCJKAware(_ text: String) -> AuthorName {
+        let trimmed = normalizedWhitespace(text)
+        if trimmed.contains(",") { return parse(trimmed) }
+        let parts = trimmed.components(separatedBy: " ").filter { !$0.isEmpty }
+        guard parts.count == 2 else { return parse(trimmed) }
+        guard parts.allSatisfy({ $0.allSatisfy { $0.isASCII } }) else {
+            return parse(trimmed)
+        }
+        if isRomanizedChineseSurname(parts[0]) {
+            return AuthorName(given: parts[1], family: parts[0])
+        }
+        return parse(trimmed)
+    }
+
+    // MARK: - Pinyin swap audit
+
+    /// Detect authors whose `given` field is a known romanized Chinese surname
+    /// while their `family` field is not.
+    ///
+    /// This pattern arises when historical metadata imports (before the >=6 char
+    /// threshold fix) or OpenAlex display_name parsing put the surname in the wrong
+    /// slot, e.g. `given="Zhang", family="Sai"` → renders as `SAI Z` instead of
+    /// `ZHANG S`. The repair is to swap family and given.
+    ///
+    /// Conservative: if BOTH fields are known pinyin surnames (e.g. `given="Li",
+    /// family="Gong"`) the record is ambiguous and is not flagged — the user can
+    /// resolve manually.
+    public static func pinyinSwapIssues(in authors: [AuthorName]) -> [AuthorNameValidationIssue] {
+        authors.enumerated().compactMap { offset, author in
+            let g = author.given.trimmingCharacters(in: .whitespacesAndNewlines)
+            let f = author.family.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !g.isEmpty, !f.isEmpty else { return nil }
+            // Both must be ASCII single tokens (not mixed CJK, not multi-word)
+            guard g.allSatisfy({ $0.isASCII }), f.allSatisfy({ $0.isASCII }) else { return nil }
+            guard !g.contains(" "), !f.contains(" ") else { return nil }
+            guard isRomanizedChineseSurname(g) else { return nil }
+            // Skip ambiguous case where family is also a known surname
+            guard !isRomanizedChineseSurname(f) else { return nil }
+            return AuthorNameValidationIssue(
+                index: offset,
+                displayName: author.displayName,
+                message: "given '\(g)' looks like a romanized Chinese surname and '\(f)' does not; family/given may be swapped"
+            )
+        }
+    }
+
+    /// Return a copy of this author with family and given swapped.
+    /// Used by `ReferenceLibraryRepairer` to fix pinyin-swap issues.
+    public func pinyinSwapRepaired() -> AuthorName {
+        AuthorName(given: family, family: given)
     }
 }
 

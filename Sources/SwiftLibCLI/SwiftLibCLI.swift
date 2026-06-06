@@ -23,6 +23,8 @@ struct SwiftLibCLI: AsyncParsableCommand {
             Annotations.self,
             Styles.self,
             Export.self,
+            AuditLibrary.self,
+            RepairLibrary.self,
             TagDOCX.self,
             RefreshDOCX.self,
             DocxAudit.self,
@@ -373,6 +375,99 @@ struct Get: ParsableCommand {
     }
 }
 
+struct AuditLibrary: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "audit-library",
+        abstract: "审计本地文献库中可能影响引用输出的元数据问题"
+    )
+
+    @Option(name: .long, help: "仅检查指定分组 ID 内的文献")
+    var collection: Int64?
+
+    @Option(name: .long, help: "最多输出问题条数（0 = 全部）")
+    var limit: Int = 0
+
+    @Option(name: .long, help: "仅输出指定问题类型，例如 doiHasURLPrefix、suspiciousAuthorName、probableDuplicateTranslation")
+    var kind: String?
+
+    func run() throws {
+        let references: [Reference]
+        if let collection {
+            references = try AppDatabase.shared.fetchReferences(collectionId: collection)
+        } else {
+            references = try AppDatabase.shared.fetchAllReferences(limit: 0)
+        }
+
+        var report = ReferenceLibraryAuditor.audit(references)
+        if let kind {
+            guard let requestedKind = ReferenceLibraryAuditIssueKind(rawValue: kind) else {
+                let valid = [
+                    "doiHasURLPrefix",
+                    "stableJournalHasAccessedDate",
+                    "suspiciousAuthorName",
+                    "suspiciousAuthorSwap",
+                    "journalEvidenceWithOtherType",
+                    "probableDuplicateTranslation",
+                ].joined(separator: ", ")
+                printJSONError("Unknown audit issue kind '\(kind)'. Valid: \(valid)")
+                throw ExitCode.failure
+            }
+            report = ReferenceLibraryAuditReport(
+                referenceCount: report.referenceCount,
+                issues: report.issues.filter { $0.kind == requestedKind }
+            )
+        }
+        if limit > 0, report.issues.count > limit {
+            report = ReferenceLibraryAuditReport(
+                referenceCount: report.referenceCount,
+                issues: Array(report.issues.prefix(limit))
+            )
+        }
+        printJSON(report)
+    }
+}
+
+struct RepairLibrary: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "repair-library",
+        abstract: "修复本地文献库中会影响引用输出的元数据问题；默认仅预览"
+    )
+
+    @Option(name: .long, help: "仅修复指定分组 ID 内的文献")
+    var collection: Int64?
+
+    @Option(name: .long, help: "最多输出候选条数（0 = 全部；--apply 仍会应用全部候选）")
+    var limit: Int = 0
+
+    @Flag(name: .long, help: "实际写回数据库；未提供时只输出预览")
+    var apply = false
+
+    func run() throws {
+        let references: [Reference]
+        if let collection {
+            references = try AppDatabase.shared.fetchReferences(collectionId: collection)
+        } else {
+            references = try AppDatabase.shared.fetchAllReferences(limit: 0)
+        }
+
+        let report = apply
+            ? try AppDatabase.shared.repairCitationMetadata(references)
+            : ReferenceLibraryRepairer.repairPlan(for: references)
+        printJSON(limitedReport(report))
+    }
+
+    private func limitedReport(_ report: ReferenceLibraryRepairReport) -> ReferenceLibraryRepairReport {
+        guard limit > 0, report.candidates.count > limit else { return report }
+        return ReferenceLibraryRepairReport(
+            referenceCount: report.referenceCount,
+            candidateCount: report.candidateCount,
+            appliedCount: report.appliedCount,
+            displayedCount: limit,
+            candidates: Array(report.candidates.prefix(limit))
+        )
+    }
+}
+
 struct Add: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "通过 DOI、PMID、arXiv 编号或 BibTeX 添加文献")
 
@@ -650,9 +745,8 @@ struct Cite: ParsableCommand {
 
     func run() throws {
         // Validate citation style
-        let validIds = Set(CSLManager.shared.availableStyles().map(\.id))
-        guard validIds.contains(style) else {
-            let available = validIds.sorted().joined(separator: ", ")
+        guard CSLManager.shared.isKnownStyleID(style) else {
+            let available = CSLManager.shared.availableStyles().map(\.id).sorted().joined(separator: ", ")
             printJSONError("Unknown citation style '\(style)'. Available: \(available)")
             throw ExitCode.failure
         }

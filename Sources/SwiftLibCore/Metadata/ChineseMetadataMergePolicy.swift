@@ -81,7 +81,13 @@ public enum ChineseMetadataMergePolicy {
         }
 
         if !chinese.authors.isEmpty {
-            merged.authors = mergeAuthors(primary: chinese.authors, secondary: merged.authors)
+            // When the backend (merged) has CrossRef provenance, preserve its author order.
+            let backendIsCrossRef = merged.metadataSource == .crossRef
+            merged.authors = mergeAuthors(
+                primary: chinese.authors,
+                secondary: merged.authors,
+                secondaryIsCrossRef: backendIsCrossRef
+            )
         }
 
         if let source = chinese.metadataSource ?? sourceFromChineseReference(chinese) {
@@ -95,15 +101,39 @@ public enum ChineseMetadataMergePolicy {
         }
     }
 
-    /// Merge author lists intelligently: prefer Chinese (primary) authors as the base,
-    /// then append any unique authors from the secondary list that aren't already present.
-    private static func mergeAuthors(primary: [AuthorName], secondary: [AuthorName]) -> [AuthorName] {
+    /// Merge author lists intelligently.
+    ///
+    /// When the backend reference has CrossRef provenance (most authoritative ordering),
+    /// CrossRef order is treated as canonical and the Chinese source supplements only
+    /// (appending authors absent from CrossRef). This prevents CNKI/Wanfang from
+    /// displacing the CrossRef `sequence=first` author to a later position.
+    ///
+    /// Without CrossRef provenance: Chinese source is the primary ordering base, and
+    /// unique secondary authors are appended.
+    private static func mergeAuthors(
+        primary: [AuthorName],
+        secondary: [AuthorName],
+        secondaryIsCrossRef: Bool = false
+    ) -> [AuthorName] {
         guard !secondary.isEmpty else { return primary }
         guard !primary.isEmpty else { return secondary }
 
+        if secondaryIsCrossRef {
+            // CrossRef order is canonical — append any Chinese-only authors at the end.
+            let secondaryNormalized = Set(secondary.map { normalizeAuthorForComparison($0) })
+            var merged = secondary
+            for author in primary {
+                let normalized = normalizeAuthorForComparison(author)
+                if !secondaryNormalized.contains(normalized) {
+                    merged.append(author)
+                }
+            }
+            return merged
+        }
+
+        // Default: Chinese source is primary, secondary supplements.
         var merged = primary
         let primaryNormalized = Set(primary.map { normalizeAuthorForComparison($0) })
-
         for author in secondary {
             let normalized = normalizeAuthorForComparison(author)
             if !primaryNormalized.contains(normalized) {

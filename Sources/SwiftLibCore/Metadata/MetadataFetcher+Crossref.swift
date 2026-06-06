@@ -222,49 +222,78 @@ extension MetadataFetcher {
     }
 
     private static func buildCrossRefAuthors(row: [String: String]) -> [AuthorName] {
-        var authors: [AuthorName] = []
-
         // Organization-style authors (only have `name`).
         let orgNames = (row["authorsName"] ?? "")
             .components(separatedBy: "||")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        for org in orgNames {
-            authors.append(AuthorName.parse(org))
-        }
+        let orgAuthors = orgNames.map { AuthorName.parse($0) }
 
-        // Person-style authors (have parallel `given` + `family` arrays).
-        let givens = (row["authorsGiven"] ?? "").components(separatedBy: "||")
-        let families = (row["authorsFamily"] ?? "").components(separatedBy: "||")
+        // Person-style authors: parallel `given` + `family` + optional `sequence` arrays.
+        let givens    = (row["authorsGiven"]    ?? "").components(separatedBy: "||")
+        let families  = (row["authorsFamily"]   ?? "").components(separatedBy: "||")
+        let sequences = (row["authorsSequence"] ?? "").components(separatedBy: "||")
         let personCount = max(givens.count, families.count)
+
+        var personSlots: [(author: AuthorName, isFirst: Bool, index: Int)] = []
         for i in 0..<personCount {
-            let given = (i < givens.count ? givens[i] : "").trimmingCharacters(in: .whitespaces)
+            let given  = (i < givens.count   ? givens[i]   : "").trimmingCharacters(in: .whitespaces)
             let family = (i < families.count ? families[i] : "").trimmingCharacters(in: .whitespaces)
             guard !family.isEmpty || !given.isEmpty else { continue }
-            if looksLikeCJKName(given: given, family: family) {
-                // CrossRef often swaps given/family for romanized CJK names; correct that.
-                authors.append(AuthorName(given: family, family: given))
-            } else {
-                authors.append(AuthorName(given: given, family: family))
+            let author: AuthorName = looksLikeCJKName(given: given, family: family)
+                ? AuthorName(given: family, family: given)   // CJK swap correction
+                : AuthorName(given: given,  family: family)
+            let seq = (i < sequences.count ? sequences[i] : "").trimmingCharacters(in: .whitespaces)
+            personSlots.append((author: author, isFirst: seq.lowercased() == "first", index: i))
+        }
+
+        // Stable sort: if any author is explicitly tagged sequence=first, move them to
+        // the front while preserving relative order of the rest. This anchors the
+        // CrossRef-declared first author regardless of array position.
+        if personSlots.contains(where: { $0.isFirst }) {
+            personSlots.sort { a, b in
+                if a.isFirst != b.isFirst { return a.isFirst }
+                return a.index < b.index
             }
         }
-        return authors
+
+        return orgAuthors + personSlots.map { $0.author }
     }
 
     // MARK: - CJK Author Name Correction
 
     /// Detect when CrossRef has swapped given/family for a CJK author name.
-    /// CrossRef often returns `{"given":"Wu","family":"Haoyun"}` for Chinese authors
-    /// when the correct mapping is `given:"Haoyun", family:"Wu"` (family name is the
-    /// shorter, single-character-like segment for Chinese names romanized).
+    ///
+    /// CrossRef sometimes returns `{"given":"Lu","family":"Huibin"}` for Chinese authors
+    /// when the correct mapping is `given:"Huibin", family:"Lu"` — CrossRef mistakenly
+    /// placed the Chinese surname in the `given` slot.
+    ///
+    /// Strategy: swap only when `given` matches a known romanized Chinese surname
+    /// (e.g. "Lu", "Wu", "Gong") AND `family` does NOT also match one (ambiguous
+    /// case — two common surnames adjacent, e.g. "Li Gong" where both could be
+    /// a surname). This replaces the previous length-only threshold (`f.count >= 6`)
+    /// which incorrectly swapped genuine Western names such as
+    /// `given=Tom(3), family=Pinceel(7)` and `given=Luc(3), family=Brendonck(9)`.
+    ///
+    /// Guard: if `given` is all uppercase (possible with dots/hyphens) it is a
+    /// Western initial ("U", "SJ", "K.") — not a romanized CJK surname — no swap.
     private static func looksLikeCJKName(given: String, family: String) -> Bool {
         let g = given.trimmingCharacters(in: .whitespaces)
         let f = family.trimmingCharacters(in: .whitespaces)
         guard !g.isEmpty, !f.isEmpty else { return false }
-        let bothAscii = g.allSatisfy { $0.isASCII } && f.allSatisfy { $0.isASCII }
-        guard bothAscii else { return false }
-        let gWords = g.components(separatedBy: " ").filter { !$0.isEmpty }
-        return gWords.count == 1 && g.count <= 3 && f.count > g.count
+        // Both fields must be ASCII (not already CJK characters)
+        guard g.allSatisfy({ $0.isASCII }), f.allSatisfy({ $0.isASCII }) else { return false }
+        // Given must be a single word (not a compound or full given name already)
+        guard !g.contains(" ") else { return false }
+        // Guard: all-uppercase given → Western initial or abbreviation, not a CJK surname
+        let gStripped = g.replacingOccurrences(of: ".", with: "")
+                         .replacingOccurrences(of: "-", with: "")
+        guard !gStripped.isEmpty, !gStripped.allSatisfy({ $0.isUppercase }) else { return false }
+        // Core check: given must be a known romanized Chinese surname
+        guard AuthorName.isRomanizedChineseSurname(g) else { return false }
+        // Conservative: if family is also a known surname ("Li Gong", "Zhang Wang"),
+        // the ordering is ambiguous — preserve CrossRef as-is.
+        return !AuthorName.isRomanizedChineseSurname(f)
     }
 
 }

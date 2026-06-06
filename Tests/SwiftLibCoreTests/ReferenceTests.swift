@@ -98,6 +98,114 @@ final class ReferenceTests: XCTestCase {
         XCTAssertEqual(ReferenceType.legislation.cslType, "legislation")
     }
 
+    func testCSLJSONObjectStripsDOIURLPrefix() {
+        let ref = Reference(
+            id: 1,
+            title: "DOI Prefix",
+            doi: "https://doi.org/10.1890/12-2010.1"
+        )
+
+        XCTAssertEqual(ref.cslJSONObject()["DOI"] as? String, "10.1890/12-2010.1")
+        XCTAssertEqual(ref.toCSLItem().DOI, "10.1890/12-2010.1")
+    }
+
+    func testCSLJSONObjectSuppressesAccessedDateForStableJournalArticle() {
+        let ref = Reference(
+            id: 1,
+            title: "Stable Journal Article",
+            volume: "67",
+            issue: "11",
+            pages: "1949-1959",
+            doi: "https://doi.org/10.1111/fwb.13988",
+            referenceType: .journalArticle,
+            accessedDate: "2026-05-25"
+        )
+
+        XCTAssertNil(ref.cslJSONObject()["accessed"])
+        XCTAssertNil(ref.toCSLItem().accessed)
+    }
+
+    func testCSLJSONObjectKeepsAccessedDateForJournalArticleWithoutStableDetails() {
+        let ref = Reference(
+            id: 1,
+            title: "Online First Journal Article",
+            journal: "Freshwater Biology",
+            doi: "10.1111/fwb.13988",
+            referenceType: .journalArticle,
+            accessedDate: "2026-05-25"
+        )
+
+        XCTAssertNotNil(ref.cslJSONObject()["accessed"])
+        XCTAssertNotNil(ref.toCSLItem().accessed)
+    }
+
+    func testCSLJSONObjectKeepsAccessedDateForWebpage() {
+        let ref = Reference(
+            id: 1,
+            title: "Web Page",
+            url: "https://example.com",
+            referenceType: .webpage,
+            accessedDate: "2026-05-25"
+        )
+
+        XCTAssertNotNil(ref.cslJSONObject()["accessed"])
+        XCTAssertNotNil(ref.toCSLItem().accessed)
+    }
+
+    func testCSLJSONObjectInfersJournalArticleTypeForOtherWithJournalEvidence() {
+        let ref = Reference(
+            id: 1,
+            title: "洞庭湖春秋季浮游植物群落结构及其与环境因子的关系",
+            journal: "长江流域资源与环境",
+            volume: "30",
+            issue: "11",
+            pages: "2659-2667",
+            referenceType: .other
+        )
+
+        XCTAssertEqual(ref.cslJSONObject()["type"] as? String, "article-journal")
+        XCTAssertEqual(ref.toCSLItem().type, "article-journal")
+    }
+
+    func testCSLJSONObjectSuppressesAccessedDateForOtherWithStableJournalEvidence() {
+        let ref = Reference(
+            id: 1,
+            title: "洞庭湖春秋季浮游植物群落结构及其与环境因子的关系",
+            journal: "长江流域资源与环境",
+            volume: "30",
+            issue: "11",
+            pages: "2659-2667",
+            referenceType: .other,
+            accessedDate: "2026-05-25"
+        )
+
+        XCTAssertEqual(ref.cslJSONObject()["type"] as? String, "article-journal")
+        XCTAssertNil(ref.cslJSONObject()["accessed"])
+        XCTAssertNil(ref.toCSLItem().accessed)
+    }
+
+    func testCSLJSONObjectUsesTypedExporterForCorporateAuthorsAndThesisArchive() {
+        let ref = Reference(
+            id: 10,
+            title: "Water Quality Bulletin",
+            authors: [AuthorName(given: "", family: "Ministry of Ecology and Environment")],
+            year: 2024,
+            referenceType: .thesis,
+            genre: "Doctoral dissertation",
+            institution: "Nanjing University"
+        )
+
+        let object = ref.cslJSONObject()
+        let item = ref.toCSLItem()
+        let authors = object["author"] as? [[String: String]]
+
+        XCTAssertEqual(authors?.first?["literal"], "Ministry of Ecology and Environment")
+        XCTAssertEqual(object["publisher"] as? String, "Nanjing University")
+        XCTAssertEqual(object["archive"] as? String, "Nanjing University")
+        XCTAssertEqual(item.author?.first?.literal, "Ministry of Ecology and Environment")
+        XCTAssertEqual(item.archive, "Nanjing University")
+    }
+
     // MARK: - AuthorName
 
     func testAuthorNameDisplayName() {
@@ -184,6 +292,29 @@ final class ReferenceTests: XCTestCase {
         ])
     }
 
+    func testParseListHandlesGBTEnglishFamilyInitialsBibliographyAuthors() {
+        let taipale = AuthorName.parseList("TAIPALE S J, STRANDBERG U, PELTOMAA E")
+        XCTAssertEqual(taipale.prefix(3), [
+            AuthorName(given: "S J", family: "TAIPALE"),
+            AuthorName(given: "U", family: "STRANDBERG"),
+            AuthorName(given: "E", family: "PELTOMAA"),
+        ])
+
+        let strandberg = AuthorName.parseList("STRANDBERG U, TAIPALE S J, HILTUNEN M")
+        XCTAssertEqual(strandberg.prefix(3), [
+            AuthorName(given: "U", family: "STRANDBERG"),
+            AuthorName(given: "S J", family: "TAIPALE"),
+            AuthorName(given: "M", family: "HILTUNEN"),
+        ])
+
+        let vuorio = AuthorName.parseList("TAIPALE S J, VUORIO K, STRANDBERG U")
+        XCTAssertEqual(vuorio.prefix(3), [
+            AuthorName(given: "S J", family: "TAIPALE"),
+            AuthorName(given: "K", family: "VUORIO"),
+            AuthorName(given: "U", family: "STRANDBERG"),
+        ])
+    }
+
     func testAuthorNameValidationFlagsInitialOnlyReversal() {
         let issues = AuthorName.validationIssues(in: [
             AuthorName(given: "C S", family: "R"),
@@ -192,6 +323,79 @@ final class ReferenceTests: XCTestCase {
 
         XCTAssertEqual(issues.count, 1)
         XCTAssertEqual(issues[0].index, 0)
+    }
+
+    func testAuthorNameNormalizesMalformedChineseAuthorsForCitation() {
+        let reversed = AuthorName.normalizedForCitation([
+            AuthorName(given: "", family: "娟柴"),
+            AuthorName(given: "", family: "勇角"),
+            AuthorName(given: "", family: "鹏吴"),
+            AuthorName(given: "", family: "越田"),
+        ])
+        XCTAssertEqual(reversed.map(\.family), ["柴娟", "角勇", "吴鹏", "田越"])
+
+        let fused = AuthorName.normalizedForCitation([
+            AuthorName(given: "潘保柱, 赵耿楠, 韩 谞, 蒋小明, 李典宝", family: "王 昊"),
+        ])
+        XCTAssertEqual(fused.map(\.family), ["王昊", "潘保柱", "赵耿楠", "韩谞", "蒋小明", "李典宝"])
+    }
+
+    func testAuthorNameNormalizesReversedEnglishInitialAuthorsForCitation() {
+        let taipale = AuthorName.normalizedForCitation([
+            AuthorName(given: "Taipale", family: "S"),
+            AuthorName(given: "Strandberg", family: "U"),
+            AuthorName(given: "Peltomaa", family: "E"),
+        ])
+        XCTAssertEqual(taipale, [
+            AuthorName(given: "S", family: "Taipale"),
+            AuthorName(given: "U", family: "Strandberg"),
+            AuthorName(given: "E", family: "Peltomaa"),
+        ])
+
+        let strandberg = AuthorName.normalizedForCitation([
+            AuthorName(given: "S. J. Taipale", family: "U."),
+            AuthorName(given: "Hiltunen", family: "M."),
+        ])
+        XCTAssertEqual(strandberg, [
+            AuthorName(given: "U", family: "S. J. Taipale"),
+            AuthorName(given: "M", family: "Hiltunen"),
+        ])
+
+        let vuorio = AuthorName.normalizedForCitation([
+            AuthorName(given: "Vuorio", family: "K."),
+            AuthorName(given: "Strandberg", family: "U."),
+        ])
+        XCTAssertEqual(vuorio, [
+            AuthorName(given: "K", family: "Vuorio"),
+            AuthorName(given: "U", family: "Strandberg"),
+        ])
+    }
+
+    func testAuthorNameDoesNotNormalizeUppercaseWesternFullNamesAsInitials() {
+        let authors = [
+            AuthorName(given: "SABINE", family: "HILT"),
+            AuthorName(given: "MARINA", family: "MANCA"),
+            AuthorName(given: "PEETER", family: "NÕGES"),
+        ]
+
+        XCTAssertEqual(AuthorName.normalizedForCitation(authors), authors)
+    }
+
+    func testAuthorNameDeduplicatesRepeatedAuthorSequences() {
+        let uniqueAuthors = [
+            AuthorName(given: "", family: "陈小锋"),
+            AuthorName(given: "", family: "揣小明"),
+            AuthorName(given: "", family: "杨柳燕"),
+        ]
+
+        XCTAssertEqual(
+            AuthorName.deduplicatingRepeatedSequence(uniqueAuthors + uniqueAuthors),
+            uniqueAuthors
+        )
+        XCTAssertEqual(
+            AuthorName.deduplicatingRepeatedSequence(uniqueAuthors),
+            uniqueAuthors
+        )
     }
 
     func testParseListEmpty() {
@@ -266,6 +470,72 @@ final class ReferenceTests: XCTestCase {
         var ref = Reference(title: "With Collection")
         ref.collectionId = 42
         XCTAssertEqual(ref.collectionId, 42)
+    }
+
+    // MARK: - parseRomanizedCJKAware
+
+    func testParseRomanizedCJKAwareHandlesPinyinSurnameFirst() {
+        // OpenAlex display_name "Zhang Sai" — surname Zhang first.
+        XCTAssertEqual(
+            AuthorName.parseRomanizedCJKAware("Zhang Sai"),
+            AuthorName(given: "Sai", family: "Zhang")
+        )
+        // "Gong Li" — Gong is a known surname; result: family=Gong, given=Li.
+        XCTAssertEqual(
+            AuthorName.parseRomanizedCJKAware("Gong Li"),
+            AuthorName(given: "Li", family: "Gong")
+        )
+        // "Zhang Li" — Zhang is a known surname; Li is also a surname (ambiguous),
+        // but parseRomanizedCJKAware only checks the first token, so family=Zhang.
+        XCTAssertEqual(
+            AuthorName.parseRomanizedCJKAware("Zhang Li"),
+            AuthorName(given: "Li", family: "Zhang")
+        )
+    }
+
+    func testParseRomanizedCJKAwareFallsBackForWesternNames() {
+        // Tom Pinceel — "Tom" is not a known pinyin surname → use western default.
+        XCTAssertEqual(
+            AuthorName.parseRomanizedCJKAware("Tom Pinceel"),
+            AuthorName(given: "Tom", family: "Pinceel")
+        )
+        // Luc Brendonck — same.
+        XCTAssertEqual(
+            AuthorName.parseRomanizedCJKAware("Luc Brendonck"),
+            AuthorName(given: "Luc", family: "Brendonck")
+        )
+        // Comma-delimited — should fall back to parse().
+        XCTAssertEqual(
+            AuthorName.parseRomanizedCJKAware("Smith, John"),
+            AuthorName(given: "John", family: "Smith")
+        )
+    }
+
+    // MARK: - pinyinSwapIssues
+
+    func testPinyinSwapIssuesDetectsKnownSwap() {
+        // given=Zhang is a known surname, family=Sai is not → flag as swap candidate.
+        let issues = AuthorName.pinyinSwapIssues(in: [
+            AuthorName(given: "Zhang", family: "Sai"),
+        ])
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertEqual(issues[0].index, 0)
+        XCTAssertTrue(issues[0].message.contains("Zhang"))
+    }
+
+    func testPinyinSwapIssuesConservativeAboutAmbiguousCase() {
+        // given=Gong is a surname, family=Li is ALSO a surname → ambiguous → NOT flagged.
+        let issues = AuthorName.pinyinSwapIssues(in: [
+            AuthorName(given: "Gong", family: "Li"),
+        ])
+        XCTAssertTrue(issues.isEmpty)
+    }
+
+    func testPinyinSwapRepaired() {
+        let author = AuthorName(given: "Zhang", family: "Sai")
+        let repaired = author.pinyinSwapRepaired()
+        XCTAssertEqual(repaired.family, "Zhang")
+        XCTAssertEqual(repaired.given, "Sai")
     }
 
     // MARK: - Hashable / Equatable

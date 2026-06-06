@@ -5,6 +5,11 @@ import Foundation
 public final class CSLManager {
     public static let shared = CSLManager()
 
+    private static let bundledCSLStems: [String: String] = [
+        "gb-t-7714-2015-numeric": "china-national-standard-gb-t-7714-2015-numeric",
+        "china-national-standard-gb-t-7714-2015-numeric": "china-national-standard-gb-t-7714-2015-numeric",
+    ]
+
     public struct StyleDescriptor: Identifiable {
         public let id: String
         public let title: String
@@ -202,6 +207,12 @@ public final class CSLManager {
         return styles
     }
 
+    public func isKnownStyleID(_ styleID: String) -> Bool {
+        availableStyles().contains(where: { $0.id == styleID })
+            || Self.bundledCSLStems[styleID] != nil
+            || cslXmlData(forStyleId: styleID) != nil
+    }
+
 
     // MARK: - Render
 
@@ -234,6 +245,10 @@ public final class CSLManager {
     /// populates the cache on a miss so subsequent calls are O(1).
     public func cslXmlData(forStyleId styleId: String) -> Data? {
         if let cached = withCacheLock({ cachedXmlData[styleId] }) { return cached }
+        if let aliasData = bundledCSLData(forStyleId: styleId) {
+            withCacheLock { cachedXmlData[styleId] = aliasData }
+            return aliasData
+        }
         // 1. Search user-imported styles directory
         if let files = try? FileManager.default.contentsOfDirectory(at: storageDir, includingPropertiesForKeys: nil) {
             for file in files where file.pathExtension == "csl" {
@@ -271,6 +286,20 @@ public final class CSLManager {
         return nil
     }
 
+    private func bundledCSLData(forStyleId styleId: String) -> Data? {
+        guard let stem = Self.bundledCSLStems[styleId] else { return nil }
+        let subdirs = ["BuiltinCSL", "WordAddin/CSL", "CSL"]
+        for subdir in subdirs {
+            for bundle in [Bundle.module, Bundle.main] {
+                if let url = bundle.url(forResource: stem, withExtension: "csl", subdirectory: subdir),
+                   let data = try? Data(contentsOf: url) {
+                    return data
+                }
+            }
+        }
+        return nil
+    }
+
 
     /// Format inline citation using citeproc-js (via CitationRenderer).
     /// This is the canonical path — output is identical to what the Word/WPS
@@ -291,6 +320,10 @@ public final class CSLManager {
         }
         if let engine = engine(for: styleId) {
             return engine.style.citationKind
+        }
+        if let data = cslXmlData(forStyleId: styleId),
+           let style = CSLXMLParser().parse(data: data) {
+            return style.citationKind
         }
         return .authorDate
     }

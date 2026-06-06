@@ -86,6 +86,28 @@ final class MetadataResolverTests: XCTestCase {
         )
     }
 
+    func testRefreshSkipsCrossRefForChineseJournalWithLatinizedTitle() {
+        // A Chinese-journal article whose title/journal were overwritten with English
+        // by an earlier CrossRef import. The Han-character authors must still route it
+        // away from CrossRef so it isn't re-Latinized on refresh.
+        let reference = Reference(
+            title: "Cladoceran community responses to eutrophication, fish introduction and macrophyte degradation",
+            authors: [AuthorName(given: "", family: "卢慧斌"), AuthorName(given: "", family: "陈光杰")],
+            year: 2016,
+            journal: "Journal of Lake Sciences",
+            doi: "10.18307/2016.0115",
+            referenceType: .journalArticle,
+            metadataSource: .crossRef
+        )
+        let seed = MetadataResolutionSeed.fromReference(reference)
+
+        XCTAssertTrue(seed.shouldSearchCNKI, "Han-character authors should mark the seed as Chinese.")
+        XCTAssertFalse(
+            MetadataResolver.shouldUseCrossRefForRefresh(reference: reference, seed: seed),
+            "Chinese-author journal records must skip CrossRef even with an English title."
+        )
+    }
+
     func testRefreshUsesCrossRefForNonChineseJournal() {
         let reference = Reference(
             title: "Freshwater biodiversity: importance, threats, status and conservation challenges",

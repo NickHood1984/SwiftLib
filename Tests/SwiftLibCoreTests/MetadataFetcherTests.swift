@@ -155,6 +155,139 @@ final class MetadataFetcherTests: XCTestCase {
         XCTAssertEqual(reference.referenceType, .journalArticle)
     }
 
+    // MARK: - CJK Author Name Swap Heuristic
+
+    /// CrossRef correctly returns given=Wei, family=Yang for the paper
+    /// "Seasonal dynamics of crustacean zooplankton … in Erhai Lake" (DOI 10.1007/s00343-014-3204-5).
+    /// Both Wei and Yang are known romanized Chinese surnames → ambiguous → NOT swapped.
+    func testParseCrossrefResponseDoesNotSwapCorrectChineseAuthor() throws {
+        let json = """
+        {
+          "status": "ok",
+          "message": {
+            "DOI": "10.1007/s00343-014-3204-5",
+            "type": "journal-article",
+            "title": ["Seasonal dynamics of crustacean zooplankton community structure in Erhai Lake"],
+            "author": [
+              {"given": "Wei",    "family": "Yang",   "sequence": "first"},
+              {"given": "Daogui", "family": "Deng",   "sequence": "additional"},
+              {"given": "Sai",    "family": "Zhang",  "sequence": "additional"},
+              {"given": "Cuilin", "family": "Hu",     "sequence": "additional"}
+            ],
+            "published-print": {"date-parts": [[2014]]}
+          }
+        }
+        """.data(using: .utf8)!
+
+        let reference = try MetadataFetcher.parseCrossrefResponse(json, doi: "10.1007/s00343-014-3204-5")
+
+        // First author: CrossRef is correct — Yang is the surname, Wei is the given name.
+        // Must NOT be swapped to family=Wei, given=Yang.
+        XCTAssertEqual(reference.authors[0].family, "Yang")
+        XCTAssertEqual(reference.authors[0].given,  "Wei")
+        // Third author: Zhang is a surname (5 chars) — must NOT be swapped with Sai.
+        XCTAssertEqual(reference.authors[2].family, "Zhang")
+        XCTAssertEqual(reference.authors[2].given,  "Sai")
+        // Fourth author: Hu is short, Cuilin(6) is clearly a given name — Cuilin should stay as given.
+        // (CrossRef returns given=Cuilin, family=Hu — already in correct order, no swap needed.)
+        XCTAssertEqual(reference.authors[3].family, "Hu")
+        XCTAssertEqual(reference.authors[3].given,  "Cuilin")
+    }
+
+    /// CrossRef mistakenly swaps surname/given for some Chinese authors:
+    /// `given=Lu, family=Huibin` should become family=Lu, given=Huibin (Huibin=6 chars).
+    func testParseCrossrefResponseCorrectsCJKSurnameInGivenSlot() throws {
+        let json = """
+        {
+          "status": "ok",
+          "message": {
+            "DOI": "10.18307/2016.0115",
+            "type": "journal-article",
+            "title": ["Cladoceran community responses to eutrophication"],
+            "author": [
+              {"given": "Lu",  "family": "Huibin",  "sequence": "first"},
+              {"given": "Wu",  "family": "Haoyun",  "sequence": "additional"}
+            ],
+            "published-print": {"date-parts": [[2016]]}
+          }
+        }
+        """.data(using: .utf8)!
+
+        let reference = try MetadataFetcher.parseCrossrefResponse(json, doi: "10.18307/2016.0115")
+
+        // CrossRef has surname and given swapped — must be corrected.
+        XCTAssertEqual(reference.authors[0].family, "Lu")
+        XCTAssertEqual(reference.authors[0].given,  "Huibin")
+        XCTAssertEqual(reference.authors[1].family, "Wu")
+        XCTAssertEqual(reference.authors[1].given,  "Haoyun")
+    }
+
+    /// Regression: [37] RAMAEKERS L, TOM P, LUC B — the old >=6 length threshold
+    /// incorrectly swapped given=Tom(3)/family=Pinceel(7) and given=Luc(3)/family=Brendonck(9).
+    /// The new pinyin-dictionary approach must NOT swap Western names.
+    func testParseCrossrefResponseDoesNotSwapWesternNamesLookingLikeCJK() throws {
+        let json = """
+        {
+          "status": "ok",
+          "message": {
+            "DOI": "10.1111/j.1365-2427.2009.02341.x",
+            "type": "journal-article",
+            "title": ["Large-scale community reshuffling in Anostraca"],
+            "author": [
+              {"given": "Luc",      "family": "Ramaekers",  "sequence": "first"},
+              {"given": "Tom",      "family": "Pinceel",    "sequence": "additional"},
+              {"given": "Luc",      "family": "Brendonck",  "sequence": "additional"}
+            ],
+            "published-print": {"date-parts": [[2010]]}
+          }
+        }
+        """.data(using: .utf8)!
+
+        let reference = try MetadataFetcher.parseCrossrefResponse(json,
+            doi: "10.1111/j.1365-2427.2009.02341.x")
+
+        XCTAssertEqual(reference.authors.count, 3)
+        // Ramaekers — "Luc" is not a known pinyin surname → no swap
+        XCTAssertEqual(reference.authors[0].family, "Ramaekers")
+        XCTAssertEqual(reference.authors[0].given,  "Luc")
+        // Pinceel — "Tom" is not a known pinyin surname → no swap
+        XCTAssertEqual(reference.authors[1].family, "Pinceel")
+        XCTAssertEqual(reference.authors[1].given,  "Tom")
+        // Brendonck — "Luc" is not a known pinyin surname → no swap
+        XCTAssertEqual(reference.authors[2].family, "Brendonck")
+        XCTAssertEqual(reference.authors[2].given,  "Luc")
+    }
+
+    /// sequence=first anchors the first author correctly even when the API array does not
+    /// have the sequence=first author at index 0.
+    func testBuildCrossRefAuthorsAnchorsFirstAuthorBySequence() throws {
+        // Simulate a CrossRef response where sequence=first is not the first array element.
+        let json = """
+        {
+          "status": "ok",
+          "message": {
+            "DOI": "10.1360/csb2013-58-10-855",
+            "type": "journal-article",
+            "title": ["湖泊富营养化及其生态系统响应"],
+            "author": [
+              {"given": "Boqiang",  "family": "Qin",    "sequence": "additional"},
+              {"given": "Yunlin",   "family": "Zhang",  "sequence": "first"}
+            ],
+            "published-print": {"date-parts": [[2013]]}
+          }
+        }
+        """.data(using: .utf8)!
+
+        let reference = try MetadataFetcher.parseCrossrefResponse(json,
+            doi: "10.1360/csb2013-58-10-855")
+
+        // Zhang Yunlin (sequence=first) should be at index 0.
+        XCTAssertEqual(reference.authors[0].family, "Zhang")
+        XCTAssertEqual(reference.authors[0].given,  "Yunlin")
+        XCTAssertEqual(reference.authors[1].family, "Qin")
+        XCTAssertEqual(reference.authors[1].given,  "Boqiang")
+    }
+
     func testParseCrossrefResponseHandlesOrganizationAuthor() throws {
         // CrossRef sometimes has organization names in "name" field
         let json = """

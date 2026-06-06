@@ -187,6 +187,106 @@ final class WordCitationMarkerTests: XCTestCase {
             WordDOCXDuplicateCitation(paragraphIndex: 1, referenceID: 94, count: 2)
         ])
         XCTAssertEqual(report.bibliographyEntryCount, 1)
+        XCTAssertEqual(report.bodyCitationNumbers, [1])
+        XCTAssertEqual(report.bibliographyEntryNumbers, [1])
+        XCTAssertTrue(report.listedButUncitedBibliographyNumbers.isEmpty)
+        XCTAssertTrue(report.citedButUnlistedBodyCitationNumbers.isEmpty)
+        XCTAssertFalse(report.bibliographyMatchesBodyUniqueCount)
+    }
+
+    func testDocxAuditReportsVisibleBibliographyNumbersMissingFromBody() {
+        let xml = """
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>
+            <w:p>
+              <w:sdt><w:sdtPr><w:tag w:val="swiftlib:v3:cite:c87:nature:87"/></w:sdtPr><w:sdtContent><w:r><w:t>[87]</w:t></w:r></w:sdtContent></w:sdt>
+              <w:sdt><w:sdtPr><w:tag w:val="swiftlib:v3:cite:c90:nature:90"/></w:sdtPr><w:sdtContent><w:r><w:t>[90]</w:t></w:r></w:sdtContent></w:sdt>
+              <w:sdt><w:sdtPr><w:tag w:val="swiftlib:v3:cite:c92:nature:92,93"/></w:sdtPr><w:sdtContent><w:r><w:t>[92-93]</w:t></w:r></w:sdtContent></w:sdt>
+            </w:p>
+            <w:sdt><w:sdtPr><w:tag w:val="swiftlib:v3:bib:b1:nature"/></w:sdtPr><w:sdtContent>
+              <w:p><w:r><w:t>[87] Jeppesen E. Example.</w:t></w:r></w:p>
+              <w:p><w:r><w:t>[88] Wang H. Example.</w:t></w:r></w:p>
+              <w:p><w:r><w:t>[89] Stibor H. Example.</w:t></w:r></w:p>
+              <w:p><w:r><w:t>[90] Referenced Example.</w:t></w:r></w:p>
+              <w:p><w:r><w:t>[91] Liu X. Example.</w:t></w:r></w:p>
+              <w:p><w:r><w:t>[92] Referenced Example.</w:t></w:r></w:p>
+              <w:p><w:r><w:t>[93] Referenced Example.</w:t></w:r></w:p>
+            </w:sdtContent></w:sdt>
+          </w:body>
+        </w:document>
+        """
+        let refs = [
+            Reference(id: 87, title: "Jeppesen"),
+            Reference(id: 90, title: "Referenced"),
+            Reference(id: 92, title: "Referenced 2"),
+            Reference(id: 93, title: "Referenced 3"),
+        ]
+
+        let report = WordCitationDOCXProcessor.auditDocumentXML(xml, references: refs)
+
+        XCTAssertEqual(report.bodyCitationNumbers, [87, 90, 92, 93])
+        XCTAssertEqual(report.bibliographyEntryNumbers, [87, 88, 89, 90, 91, 92, 93])
+        XCTAssertEqual(report.listedButUncitedBibliographyNumbers, [88, 89, 91])
+        XCTAssertTrue(report.citedButUnlistedBodyCitationNumbers.isEmpty)
+        XCTAssertTrue(report.warnings.contains {
+            $0.contains("bibliography contains numbered entries not present in visible body citations")
+        })
+    }
+
+    func testDocxAuditReportsVisibleBodyNumbersMissingFromBibliography() {
+        let xml = """
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>
+            <w:p>
+              <w:sdt><w:sdtPr><w:tag w:val="swiftlib:v3:cite:c1:nature:1,3"/></w:sdtPr><w:sdtContent><w:r><w:t>[1,3]</w:t></w:r></w:sdtContent></w:sdt>
+            </w:p>
+            <w:sdt><w:sdtPr><w:tag w:val="swiftlib:v3:bib:b1:nature"/></w:sdtPr><w:sdtContent>
+              <w:p><w:r><w:t>1. First Example.</w:t></w:r></w:p>
+              <w:p><w:r><w:t>2. Second Example.</w:t></w:r></w:p>
+            </w:sdtContent></w:sdt>
+          </w:body>
+        </w:document>
+        """
+        let refs = [
+            Reference(id: 1, title: "First"),
+            Reference(id: 3, title: "Third"),
+        ]
+
+        let report = WordCitationDOCXProcessor.auditDocumentXML(xml, references: refs)
+
+        XCTAssertEqual(report.bodyCitationNumbers, [1, 3])
+        XCTAssertEqual(report.bibliographyEntryNumbers, [1, 2])
+        XCTAssertEqual(report.listedButUncitedBibliographyNumbers, [2])
+        XCTAssertEqual(report.citedButUnlistedBodyCitationNumbers, [3])
+    }
+
+    func testDocxAuditReadsPlainTextBodyCitationNumbersWhenNoSwiftLibControlsExist() {
+        let xml = """
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>
+            <w:p><w:r><w:t>正文引用了第一篇</w:t></w:r><w:r><w:t>[1]</w:t></w:r><w:r><w:t>，也引用了第三到第四篇</w:t></w:r><w:r><w:t>[3-4]</w:t></w:r><w:r><w:t>。</w:t></w:r></w:p>
+            <w:p><w:r><w:t>参考文献</w:t></w:r></w:p>
+            <w:p><w:r><w:t>[1] First Example.</w:t></w:r></w:p>
+            <w:p><w:r><w:t>[2] Uncited Example.</w:t></w:r></w:p>
+            <w:p><w:r><w:t>[3] Third Example.</w:t></w:r></w:p>
+            <w:p><w:r><w:t>[4] Fourth Example.</w:t></w:r></w:p>
+          </w:body>
+        </w:document>
+        """
+        let refs = [
+            Reference(id: 1, title: "First"),
+            Reference(id: 2, title: "Second"),
+            Reference(id: 3, title: "Third"),
+            Reference(id: 4, title: "Fourth"),
+        ]
+
+        let report = WordCitationDOCXProcessor.auditDocumentXML(xml, references: refs)
+
+        XCTAssertEqual(report.citationControlCount, 0)
+        XCTAssertEqual(report.bodyCitationNumbers, [1, 3, 4])
+        XCTAssertEqual(report.bibliographyEntryNumbers, [1, 2, 3, 4])
+        XCTAssertEqual(report.listedButUncitedBibliographyNumbers, [2])
+        XCTAssertTrue(report.citedButUnlistedBodyCitationNumbers.isEmpty)
         XCTAssertFalse(report.bibliographyMatchesBodyUniqueCount)
     }
 

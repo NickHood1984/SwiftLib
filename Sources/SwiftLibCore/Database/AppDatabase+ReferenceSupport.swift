@@ -5,7 +5,7 @@ import GRDB
 extension AppDatabase {
     func normalizedDOI(_ value: String?) -> String? {
         guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
-        return raw.lowercased()
+        return DOIIdentifier.canonical(for: raw) ?? raw.lowercased()
     }
 
     func normalizedPMID(_ value: String?) -> String? {
@@ -42,6 +42,10 @@ extension AppDatabase {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    func normalizeReferenceFieldsForStorage(_ reference: inout Reference) {
+        reference = ReferenceIntakeCanonicalizer.canonicalized(reference, options: .storage)
+    }
+
     func normalizedTitleKey(_ value: String?) -> String? {
         guard let normalized = normalizeForDedup(value) else { return nil }
         return normalized
@@ -61,18 +65,47 @@ extension AppDatabase {
     }
 
     func ensureLibraryReady(_ reference: Reference) throws {
-        guard reference.verificationStatus.isLibraryReady else {
+        // .legacy is allowed: it represents either migrated historical records or
+        // file-imported references (BibTeX/RIS) that are trusted but not
+        // authoritative-verified. All other non-library-ready statuses (candidate,
+        // seedOnly, blocked) must go through the pending queue instead.
+        guard reference.verificationStatus.isLibraryReady || reference.verificationStatus == .legacy else {
             throw NSError(
                 domain: "SwiftLib.AppDatabase",
                 code: 1001,
-                userInfo: [NSLocalizedDescriptionKey: "只有 verifiedAuto 或 verifiedManual 条目可写入正式资料库。"]
+                userInfo: [NSLocalizedDescriptionKey: "只有 verifiedAuto、verifiedManual 或 legacy 条目可写入正式资料库。"]
             )
         }
     }
+
+    /// Normalize a reference for a file-batch import (BibTeX / RIS).
+    ///
+    /// Unlike `normalizeForDirectLibrarySave`, this does NOT promote the record to
+    /// `verifiedManual`. File imports are trusted but not authoritative-verified, so
+    /// they remain `.legacy` — distinguishable from pipeline-verified entries in
+    /// health stats, CSL-completeness badges, and the library dashboard.
+    func normalizeForFileBatchImport(_ reference: inout Reference) {
+        guard reference.id == nil, reference.verificationStatus == .legacy else { return }
+        reference.verifiedAt = reference.verifiedAt ?? Date()
+        reference.reviewedBy = reference.reviewedBy ?? "file-import"
+    }
     func findDuplicateReferenceID(for reference: Reference, db: Database) throws -> Int64? {
-        if let doi = normalizedDOI(reference.doi),
-           let id = try Int64.fetchOne(db, sql: "SELECT id FROM reference WHERE doiNormalized = ? LIMIT 1", arguments: [doi]) {
-            return id
+        if let doi = normalizedDOI(reference.doi) {
+            let variants = doiLookupVariants(for: doi)
+            let placeholders = Array(repeating: "?", count: variants.count).joined(separator: ",")
+            if let id = try Int64.fetchOne(
+                db,
+                sql: """
+                    SELECT id
+                    FROM reference
+                    WHERE doiNormalized IN (\(placeholders))
+                       OR LOWER(TRIM(doi)) IN (\(placeholders))
+                    LIMIT 1
+                    """,
+                arguments: StatementArguments(variants + variants)
+            ) {
+                return id
+            }
         }
 
         if let pmid = normalizedPMID(reference.pmid),
@@ -140,11 +173,32 @@ extension AppDatabase {
         return nil
     }
 
+    private func doiLookupVariants(for canonicalDOI: String) -> [String] {
+        let bare = canonicalDOI.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !bare.isEmpty else { return [] }
+        return [
+            bare,
+            "https://doi.org/\(bare)",
+            "http://doi.org/\(bare)",
+            "https://dx.doi.org/\(bare)",
+            "http://dx.doi.org/\(bare)",
+            "doi:\(bare)",
+        ]
+    }
+
     func mergedReference(existing: Reference, incoming: Reference) -> Reference {
         func preferred(_ incoming: String?, over existing: String?) -> String? {
             let candidate = incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
             if let candidate, !candidate.isEmpty { return candidate }
             return existing
+        }
+
+        // Prefer the existing value if it is non-empty; fill from incoming only when
+        // existing is nil/blank.  Used when the existing record has stronger provenance.
+        func preferExisting(_ existing: String?, over incoming: String?) -> String? {
+            let candidate = existing?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let candidate, !candidate.isEmpty { return candidate }
+            return incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         func preferredLongest(_ incoming: String?, over existing: String?) -> String? {
@@ -158,54 +212,98 @@ extension AppDatabase {
             }
         }
 
+        // When the existing record is verified (auto or manual) and the incoming is
+        // weaker (e.g. a file import with .legacy status), protect authoritative
+        // bibliographic fields from being silently overwritten by the weaker source.
+        let existingIsStronger: Bool = {
+            let existingVerified = existing.verificationStatus == .verifiedAuto
+                || existing.verificationStatus == .verifiedManual
+            let incomingVerified = incoming.verificationStatus == .verifiedAuto
+                || incoming.verificationStatus == .verifiedManual
+            return existingVerified && !incomingVerified
+        }()
+
+        // Choose the field-level merge strategy based on relative record quality.
+        // For bibliographic core fields: prefer incoming when both are unverified;
+        // prefer existing when it is already verified and incoming is weaker.
+        func bibField(_ inc: String?, _ ext: String?) -> String? {
+            existingIsStronger ? preferExisting(ext, over: inc) : preferred(inc, over: ext)
+        }
+        func bibYear(_ inc: Int?, _ ext: Int?) -> Int? {
+            existingIsStronger ? (ext ?? inc) : (inc ?? ext)
+        }
+
         var merged = existing
-        merged.title = preferred(incoming.title, over: existing.title) ?? existing.title
-        merged.authors = incoming.authors.isEmpty ? existing.authors : incoming.authors
-        merged.year = incoming.year ?? existing.year
-        merged.journal = preferred(incoming.journal, over: existing.journal)
-        merged.volume = preferred(incoming.volume, over: existing.volume)
-        merged.issue = preferred(incoming.issue, over: existing.issue)
-        merged.pages = preferred(incoming.pages, over: existing.pages)
-        merged.doi = preferred(incoming.doi, over: existing.doi)
-        merged.url = preferred(incoming.url, over: existing.url)
+        merged.title = bibField(incoming.title, existing.title) ?? existing.title
+        merged.authors = existingIsStronger
+            ? (existing.authors.isEmpty ? incoming.authors : existing.authors)
+            : (incoming.authors.isEmpty ? existing.authors : incoming.authors)
+        // Bibliographic core — when existing is verified and incoming is weaker, protect
+        // the authoritative values and only fill genuinely missing fields from incoming.
+        merged.year = bibYear(incoming.year, existing.year)
+        merged.journal = bibField(incoming.journal, existing.journal)
+        merged.volume = bibField(incoming.volume, existing.volume)
+        merged.issue = bibField(incoming.issue, existing.issue)
+        merged.pages = bibField(incoming.pages, existing.pages)
+        merged.doi = bibField(incoming.doi, existing.doi)
+            .flatMap { DOIIdentifier($0)?.cslString ?? $0.swiftlib_nilIfBlank }
+        merged.url = bibField(incoming.url, existing.url)
+
+        // Attachment and user-accumulated text: always prefer the richer value
+        // regardless of verification strength (the user may add a PDF or longer
+        // abstract at any time).
         merged.abstract = preferredLongest(incoming.abstract, over: existing.abstract)
         merged.pdfPath = preferred(incoming.pdfPath, over: existing.pdfPath)
         merged.notes = preferredLongest(incoming.notes, over: existing.notes)
         merged.webContent = preferredLongest(incoming.webContent, over: existing.webContent)
-        merged.siteName = preferred(incoming.siteName, over: existing.siteName)
-        merged.favicon = preferred(incoming.favicon, over: existing.favicon)
-        if existing.referenceType == .other || existing.referenceType == .webpage {
+        merged.siteName = bibField(incoming.siteName, existing.siteName)
+        merged.favicon = bibField(incoming.favicon, existing.favicon)
+
+        // Type upgrade: allow incoming to improve a generic type, but only when
+        // existing has not been verified against a specific type.
+        if !existingIsStronger && (existing.referenceType == .other || existing.referenceType == .webpage) {
             merged.referenceType = incoming.referenceType
         }
-        merged.metadataSource = incoming.metadataSource ?? existing.metadataSource
-        merged.verificationStatus = incoming.verificationStatus.isLibraryReady ? incoming.verificationStatus : existing.verificationStatus
-        merged.acceptedByRuleID = preferred(incoming.acceptedByRuleID, over: existing.acceptedByRuleID)
-        merged.recordKey = preferred(incoming.recordKey, over: existing.recordKey)
-        merged.verificationSourceURL = preferred(incoming.verificationSourceURL, over: existing.verificationSourceURL)
-        merged.evidenceBundleHash = preferred(incoming.evidenceBundleHash, over: existing.evidenceBundleHash)
-        merged.verifiedAt = incoming.verifiedAt ?? existing.verifiedAt
-        merged.reviewedBy = preferred(incoming.reviewedBy, over: existing.reviewedBy)
+
+        // Verification provenance — protect when existing is the stronger record.
+        merged.metadataSource = existingIsStronger
+            ? (existing.metadataSource ?? incoming.metadataSource)
+            : (incoming.metadataSource ?? existing.metadataSource)
+        merged.verificationStatus = incoming.verificationStatus.isLibraryReady
+            ? incoming.verificationStatus : existing.verificationStatus
+        merged.acceptedByRuleID = bibField(incoming.acceptedByRuleID, existing.acceptedByRuleID)
+        merged.recordKey = bibField(incoming.recordKey, existing.recordKey)
+        merged.verificationSourceURL = bibField(incoming.verificationSourceURL, existing.verificationSourceURL)
+        merged.evidenceBundleHash = bibField(incoming.evidenceBundleHash, existing.evidenceBundleHash)
+        merged.verifiedAt = existingIsStronger
+            ? (existing.verifiedAt ?? incoming.verifiedAt)
+            : (incoming.verifiedAt ?? existing.verifiedAt)
+        merged.reviewedBy = bibField(incoming.reviewedBy, existing.reviewedBy)
+
+        // Collection placement: incoming wins (user may be importing into a target collection).
         merged.collectionId = incoming.collectionId ?? existing.collectionId
-        merged.publisher = preferred(incoming.publisher, over: existing.publisher)
-        merged.publisherPlace = preferred(incoming.publisherPlace, over: existing.publisherPlace)
-        merged.edition = preferred(incoming.edition, over: existing.edition)
-        merged.editors = preferred(incoming.editors, over: existing.editors)
-        merged.isbn = preferred(incoming.isbn, over: existing.isbn)
-        merged.issn = preferred(incoming.issn, over: existing.issn)
+
+        // Remaining bibliographic fields.
+        merged.publisher = bibField(incoming.publisher, existing.publisher)
+        merged.publisherPlace = bibField(incoming.publisherPlace, existing.publisherPlace)
+        merged.edition = bibField(incoming.edition, existing.edition)
+        merged.editors = bibField(incoming.editors, existing.editors)
+        merged.isbn = bibField(incoming.isbn, existing.isbn)
+        merged.issn = bibField(incoming.issn, existing.issn)
         merged.accessedDate = preferred(incoming.accessedDate, over: existing.accessedDate)
-        merged.issuedMonth = incoming.issuedMonth ?? existing.issuedMonth
-        merged.issuedDay = incoming.issuedDay ?? existing.issuedDay
-        merged.translators = preferred(incoming.translators, over: existing.translators)
-        merged.eventTitle = preferred(incoming.eventTitle, over: existing.eventTitle)
-        merged.eventPlace = preferred(incoming.eventPlace, over: existing.eventPlace)
-        merged.genre = preferred(incoming.genre, over: existing.genre)
-        merged.institution = preferred(incoming.institution, over: existing.institution)
-        merged.number = preferred(incoming.number, over: existing.number)
-        merged.collectionTitle = preferred(incoming.collectionTitle, over: existing.collectionTitle)
-        merged.numberOfPages = preferred(incoming.numberOfPages, over: existing.numberOfPages)
-        merged.language = preferred(incoming.language, over: existing.language)
-        merged.pmid = preferred(incoming.pmid, over: existing.pmid)
-        merged.pmcid = preferred(incoming.pmcid, over: existing.pmcid)
+        merged.issuedMonth = bibYear(incoming.issuedMonth, existing.issuedMonth)
+        merged.issuedDay = bibYear(incoming.issuedDay, existing.issuedDay)
+        merged.translators = bibField(incoming.translators, existing.translators)
+        merged.eventTitle = bibField(incoming.eventTitle, existing.eventTitle)
+        merged.eventPlace = bibField(incoming.eventPlace, existing.eventPlace)
+        merged.genre = bibField(incoming.genre, existing.genre)
+        merged.institution = bibField(incoming.institution, existing.institution)
+        merged.number = bibField(incoming.number, existing.number)
+        merged.collectionTitle = bibField(incoming.collectionTitle, existing.collectionTitle)
+        merged.numberOfPages = bibField(incoming.numberOfPages, existing.numberOfPages)
+        merged.language = bibField(incoming.language, existing.language)
+        merged.pmid = bibField(incoming.pmid, existing.pmid)
+        merged.pmcid = bibField(incoming.pmcid, existing.pmcid)
         merged.dateAdded = existing.dateAdded
         merged.dateModified = Date()
         return merged

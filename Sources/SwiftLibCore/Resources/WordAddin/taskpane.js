@@ -11,6 +11,10 @@ const BOUNDARY_GUARD_TAG = "swiftlib:v3:boundary-guard";
 const ZERO_WIDTH_SEPARATOR = "\u200C";
 const DEFAULT_FETCH_TIMEOUT_MS = 8000;
 const RENDER_FETCH_TIMEOUT_MS = 20000;
+/** Absolute server base URL — mirrors CMD_SERVER in commands.js.
+ *  Using an absolute URL prevents "The string did not match the expected pattern."
+ *  when the taskpane iframe is loaded with a null/opaque origin. */
+const TASKPANE_SERVER = "http://127.0.0.1:23858";
 const DEFAULT_BIBLIOGRAPHY_PARAGRAPH_STYLE = "Normal";
 
 // Document-level JSON snapshot (WordApi 1.4 CustomXmlPart): travels with the .docx, supports repair/sync
@@ -114,7 +118,7 @@ async function fetchCSLSnapshotsForIds(ids) {
   }
   if (missing.length) {
     try {
-      const cslItems = await fetchJSON(`/api/cite-items?ids=${missing.join(",")}`);
+      const cslItems = await fetchJSON(`${TASKPANE_SERVER}/api/cite-items?ids=${missing.join(",")}`);
       for (const item of cslItems) {
         const refId = String(item._swiftlibRefId || item.id || "");
         if (refId) cslSnapshotCacheById.set(refId, item);
@@ -164,7 +168,7 @@ async function preRenderSingleCitation(style, citationID, ids, citationItems, fr
       style,
       { citations: syntheticCitations, bibControls: [] },
       {
-        baseURL: "",
+        baseURL: TASKPANE_SERVER,
         citationKind: state.styleCitationKind[style] || "",
         embeddedItems,
         includeBibliography: false,
@@ -177,6 +181,22 @@ async function preRenderSingleCitation(style, citationID, ids, citationItems, fr
     console.warn("SwiftLib preRenderSingleCitation:", e);
     return null;
   }
+}
+
+async function runStrictCitationPreflight(style, citationID, ids, citationItems) {
+  const payload = await fetchDocumentRenderPayload(
+    style,
+    {
+      citations: [{ citationID, ids, position: 0, citationItems: citationItems || null }],
+      bibControls: [],
+    },
+    { includeBibliography: false, strictPreflight: true }
+  );
+  if (payload?.error) throw new Error(payload.error);
+  if (payload?.preflight?.blocked) {
+    throw new Error(payload.preflight.message || "当前 CSL 样式无法可靠生成该引文。");
+  }
+  return payload;
 }
 
 /**
@@ -1147,7 +1167,7 @@ async function clearSearchResultsPlaceholder() {
 
 async function loadStyles() {
   try {
-    const styles = await fetchJSON("/api/styles");
+    const styles = await fetchJSON(`${TASKPANE_SERVER}/api/styles`);
     state.styleCitationKind = {};
     for (const s of styles) {
       state.styleCitationKind[s.id] = s.citationKind || "authorDate";
@@ -1170,7 +1190,7 @@ async function preloadSwiftLibCiteprocForCurrentStyle() {
     const sid = sel.value || "apa";
     const kind = state.styleCitationKind[sid] || "";
     if (typeof SwiftLibCiteproc !== "undefined" && SwiftLibCiteproc.preloadStyleAndLocale) {
-      await SwiftLibCiteproc.preloadStyleAndLocale(sid, { baseURL: "", citationKind: kind });
+      await SwiftLibCiteproc.preloadStyleAndLocale(sid, { baseURL: TASKPANE_SERVER, citationKind: kind });
     }
   } catch (e) {
     console.warn("SwiftLib citeproc preload:", e);
@@ -1189,10 +1209,12 @@ async function fetchDocumentRenderPayload(styleId, scan, options) {
   // Collect embedded item snapshots from the document (v4 schema)
   const embeddedItems = swiftLibStorageCache.payload?.items || {};
   const includeBibliography = options?.includeBibliography !== false && (scan.bibControls || []).length > 0;
+  const strictPreflight = options?.strictPreflight === true;
   try {
-    if (typeof SwiftLibCiteproc !== "undefined" && SwiftLibCiteproc.renderDocumentPayload) {
+    const needsLiveServerItems = /(?:^|-)gb-t-7714|china-national-standard-gb-t-7714/.test(styleId || "");
+    if (!strictPreflight && !needsLiveServerItems && typeof SwiftLibCiteproc !== "undefined" && SwiftLibCiteproc.renderDocumentPayload) {
       const clientResult = await SwiftLibCiteproc.renderDocumentPayload(styleId, scan, {
-        baseURL: "",
+        baseURL: TASKPANE_SERVER,
         citationKind: kind,
         embeddedItems,
         includeBibliography,
@@ -1220,7 +1242,7 @@ async function fetchDocumentRenderPayload(styleId, scan, options) {
   // — which carries { error, orphanIds } for items deleted from the library —
   // is returned as a parsed object instead of thrown.  The caller checks
   // data.error and can still present the orphan banner using data.orphanIds.
-  const rawResp = await fetchWithTimeout("/api/render-document", {
+  const rawResp = await fetchWithTimeout(`${TASKPANE_SERVER}/api/render-document`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -1230,6 +1252,7 @@ async function fetchDocumentRenderPayload(styleId, scan, options) {
       style: styleId,
       citations: reqCitations,
       includeBibliography,
+      strictPreflight,
       // Pass embedded items to server so it can render without DB lookup when available
       items: Object.keys(embeddedItems).length ? embeddedItems : undefined,
     }),
@@ -1845,7 +1868,7 @@ async function hydrateFromSelection() {
     }
 
     if (resolvedIds.length) {
-      const refs = await fetchJSON(`/api/references?ids=${resolvedIds.join(",")}`);
+      const refs = await fetchJSON(`${TASKPANE_SERVER}/api/references?ids=${resolvedIds.join(",")}`);
 
       // For items deleted from the library, fall back to the embedded snapshot
       // so we can still display something meaningful in the chips.
@@ -2088,6 +2111,13 @@ async function upsertCitation() {
 
     // Wait for CSL snapshots (parallel with UI work above).
     const cslSnapshots = await snapshotsPromise;
+    const provisionalPreflightID = generateUUID();
+    await runStrictCitationPreflight(
+      style,
+      provisionalPreflightID,
+      ids,
+      citationItemsForPending
+    );
 
     // Pre-render the new citation client-side for the fast path.  This is
     // CPU-only (no IPC, no network) and typically <50 ms.  Allows us to write
@@ -2100,10 +2130,9 @@ async function upsertCitation() {
     // which the full refreshDocument handles correctly.
     let preRenderedNew = null;
     if (fastPathEligible && !state.editingCitationID) {
-      const provisionalID = generateUUID();
       preRenderedNew = await preRenderSingleCitation(
         style,
-        provisionalID,
+        provisionalPreflightID,
         ids,
         citationItemsForPending,
         cslSnapshots,
@@ -3073,7 +3102,7 @@ async function performRelink() {
   try {
     setStatus("正在 Relink…");
     // Fetch CSL data for the new ref
-    const cslItems = await fetchJSON(`/api/cite-items?ids=${newId}`);
+    const cslItems = await fetchJSON(`${TASKPANE_SERVER}/api/cite-items?ids=${newId}`);
     if (!cslItems || !cslItems.length) throw new Error("未能获取文献数据");
     const newCsl = cslItems[0];
 
@@ -3318,7 +3347,7 @@ async function search(query) {
 
   try {
     const startedAt = performance.now();
-    const refs = await fetchJSON(`/api/search?q=${encodeURIComponent(trimmed)}&limit=30`);
+    const refs = await fetchJSON(`${TASKPANE_SERVER}/api/search?q=${encodeURIComponent(trimmed)}&limit=30`);
     state.allResults = refs;
     state.activeResultIndex = refs.length ? 0 : -1;
     renderResults(refs);
@@ -3683,7 +3712,7 @@ function releaseTaskpaneFocusToDocument() {
 function triggerWordFocusBounce() {
   if (wordFocusBounceInFlight) return;
   wordFocusBounceInFlight = true;
-  fetchWithTimeout("/api/word/focus-bounce", {
+  fetchWithTimeout(`${TASKPANE_SERVER}/api/word/focus-bounce`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -3862,7 +3891,7 @@ async function importLocalCSLFiles(files) {
         continue;
       }
 
-      await fetchJSON("/api/styles/import", {
+      await fetchJSON(`${TASKPANE_SERVER}/api/styles/import`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: styleId, title: styleTitle || file.name.replace(/\.csl$/i, ""), xml }),
@@ -4077,7 +4106,7 @@ async function installZoteroStyle(url, id, title) {
     const finalId    = meta.id    || id;
     const finalTitle = meta.title || title;
 
-    await fetchJSON("/api/styles/import", {
+    await fetchJSON(`${TASKPANE_SERVER}/api/styles/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: finalId, title: finalTitle, xml }),
@@ -4106,7 +4135,7 @@ async function refreshCustomStylesList() {
   if (!container) return;
 
   try {
-    const styles = await fetchJSON("/api/styles");
+    const styles = await fetchJSON(`${TASKPANE_SERVER}/api/styles`);
     const custom  = styles.filter(s => s.builtin === "false");
 
     if (!custom.length) {
@@ -4140,7 +4169,7 @@ async function refreshCustomStylesList() {
 async function deleteCustomStyle(id) {
   setStyleManagerStatus("正在删除…");
   try {
-    await fetchJSON("/api/styles/delete", {
+    await fetchJSON(`${TASKPANE_SERVER}/api/styles/delete`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),

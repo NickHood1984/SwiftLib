@@ -116,6 +116,22 @@ final class CitationFormatterTests: XCTestCase {
         XCTAssertTrue(result.contains("A Study on Testing"), "Bibliography should contain title")
     }
 
+    func testFormatBibliographyNormalizesDOIURLBeforeDisplay() {
+        let ref = Reference(
+            id: 1,
+            title: "A Study on Testing",
+            authors: [AuthorName(given: "John", family: "Smith")],
+            year: 2023,
+            journal: "Test Journal",
+            doi: "https://doi.org/10.1890/12-2010.1"
+        )
+
+        let result = CitationFormatter.formatBibliography(ref, style: "apa")
+
+        XCTAssertTrue(result.contains("https://doi.org/10.1890/12-2010.1"), result)
+        XCTAssertFalse(result.contains("https://doi.org/https://doi.org/"), result)
+    }
+
     func testFormatBibliographyAllStyles() {
         let ref = Reference(
             id: 1,

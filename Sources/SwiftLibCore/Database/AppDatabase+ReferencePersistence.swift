@@ -20,6 +20,7 @@ extension AppDatabase {
     @discardableResult
     public func saveReference(_ reference: inout Reference) throws -> SaveReferenceOutcome {
         try dbWriter.write { db in
+            normalizeReferenceFieldsForStorage(&reference)
             try normalizeForDirectLibrarySave(&reference)
             let isExistingReference = reference.id != nil
 
@@ -52,6 +53,32 @@ extension AppDatabase {
             try db.execute(
                 sql: "UPDATE reference SET webContent = ?, dateModified = ? WHERE id = ?",
                 arguments: [webContent, Date(), id]
+            )
+        }
+    }
+
+    public func repairCitationMetadata(_ references: [Reference]) throws -> ReferenceLibraryRepairReport {
+        let candidates = references.compactMap { reference -> (ReferenceLibraryRepairCandidate, Reference)? in
+            let repaired = ReferenceLibraryRepairer.repairedReference(reference)
+            let plan = ReferenceLibraryRepairer.repairPlan(for: [reference]).candidates.first
+            guard let plan else { return nil }
+            return (plan, repaired)
+        }
+
+        guard !candidates.isEmpty else {
+            return ReferenceLibraryRepairReport(referenceCount: references.count, candidates: [])
+        }
+
+        return try dbWriter.write { db in
+            for (_, var repaired) in candidates {
+                guard repaired.id != nil else { continue }
+                repaired.dateModified = Date()
+                try repaired.save(db)
+            }
+            return ReferenceLibraryRepairReport(
+                referenceCount: references.count,
+                appliedCount: candidates.count,
+                candidates: candidates.map(\.0)
             )
         }
     }
@@ -192,7 +219,8 @@ extension AppDatabase {
         return try dbWriter.write { db in
             var result = BatchImportResult()
             for var ref in references {
-                try normalizeForDirectLibrarySave(&ref)
+                normalizeReferenceFieldsForStorage(&ref)
+                normalizeForFileBatchImport(&ref)
                 try ensureLibraryReady(ref)
                 if let duplicateId = try findDuplicateReferenceID(for: ref, db: db),
                    var existing = try Reference.fetchOne(db, id: duplicateId) {

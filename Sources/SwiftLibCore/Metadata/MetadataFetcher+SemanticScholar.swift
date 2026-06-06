@@ -88,7 +88,7 @@ extension MetadataFetcher {
 
         let authors: [AuthorName] = (row["authors"] ?? "")
             .split(separator: "|", omittingEmptySubsequences: true)
-            .map { AuthorName.parse(String($0)) }
+            .map { AuthorName.parseRomanizedCJKAware(String($0)) }
 
         let journal: S2Journal? = {
             let name = row["journalName"]?.swiftlib_nilIfBlank

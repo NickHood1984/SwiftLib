@@ -259,7 +259,7 @@ extension MetadataFetcher {
         let title = row["title"] ?? "Untitled"
         let authors: [AuthorName] = (row["authors"] ?? "")
             .split(separator: "|", omittingEmptySubsequences: true)
-            .map { AuthorName.parse(String($0)) }
+            .map { AuthorName.parseRomanizedCJKAware(String($0)) }
         let year = row["year"].flatMap { Int($0.prefix(4)) }
 
         // Prefer the template-rendered "firstPage-lastPage" when both were
@@ -337,7 +337,7 @@ extension MetadataFetcher {
             return authorships.compactMap { authorship -> AuthorName? in
                 guard let author = authorship["author"] as? [String: Any],
                       let name = author["display_name"] as? String else { return nil }
-                return AuthorName.parse(name)
+                return AuthorName.parseRomanizedCJKAware(name)
             }
         }()
 

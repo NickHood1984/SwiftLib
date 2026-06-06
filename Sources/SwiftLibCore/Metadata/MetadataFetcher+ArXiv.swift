@@ -93,7 +93,7 @@ private class ArXivXMLParser: NSObject, XMLParserDelegate {
                 if inAuthor { currentAuthor = text }
             case "author":
                 inAuthor = false
-                if !currentAuthor.isEmpty { authors.append(AuthorName.parse(currentAuthor)) }
+                if !currentAuthor.isEmpty { authors.append(AuthorName.parseRomanizedCJKAware(currentAuthor)) }
             case "published":
                 published = text
             case "entry":

@@ -133,7 +133,11 @@ extension MetadataResolver {
         fallback: Reference?
     ) async -> MetadataResolutionResult {
         resolverTrace("resolveIdentifierLocally -> \(String(describing: identifier))")
-        let fetchResult = await ParallelSourceFetcher.shared.fetchByIdentifier(identifier)
+        let includeCrossRef = Self.shouldUseCrossRef(reference: fallback, seed: seed)
+        if !includeCrossRef {
+            resolverTrace("resolveIdentifierLocally -> 中文条目跳过 Crossref")
+        }
+        let fetchResult = await ParallelSourceFetcher.shared.fetchByIdentifier(identifier, includeCrossRef: includeCrossRef)
         guard !fetchResult.sources.isEmpty else {
             resolverTrace("resolveIdentifierLocally failed: 所有并发源均无结果")
             return .rejected(

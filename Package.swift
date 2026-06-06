@@ -61,7 +61,10 @@ let package = Package(
         .testTarget(
             name: "SwiftLibTests",
             dependencies: ["SwiftLib", "SwiftLibCore"],
-            path: "Tests/SwiftLibTests"
+            path: "Tests/SwiftLibTests",
+            exclude: [
+                "Fixtures"
+            ]
         ),
         .testTarget(
             name: "SwiftLibCLITests",

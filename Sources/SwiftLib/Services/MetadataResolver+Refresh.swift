@@ -199,33 +199,57 @@ extension MetadataResolver {
         return .skipped("元数据没有变化。")
     }
 
+    /// Thin wrapper kept for the refresh call site and existing tests.
     nonisolated static func shouldUseCrossRefForRefresh(reference: Reference, seed: MetadataResolutionSeed) -> Bool {
-        guard seed.shouldSearchCNKI, !MetadataRoutePlanner.isBookLike(seed) else { return true }
+        shouldUseCrossRef(reference: reference, seed: seed)
+    }
+
+    /// Whether CrossRef should participate in a parallel fetch.
+    ///
+    /// CrossRef is unhelpful for Chinese-language journal articles: it returns
+    /// Latinized titles, swaps CJK author order, and usually lacks volume/issue.
+    /// For those we rely on CNKI/Wanfang/VIP and exclude CrossRef entirely.
+    /// `reference` is optional so this also gates import-by-identifier, where only
+    /// a seed may be available.
+    nonisolated static func shouldUseCrossRef(reference: Reference?, seed: MetadataResolutionSeed?) -> Bool {
+        let bookLike = seed.map(MetadataRoutePlanner.isBookLike) ?? false
+        guard seed?.shouldSearchCNKI == true, !bookLike else { return true }
 
         let chineseSources: Set<MetadataSource> = [.cnki, .wanfang, .vip]
-        let source = reference.metadataSource
-        let sourceFromURL = MetadataResolution.metadataSource(for: reference.url, fallback: .translationServer)
-        let sourceFromVerificationURL = MetadataResolution.metadataSource(
-            for: reference.verificationSourceURL,
-            fallback: .translationServer
-        )
-        let hasChineseSource = source.map(chineseSources.contains) == true
-            || chineseSources.contains(sourceFromURL)
-            || chineseSources.contains(sourceFromVerificationURL)
+        var hasChineseSource = false
+        if let reference {
+            let source = reference.metadataSource
+            let sourceFromURL = MetadataResolution.metadataSource(for: reference.url, fallback: .translationServer)
+            let sourceFromVerificationURL = MetadataResolution.metadataSource(
+                for: reference.verificationSourceURL,
+                fallback: .translationServer
+            )
+            hasChineseSource = source.map(chineseSources.contains) == true
+                || chineseSources.contains(sourceFromURL)
+                || chineseSources.contains(sourceFromVerificationURL)
+        }
 
-        let hasChineseJournalText = MetadataResolution.containsHanCharacters(reference.journal)
-            || MetadataResolution.containsHanCharacters(seed.journal)
-            || MetadataResolution.containsHanCharacters(reference.title)
-            || MetadataResolution.containsHanCharacters(seed.title)
+        // Han-character author names reliably mark a Chinese-source record even when
+        // its title/journal were overwritten with English by an earlier CrossRef import.
+        let authorsHaveHan = reference?.authors.contains { author in
+            MetadataResolution.containsHanCharacters(author.family)
+                || MetadataResolution.containsHanCharacters(author.given)
+        } ?? false
 
-        let isJournalLike = seed.workKindHint == .journalArticle
-            || MetadataResolution.workKind(for: reference.referenceType) == .journalArticle
-            || reference.journal?.swiftlib_nilIfBlank != nil
-            || seed.journal?.swiftlib_nilIfBlank != nil
-            || reference.issn?.swiftlib_nilIfBlank != nil
-            || seed.issn?.swiftlib_nilIfBlank != nil
+        let hasChineseText = MetadataResolution.containsHanCharacters(reference?.journal)
+            || MetadataResolution.containsHanCharacters(seed?.journal)
+            || MetadataResolution.containsHanCharacters(reference?.title)
+            || MetadataResolution.containsHanCharacters(seed?.title)
+            || authorsHaveHan
 
-        return !(isJournalLike && (hasChineseJournalText || hasChineseSource))
+        let isJournalLike = seed?.workKindHint == .journalArticle
+            || (reference.map { MetadataResolution.workKind(for: $0.referenceType) == .journalArticle } ?? false)
+            || reference?.journal?.swiftlib_nilIfBlank != nil
+            || seed?.journal?.swiftlib_nilIfBlank != nil
+            || reference?.issn?.swiftlib_nilIfBlank != nil
+            || seed?.issn?.swiftlib_nilIfBlank != nil
+
+        return !(isJournalLike && (hasChineseText || hasChineseSource))
     }
 
     // MARK: - CNKI Outcome Processing

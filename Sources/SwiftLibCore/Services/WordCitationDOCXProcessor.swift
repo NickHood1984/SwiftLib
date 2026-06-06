@@ -18,6 +18,10 @@ public struct WordDOCXAuditReport: Codable, Sendable {
     public let unusedInLibrary: [Int64]
     public let duplicateCitationsInParagraphs: [WordDOCXDuplicateCitation]
     public let bibliographyEntryCount: Int
+    public let bodyCitationNumbers: [Int]
+    public let bibliographyEntryNumbers: [Int]
+    public let listedButUncitedBibliographyNumbers: [Int]
+    public let citedButUnlistedBodyCitationNumbers: [Int]
     public let bibliographyMatchesBodyUniqueCount: Bool
     public let warnings: [String]
 }
@@ -123,32 +127,36 @@ public enum WordCitationDOCXProcessor {
         let sdtRefIDs = orderedUnique(citations.flatMap(\.referenceIDs))
         let fnRefIDs = orderedUnique(footnoteCitations.flatMap(\.referenceIDs))
         let allRefIDs = orderedUnique(sdtRefIDs + fnRefIDs)
-        let cslItems = allRefIDs.compactMap { referencesByID[$0] }.map { $0.cslJSONObject() }
+        let cslItems = allRefIDs.compactMap { referencesByID[$0] }.map { CSLExportService.cslJSONObject(for: $0) }
 
         // Read locator/prefix/suffix data stored in the document's CustomXmlPart by the Word add-in
         let citationItemsMap = readCitationItemsMap(from: unpacked.unpackedURL)
 
         // SDT citations use byte offsets as positions; footnote citations follow with offsets beyond body
         let bodyLength = xml.utf16.count
-        let citeprocCitations: [(id: String, itemIDs: [String], position: Int, citationItems: [[String: Any]]?)] =
+        let citeprocCitations: [CitationDocumentCluster] =
             citations.map { c in
-                (id: c.citationID,
-                 itemIDs: orderedUnique(c.referenceIDs).map { String($0) },
-                 position: c.range.location,
-                 citationItems: citationItemsMap[c.citationID])
+                CitationDocumentCluster(
+                    id: c.citationID,
+                    itemIDs: orderedUnique(c.referenceIDs).map { String($0) },
+                    position: c.range.location,
+                    citationItems: citationItemsMap[c.citationID]
+                )
             } +
             footnoteCitations.enumerated().map { index, c in
-                (id: c.citationID,
-                 itemIDs: orderedUnique(c.referenceIDs).map { String($0) },
-                 position: bodyLength + index * 1000,
-                 citationItems: citationItemsMap[c.citationID])
+                CitationDocumentCluster(
+                    id: c.citationID,
+                    itemIDs: orderedUnique(c.referenceIDs).map { String($0) },
+                    position: bodyLength + index * 1000,
+                    citationItems: citationItemsMap[c.citationID]
+                )
             }
 
         let renderResult: (citationTexts: [String: String], bibliographyText: String, superscriptIDs: Set<String>, citationFormatting: CitationTextFormatting?)
         do {
             guard let r = try CiteprocJSCorePool.shared.withEngine(forStyleId: style, { engine in
                 engine.setItems(cslItems)
-                return try engine.renderDocument(citations: citeprocCitations)
+                return try engine.renderDocument(citationClusters: citeprocCitations)
             }) else {
                 throw WordCitationDOCXProcessorError.processFailed("无法加载引文样式「\(style)」，请在样式管理中确认该样式已导入。")
             }
@@ -216,39 +224,25 @@ public enum WordCitationDOCXProcessor {
     /// never block the DOCX refresh operation.
     private static func backfillCitationItemOptions(
         documentURI: String,
-        citationsMap: [String: [[String: Any]]],
+        citationsMap: [String: [CitationDocumentItemOption]],
         database: AppDatabase
     ) {
         guard !citationsMap.isEmpty else { return }
         var options: [CitationItemOption] = []
         for (citationID, items) in citationsMap {
             for item in items {
-                // Resolve the reference DB id from the item payload.
-                let refID: Int64? = {
-                    if let ref = item["itemRef"] as? String, ref.hasPrefix("lib:"),
-                       let n = Int64(ref.dropFirst(4)) { return n }
-                    if let n = item["refId"] as? Int64 { return n }
-                    if let n = item["refId"] as? Int { return Int64(n) }
-                    if let s = item["refId"] as? String { return Int64(s) }
-                    if let n = item["id"] as? Int64 { return n }
-                    if let s = item["id"] as? String { return Int64(s) }
-                    return nil
-                }()
-                guard let rid = refID else { continue }
+                guard let rawID = item.resolvedItemID, let rid = Int64(rawID) else { continue }
 
-                let locator = (item["locator"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let label   = (item["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let prefix  = (item["prefix"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let suffix  = (item["suffix"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let suppress = (item["suppress-author"] as? Bool)
-                    ?? (item["suppressAuthor"] as? Bool)
-                    ?? false
+                let locator = item.locator?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let label = item.label?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let prefix = item.prefix?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let suffix = item.suffix?.trimmingCharacters(in: .whitespacesAndNewlines)
 
                 // Only store rows that actually carry non-trivial options.
                 let hasOptions = !(locator ?? "").isEmpty
                     || !(prefix ?? "").isEmpty
                     || !(suffix ?? "").isEmpty
-                    || suppress
+                    || item.suppressAuthor
                 guard hasOptions else { continue }
 
                 options.append(CitationItemOption(
@@ -259,7 +253,7 @@ public enum WordCitationDOCXProcessor {
                     label: label?.swiftlib_nilIfBlank,
                     prefix: prefix?.swiftlib_nilIfBlank,
                     suffix: suffix?.swiftlib_nilIfBlank,
-                    suppressAuthor: suppress
+                    suppressAuthor: item.suppressAuthor
                 ))
             }
         }
@@ -284,13 +278,41 @@ public enum WordCitationDOCXProcessor {
         let missingInLibrary = docUniqueIDs.filter { !referenceIDs.contains($0) }
         let unusedInLibrary = references.compactMap(\.id).filter { !docUniqueIDSet.contains($0) }.sorted()
         let bibliographyEntryCount = countBibliographyEntries(in: xml, bibliographyControls: bibliographyControls)
+        let bodyCitationNumbers = orderedUnique(
+            citations.flatMap { displayedCitationNumbers(in: $0.xml) }
+            + plainTextBodyCitationNumbers(in: xml)
+        )
+        let bibliographyEntryNumbers = orderedUnique(
+            numberedBibliographyEntries(in: xml, bibliographyControls: bibliographyControls).map(\.number)
+        )
+        let bodyCitationNumberSet = Set(bodyCitationNumbers)
+        let bibliographyEntryNumberSet = Set(bibliographyEntryNumbers)
+        let listedButUncitedBibliographyNumbers = bibliographyEntryNumbers
+            .filter { !bodyCitationNumberSet.contains($0) }
+        let citedButUnlistedBodyCitationNumbers = bodyCitationNumbers
+            .filter { !bibliographyEntryNumberSet.contains($0) }
+        let bodyReferenceCountForBibliographyComparison = docUniqueIDs.isEmpty
+            ? bodyCitationNumbers.count
+            : docUniqueIDs.count
         var warnings: [String] = []
         let totalCitationCount = citations.count + footnoteCitations.count
         if bibliographyControls.isEmpty, totalCitationCount > 0, footnoteCitations.isEmpty {
             warnings.append("document has SwiftLib citations but no SwiftLib bibliography control")
         }
-        if bibliographyEntryCount > 0, bibliographyEntryCount != docUniqueIDs.count {
+        if bibliographyEntryCount > 0, bibliographyEntryCount != bodyReferenceCountForBibliographyComparison {
             warnings.append("bibliography entry count does not match unique body citation count")
+        }
+        if !listedButUncitedBibliographyNumbers.isEmpty {
+            warnings.append(
+                "bibliography contains numbered entries not present in visible body citations: "
+                + listedButUncitedBibliographyNumbers.map(String.init).joined(separator: ", ")
+            )
+        }
+        if !citedButUnlistedBodyCitationNumbers.isEmpty {
+            warnings.append(
+                "visible body citations contain numbers not present in bibliography: "
+                + citedButUnlistedBodyCitationNumbers.map(String.init).joined(separator: ", ")
+            )
         }
 
         return WordDOCXAuditReport(
@@ -305,7 +327,11 @@ public enum WordCitationDOCXProcessor {
             unusedInLibrary: unusedInLibrary,
             duplicateCitationsInParagraphs: duplicateCitationsByParagraph(in: xml),
             bibliographyEntryCount: bibliographyEntryCount,
-            bibliographyMatchesBodyUniqueCount: bibliographyEntryCount == docUniqueIDs.count,
+            bodyCitationNumbers: bodyCitationNumbers,
+            bibliographyEntryNumbers: bibliographyEntryNumbers,
+            listedButUncitedBibliographyNumbers: listedButUncitedBibliographyNumbers,
+            citedButUnlistedBodyCitationNumbers: citedButUnlistedBodyCitationNumbers,
+            bibliographyMatchesBodyUniqueCount: bibliographyEntryCount == bodyReferenceCountForBibliographyComparison,
             warnings: warnings
         )
     }
@@ -522,6 +548,21 @@ public enum WordCitationDOCXProcessor {
         return WordCitationMarker.extractBibliographyEntries(from: xml).count
     }
 
+    private static func numberedBibliographyEntries(
+        in xml: String,
+        bibliographyControls: [BibliographyControl]
+    ) -> [WordCitationMarker.BibliographyEntry] {
+        if !bibliographyControls.isEmpty {
+            return bibliographyControls.flatMap { control in
+                paragraphTexts(in: control.xml).compactMap { text in
+                    guard let number = bibliographyEntryNumber(from: text) else { return nil }
+                    return WordCitationMarker.BibliographyEntry(number: number, text: text)
+                }
+            }
+        }
+        return WordCitationMarker.extractBibliographyEntries(from: xml)
+    }
+
     private static func paragraphTexts(in xml: String) -> [String] {
         paragraphRegex.matches(in: xml, range: NSRange(xml.startIndex..., in: xml)).map { match in
             guard let range = Range(match.range, in: xml) else { return "" }
@@ -534,6 +575,105 @@ public enum WordCitationDOCXProcessor {
             guard let range = Range(match.range(at: 1), in: xml) else { return nil }
             return xmlUnescaped(String(xml[range]))
         }.joined()
+    }
+
+    private static func displayedCitationNumbers(in controlXML: String) -> [Int] {
+        parseCitationNumberList(from: textContent(in: controlXML))
+    }
+
+    private static func plainTextBodyCitationNumbers(in xml: String) -> [Int] {
+        var numbers: [Int] = []
+        var insideBibliographySection = false
+
+        for text in paragraphTexts(in: xml) {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            if isBibliographyHeading(trimmed) {
+                insideBibliographySection = true
+                continue
+            }
+            if insideBibliographySection { continue }
+            if bibliographyEntryNumber(from: trimmed) != nil { continue }
+
+            numbers.append(contentsOf: bracketedCitationNumbers(in: trimmed))
+        }
+
+        return numbers
+    }
+
+    private static func isBibliographyHeading(_ text: String) -> Bool {
+        let normalized = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "")
+            .lowercased()
+        return normalized == "参考文献"
+            || normalized == "references"
+            || normalized == "bibliography"
+    }
+
+    private static func bibliographyEntryNumber(from text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if trimmed.first == "[", let closing = trimmed.firstIndex(of: "]") {
+            let numberText = trimmed[trimmed.index(after: trimmed.startIndex)..<closing]
+            let remainder = trimmed[trimmed.index(after: closing)...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !remainder.isEmpty else { return nil }
+            return Int(numberText.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        var digitEnd = trimmed.startIndex
+        while digitEnd < trimmed.endIndex, trimmed[digitEnd].isNumber {
+            digitEnd = trimmed.index(after: digitEnd)
+        }
+        guard digitEnd > trimmed.startIndex, digitEnd < trimmed.endIndex else { return nil }
+        let separator = trimmed[digitEnd]
+        guard separator == "." || separator == ")" else { return nil }
+        let remainder = trimmed[trimmed.index(after: digitEnd)...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !remainder.isEmpty else { return nil }
+        return Int(trimmed[..<digitEnd])
+    }
+
+    private static func parseCitationNumberList(from text: String) -> [Int] {
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        if trimmed.first == "[", trimmed.last == "]" {
+            trimmed = String(trimmed.dropFirst().dropLast())
+        } else if !trimmed.unicodeScalars.allSatisfy({ citationNumberListCharacters.contains($0) }) {
+            return []
+        }
+
+        let normalized = trimmed
+            .replacingOccurrences(of: "，", with: ",")
+            .replacingOccurrences(of: "、", with: ",")
+        var values: [Int] = []
+        for part in normalized.split(separator: ",") {
+            let token = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !token.isEmpty else { continue }
+            if let separatorIndex = token.firstIndex(where: { $0 == "-" || $0 == "–" || $0 == "—" }) {
+                let startText = token[..<separatorIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+                let endText = token[token.index(after: separatorIndex)...].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let start = Int(startText), let end = Int(endText), start <= end else { return [] }
+                values.append(contentsOf: start...end)
+            } else {
+                guard let value = Int(token) else { return [] }
+                values.append(value)
+            }
+        }
+        return values
+    }
+
+    private static func bracketedCitationNumbers(in text: String) -> [Int] {
+        var numbers: [Int] = []
+        for match in citationMarkerRegex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            guard let range = Range(match.range(at: 1), in: text) else { return [] }
+            numbers.append(contentsOf: parseCitationNumberList(from: "[\(text[range])]"))
+        }
+        return numbers
     }
 
     private static func citationContentXML(text: String, superscript: Bool) -> String {
@@ -602,7 +742,7 @@ public enum WordCitationDOCXProcessor {
     /// Reads the SwiftLib CustomXmlPart stored by the Word add-in inside `customXml/item*.xml`.
     /// Returns a map from citationId → citationItems array so that locators, prefixes, suffixes,
     /// and suppress-author flags set in the add-in UI survive a CLI refresh.
-    private static func readCitationItemsMap(from unpackedURL: URL) -> [String: [[String: Any]]] {
+    private static func readCitationItemsMap(from unpackedURL: URL) -> [String: [CitationDocumentItemOption]] {
         let customXmlDir = unpackedURL.appendingPathComponent("customXml")
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: customXmlDir, includingPropertiesForKeys: nil
@@ -629,10 +769,10 @@ public enum WordCitationDOCXProcessor {
             else { continue }
 
             let storedCitations = json["citations"] as? [[String: Any]] ?? []
-            var map: [String: [[String: Any]]] = [:]
+            var map: [String: [CitationDocumentItemOption]] = [:]
             for c in storedCitations {
                 guard let citationId = c["citationId"] as? String,
-                      let items = c["citationItems"] as? [[String: Any]],
+                      let items = CitationDocumentItemOption.decodeArray(fromJSONObject: c["citationItems"]),
                       !items.isEmpty else { continue }
                 map[citationId] = items
             }
@@ -790,6 +930,13 @@ public enum WordCitationDOCXProcessor {
         pattern: #"<w:pPr\b[^>]*>.*?</w:pPr>"#,
         options: [.dotMatchesLineSeparators]
     )
+
+    private static let citationMarkerRegex = try! NSRegularExpression(
+        pattern: #"[［\[\【]\s*([0-9]+(?:\s*[-–—]\s*[0-9]+)?(?:\s*[,，、]\s*[0-9]+(?:\s*[-–—]\s*[0-9]+)?)*)\s*[］\]\】]"#,
+        options: []
+    )
+
+    private static let citationNumberListCharacters = CharacterSet(charactersIn: "0123456789,，、-–— \t\r\n")
 
     // MARK: - Footnote citation support (word/footnotes.xml)
 

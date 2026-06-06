@@ -127,6 +127,38 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertEqual(stored.pdfPath, "PDFs/manual.pdf")
     }
 
+    func testSaveReferenceCanonicalizesLegacyCitationProblemsBeforeRepair() throws {
+        let db = try makeDatabase()
+        var ref = Reference(
+            title: "洞庭湖春秋季浮游植物群落结构及其与环境因子的关系",
+            authors: [
+                AuthorName(given: "潘保柱, 赵耿楠, 韩 谞, 蒋小明, 李典宝", family: "王 昊")
+            ],
+            year: 2021,
+            journal: "长江流域资源与环境",
+            volume: "30",
+            issue: "11",
+            pages: "2659-2667",
+            doi: "https://doi.org/10.1111/example",
+            referenceType: .other,
+            accessedDate: "2026-05-25"
+        )
+        try db.saveReference(&ref)
+
+        let stored = try XCTUnwrap(try db.fetchReferences(ids: [try XCTUnwrap(ref.id)]).first)
+        XCTAssertEqual(stored.doi, "10.1111/example")
+        XCTAssertNil(stored.accessedDate)
+        XCTAssertEqual(stored.referenceType, .journalArticle)
+        XCTAssertEqual(stored.authors.map(\.family), ["王昊", "潘保柱", "赵耿楠", "韩谞", "蒋小明", "李典宝"])
+
+        let dryRun = ReferenceLibraryRepairer.repairPlan(for: [stored])
+        XCTAssertEqual(dryRun.candidateCount, 0)
+
+        let report = try db.repairCitationMetadata([stored])
+        XCTAssertEqual(report.appliedCount, 0)
+        XCTAssertEqual(report.candidateCount, 0)
+    }
+
     func testSaveReferenceMergesDuplicateDOIAndKeepsBestMetadata() throws {
         let db = try makeDatabase()
 
@@ -148,6 +180,67 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertEqual(merged.abstract, "A much longer abstract than before")
         XCTAssertEqual(merged.pdfPath, "PDFs/duplicate.pdf")
         XCTAssertEqual(duplicate.id, merged.id)
+    }
+
+    func testSaveReferenceStoresBareDOIAndDeduplicatesDOIURLVariants() throws {
+        let db = try makeDatabase()
+
+        var original = Reference(title: "Original DOI URL")
+        original.doi = "https://doi.org/10.1890/12-2010.1"
+        try db.saveReference(&original)
+
+        var duplicate = Reference(title: "Duplicate DOI Prefix")
+        duplicate.doi = "DOI:10.1890/12-2010.1"
+        try db.saveReference(&duplicate)
+
+        let all = try db.fetchAllReferences()
+        XCTAssertEqual(all.count, 1)
+        let stored = try XCTUnwrap(all.first)
+        XCTAssertEqual(stored.doi, "10.1890/12-2010.1")
+        XCTAssertEqual(duplicate.id, stored.id)
+    }
+
+    func testSaveReferenceDeduplicatesAgainstLegacyDoiNormalizedURLRows() throws {
+        let db = try makeDatabase()
+
+        var legacy = Reference(title: "Legacy DOI URL")
+        legacy.doi = "https://doi.org/10.1890/12-2010.1"
+        try db.saveReference(&legacy)
+        let legacyId = try XCTUnwrap(legacy.id)
+        try db.dbWriter.write { rawDB in
+            try rawDB.execute(
+                sql: """
+                    UPDATE reference
+                    SET doi = ?, doiNormalized = ?
+                    WHERE id = ?
+                    """,
+                arguments: [
+                    "https://doi.org/10.1890/12-2010.1",
+                    "https://doi.org/10.1890/12-2010.1",
+                    legacyId,
+                ]
+            )
+        }
+
+        var duplicate = Reference(title: "Bare DOI Duplicate")
+        duplicate.doi = "10.1890/12-2010.1"
+        try db.saveReference(&duplicate)
+
+        let all = try db.fetchAllReferences()
+        XCTAssertEqual(all.count, 1)
+        XCTAssertEqual(duplicate.id, legacyId)
+        XCTAssertEqual(try XCTUnwrap(all.first).doi, "10.1890/12-2010.1")
+    }
+
+    func testBatchImportStoresBareDOI() throws {
+        let db = try makeDatabase()
+
+        _ = try db.batchImportReferences([
+            Reference(title: "Imported DOI URL", doi: "https://doi.org/10.1111/gcb.13295")
+        ])
+
+        let stored = try XCTUnwrap(try db.fetchAllReferences().first)
+        XCTAssertEqual(stored.doi, "10.1111/gcb.13295")
     }
 
     func testSaveReferenceAllowsUpdatingExistingLegacyEntry() throws {
@@ -182,6 +275,138 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertEqual(all.count, 1)
         XCTAssertEqual(all[0].pmid, "123456")
         XCTAssertEqual(all[0].abstract, "Merged abstract")
+    }
+
+    func testBatchImportKeepsLegacyStatus() throws {
+        // File imports (BibTeX/RIS) should stay .legacy, not be promoted to
+        // .verifiedManual. That label is reserved for pipeline-verified records.
+        let db = try makeDatabase()
+        let refs = [Reference(title: "Imported Article"), Reference(title: "Imported Book")]
+        _ = try db.batchImportReferences(refs)
+        let all = try db.fetchAllReferences()
+        XCTAssertTrue(all.allSatisfy { $0.verificationStatus == .legacy })
+        XCTAssertTrue(all.allSatisfy { $0.reviewedBy == "file-import" })
+    }
+
+    func testBatchImportCanonicalizesBeforeDatabaseCSLAndCiteprocRendering() throws {
+        let db = try makeDatabase()
+        var imported = Reference(
+            title: "  Imported   Stable Article ",
+            authors: [AuthorName(given: "Zhang", family: "Sai")],
+            year: 2024,
+            journal: " Example Journal ",
+            volume: " 12 ",
+            issue: " 3 ",
+            pages: " 45-56 ",
+            doi: "https://doi.org/10.1890/12-2010.1",
+            referenceType: .other,
+            editors: Reference.encodeNames([
+                AuthorName(given: "Kattner", family: "G."),
+            ]),
+            accessedDate: "2026-05-25",
+            translators: Reference.encodeNames([
+                AuthorName(given: "Graeve", family: "M."),
+            ]),
+            language: "zh_cn"
+        )
+        imported.verificationStatus = .legacy
+
+        _ = try db.batchImportReferences([imported])
+        let stored = try XCTUnwrap(try db.fetchAllReferences().first)
+
+        XCTAssertEqual(stored.title, "Imported Stable Article")
+        XCTAssertEqual(stored.journal, "Example Journal")
+        XCTAssertEqual(stored.doi, "10.1890/12-2010.1")
+        XCTAssertEqual(stored.referenceType, .journalArticle)
+        XCTAssertNil(stored.accessedDate)
+        XCTAssertEqual(stored.authors.first, AuthorName(given: "Sai", family: "Zhang"))
+        XCTAssertEqual(stored.parsedEditors.first, AuthorName(given: "G", family: "Kattner"))
+        XCTAssertEqual(stored.parsedTranslators.first, AuthorName(given: "M", family: "Graeve"))
+        XCTAssertEqual(stored.language, "zh-CN")
+
+        let csl = CSLExportService.cslJSONObject(for: stored)
+        XCTAssertEqual(csl["type"] as? String, "article-journal")
+        XCTAssertEqual(csl["DOI"] as? String, "10.1890/12-2010.1")
+        XCTAssertNil(csl["accessed"])
+        XCTAssertEqual((csl["editor"] as? [[String: String]])?.first?["family"], "Kattner")
+        XCTAssertEqual((csl["editor"] as? [[String: String]])?.first?["given"], "G")
+        XCTAssertEqual((csl["translator"] as? [[String: String]])?.first?["family"], "Graeve")
+        XCTAssertEqual((csl["translator"] as? [[String: String]])?.first?["given"], "M")
+
+        let styleXML = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <style xmlns="http://purl.org/net/xbiblio/csl" version="1.0">
+          <info>
+            <title>Import Pipeline Test</title>
+            <id>import-pipeline-test</id>
+          </info>
+          <citation>
+            <layout prefix="(" suffix=")">
+              <date variable="issued"><date-part name="year"/></date>
+            </layout>
+          </citation>
+          <bibliography>
+            <layout suffix=".">
+              <text variable="title"/>
+              <text variable="DOI" prefix=" doi:"/>
+            </layout>
+          </bibliography>
+        </style>
+        """
+        let localeXML = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <locale xmlns="http://purl.org/net/xbiblio/csl" xml:lang="en-US"><terms /></locale>
+        """
+        let engine = try CiteprocJSCoreEngine(styleXML: styleXML, localeXML: localeXML)
+        engine.setItems([csl])
+        let rendered = try engine.renderDocument(citationClusters: [
+            CitationDocumentCluster(
+                id: "citation-1",
+                itemIDs: [String(try XCTUnwrap(stored.id))],
+                position: 0
+            )
+        ])
+
+        XCTAssertEqual(rendered.citationTexts["citation-1"], "(2024)")
+        XCTAssertTrue(rendered.bibliographyText.contains("Imported Stable Article"))
+        XCTAssertTrue(rendered.bibliographyText.contains("10.1890/12-2010.1"))
+    }
+
+    func testMergePreservesVerifiedFieldsWhenIncomingIsWeaker() throws {
+        // When a BibTeX re-import (batchImportReferences) matches an already-verified
+        // record, the verified bibliographic fields must not be silently overwritten
+        // by the weaker .legacy source.
+        //
+        // Note: this protection only applies to the batchImportReferences path; a
+        // direct saveReference call promotes the record to verifiedManual first and
+        // therefore falls outside this guard (intentional — a direct save is user intent).
+        let db = try makeDatabase()
+
+        // First: insert a pipeline-verified record directly.
+        var verified = Reference(title: "Verified Title")
+        verified.doi = "10.1000/test"
+        verified.journal = "Verified Journal"
+        verified.year = 2024
+        verified.verificationStatus = .verifiedAuto
+        verified.metadataSource = .crossRef
+        verified.reviewedBy = "auto-verify"
+        try db.saveReference(&verified)
+
+        // Then: re-import via batchImportReferences (simulating a BibTeX file import
+        // for the same paper, with lower-quality metadata).
+        var incoming = Reference(title: "Different Title from BibTeX")
+        incoming.doi = "10.1000/test"
+        incoming.journal = "Wrong Journal Name"
+        incoming.year = 2023
+        // verificationStatus defaults to .legacy; batchImportReferences keeps it that way.
+        _ = try db.batchImportReferences([incoming])
+
+        let all = try db.fetchAllReferences()
+        XCTAssertEqual(all.count, 1, "duplicate DOI should merge into one record")
+        let merged = try XCTUnwrap(all.first)
+        XCTAssertEqual(merged.journal, "Verified Journal", "verified journal must not be overwritten by weaker import")
+        XCTAssertEqual(merged.year, 2024, "verified year must not be overwritten by weaker import")
+        XCTAssertEqual(merged.verificationStatus, .verifiedAuto, "verification status must not be downgraded")
     }
 
     func testPersistCandidateResolutionCreatesPendingIntake() throws {

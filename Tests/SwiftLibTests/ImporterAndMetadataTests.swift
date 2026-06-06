@@ -365,6 +365,61 @@ final class ImporterAndMetadataTests: XCTestCase {
     }
 
     @MainActor
+    func testWanfangSearchScriptSplitsUnseparatedChineseAuthorRuns() async throws {
+        let scriptURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/SwiftLib/Resources/wanfang-search.js")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+        let html = """
+        <html>
+          <head><title>万方搜索</title></head>
+          <body>
+            <section>
+              1. 高原山地—湖泊地区雨季地表水补给来源的空间格局及形成机制 [期刊论文]
+              廖会柴娟角勇梅媛 - 《地理学报》 2024年
+              摘要: 高原山地湖泊地区雨季地表水补给来源具有空间差异。关键词: 地表水 补给来源
+              <a href="https://www.wanfangdata.com.cn/wf/detail/periodical?id=dlxb-example">详情</a>
+            </section>
+            <section>
+              2. 基于EFDC模型的洱海水温模拟 [期刊论文]
+              张锦吴鹏田越 - 《环境工程技术学报》 2020年
+              摘要: 基于EFDC模型模拟洱海水温时空变化。关键词: EFDC 洱海 水温
+              <a href="https://www.wanfangdata.com.cn/wf/detail/periodical?id=hjjsgc-example">详情</a>
+            </section>
+            <section>
+              3. 洞庭湖春秋季浮游植物群落结构及其与环境因子的关系 [期刊论文]
+              王昊潘保柱赵耿楠 - 《长江流域资源与环境》 2021年
+              摘要: 洞庭湖春秋季浮游植物群落结构与环境因子存在显著关系。关键词: 洞庭湖 浮游植物 环境因子
+              <a href="https://www.wanfangdata.com.cn/wf/detail/periodical?id=cjlyzyyhj-example">详情</a>
+            </section>
+          </body>
+        </html>
+        """
+
+        let webView = WKWebView(frame: .zero)
+        let loader = HTMLLoadDelegate()
+        webView.navigationDelegate = loader
+        try await loader.load(
+            html: html,
+            in: webView,
+            baseURL: URL(string: "https://s.wanfangdata.com.cn/paper")!
+        )
+
+        let raw = try await webView.evaluateJavaScript(script) as? String
+        let data = try XCTUnwrap(raw?.data(using: .utf8))
+        let payload = try JSONDecoder().decode(VIPSearchScriptPayload.self, from: data)
+        let plateau = try XCTUnwrap(payload.results.first { $0.title.contains("高原山地") })
+        let erhai = try XCTUnwrap(payload.results.first { $0.title.contains("EFDC") })
+        let dongting = try XCTUnwrap(payload.results.first { $0.title.contains("洞庭湖") })
+
+        XCTAssertEqual(plateau.authors.prefix(4), ["廖会", "柴娟", "角勇", "梅媛"])
+        XCTAssertEqual(erhai.authors.prefix(3), ["张锦", "吴鹏", "田越"])
+        XCTAssertEqual(dongting.authors.prefix(3), ["王昊", "潘保柱", "赵耿楠"])
+    }
+
+    @MainActor
     func testVIPSearchScriptIgnoresYearRangeInTitleWhenParsingPublicationYear() async throws {
         let scriptURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

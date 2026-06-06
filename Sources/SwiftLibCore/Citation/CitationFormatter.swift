@@ -188,8 +188,8 @@ public enum CitationFormatter {
         }
 
         // DOI
-        if let doi = ref.doi, !doi.isEmpty {
-            parts.append("https://doi.org/\(doi)")
+        if let doiURL = doiDisplayURL(ref.doi) {
+            parts.append(doiURL)
         }
 
         return parts.joined(separator: " ")
@@ -221,8 +221,8 @@ public enum CitationFormatter {
             parts.append("\(jPart).")
         }
 
-        if let doi = ref.doi, !doi.isEmpty {
-            parts.append("https://doi.org/\(doi).")
+        if let doiURL = doiDisplayURL(ref.doi) {
+            parts.append("\(doiURL).")
         }
 
         return parts.joined(separator: " ")
@@ -254,8 +254,8 @@ public enum CitationFormatter {
             parts.append("\(jPart).")
         }
 
-        if let doi = ref.doi, !doi.isEmpty {
-            parts.append("https://doi.org/\(doi).")
+        if let doiURL = doiDisplayURL(ref.doi) {
+            parts.append("\(doiURL).")
         }
 
         return parts.joined(separator: " ")
@@ -348,14 +348,20 @@ public enum CitationFormatter {
             parts.append("\(jPart).")
         }
 
-        if let doi = ref.doi, !doi.isEmpty {
-            parts.append("https://doi.org/\(doi)")
+        if let doiURL = doiDisplayURL(ref.doi) {
+            parts.append(doiURL)
         }
 
         return parts.joined(separator: " ")
     }
 
     // MARK: - Author Formatting Helpers
+
+    private static func doiDisplayURL(_ raw: String?) -> String? {
+        guard let raw = raw?.swiftlib_nilIfBlank else { return nil }
+        let bare = DOIIdentifier(raw)?.cslString ?? raw
+        return "https://doi.org/\(bare)"
+    }
 
     private static func extractLastName(_ authors: [AuthorName]) -> String {
         authors.first?.family ?? "Unknown"

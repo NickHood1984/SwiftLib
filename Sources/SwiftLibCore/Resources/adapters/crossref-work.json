@@ -1,6 +1,6 @@
 {
   "id": "crossref-work",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "displayName": "CrossRef",
   "description": "CrossRef REST API. Root shape is `{\"status\":\"ok\",\"message\":{...}}` so `itemsPath` is `message` (root object treated as a 1-element list after wrapping). Notable quirks: title is an array (`title[0]`), subtitle is optional, date-parts is a nested array (`published-print.date-parts[0][0]`), abstract is JATS XML. Author lists can mix persons (given/family) and organizations (name) — we expose parallel arrays and let the Swift mapper zip+interleave.",
 
@@ -28,9 +28,10 @@
           "pages":     { "paths": ["page", "article-number"] },
           "url":       { "paths": ["resource.primary.URL"] },
 
-          "authorsGiven":  { "paths": ["author[*].given"],  "separator": "||" },
-          "authorsFamily": { "paths": ["author[*].family"], "separator": "||" },
-          "authorsName":   { "paths": ["author[*].name"],   "separator": "||" },
+          "authorsGiven":    { "paths": ["author[*].given"],    "separator": "||" },
+          "authorsFamily":   { "paths": ["author[*].family"],   "separator": "||" },
+          "authorsName":     { "paths": ["author[*].name"],     "separator": "||" },
+          "authorsSequence": { "paths": ["author[*].sequence"], "separator": "||" },
 
           "yearPrint":   { "paths": ["published-print.date-parts[0][0]"] },
           "yearOnline":  { "paths": ["published-online.date-parts[0][0]"] },

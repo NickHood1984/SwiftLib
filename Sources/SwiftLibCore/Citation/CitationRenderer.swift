@@ -58,7 +58,12 @@ public enum CitationRenderer {
         _ ref: Reference,
         styleID: String
     ) -> String {
-        let idStr = ref.id.map(String.init) ?? "unsaved"
+        guard let refID = ref.id else {
+            let result = renderPreviewDocument(refs: [ref], styleID: styleID, includeBibliography: true)
+            return result?.bibliographyEntry ?? fallbackBib(ref)
+        }
+
+        let idStr = String(refID)
         let cacheKey = "\(styleID)|bib|\(idStr)"
         if let hit = renderCache.get(cacheKey) { return hit }
 
@@ -99,10 +104,7 @@ public enum CitationRenderer {
         includeBibliography: Bool
     ) -> PreviewResult? {
         // Build CSL-JSON items for all refs that have a database ID.
-        let cslItems: [[String: Any]] = refs.compactMap { ref -> [String: Any]? in
-            guard ref.id != nil else { return nil }
-            return ref.cslJSONObject()
-        }
+        let cslItems = CSLExportService.cslJSONObjects(for: refs)
         guard !cslItems.isEmpty else { return nil }
 
         let citationID = "swiftlib-preview"
@@ -147,7 +149,10 @@ public enum CitationRenderer {
         }
         let year = ref.year.map { "(\($0)). " } ?? "(n.d.). "
         let journal = ref.journal.swiftlib_nilIfBlank.map { " \($0)." } ?? ""
-        let doi = ref.doi.swiftlib_nilIfBlank.map { " https://doi.org/\($0)" } ?? ""
+        let doi = ref.doi.swiftlib_nilIfBlank.map { raw in
+            let bare = DOIIdentifier(raw)?.cslString ?? raw
+            return " https://doi.org/\(bare)"
+        } ?? ""
         return "\(authStr) \(year)\(ref.title).\(journal)\(doi)"
     }
 

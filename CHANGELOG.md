@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## v1.5.0 — 2026-06-06
+
+### 新增
+
+- 新增统一 `CSLExportService`，App、CLI、Word/WPS 插件和 DOCX 刷新共用同一套 Reference -> CSL 转换逻辑，减少不同入口的引用输出漂移。
+- 新增 `CitationPreflightValidator` 与 Word 插件严格预检：插入引用前检查关键字段、空渲染和 `Optional(`/`undefined`/`NaN` 等异常片段，阻止会生成坏引文的插入。
+- CLI 新增 `audit-library` 与 `repair-library`，支持审计和修复 DOI 前缀、稳定期刊访问日期、作者字段异常、拼音姓/名错位、重复作者序列、期刊证据类型错配和疑似重复译本。
+- DOCX 审计新增正文可见引用编号、参考文献编号、未被正文引用的参考文献编号、正文引用但未列入参考文献表的编号。
+- App 级 site adapter 配置升级到 v3，补充 CNKI 图书、万方详情、维普详情和 Highwire 类期刊页面。
+
+### 改进
+
+- 保存、批量导入、修复和引用导出前统一规范 DOI、文本字段、作者/编者/译者、语言标签、重复作者序列、稳定期刊访问日期和带期刊证据的 `other` 类型。
+- 中文期刊刷新和按标识符导入会跳过不合适的 CrossRef 路线，避免中文标题、作者顺序、卷期页码被拉丁化或弱数据覆盖。
+- CrossRef 作者解析使用 `sequence=first` 锚定第一作者，并改用保守的中文拼音姓氏表修正姓/名错位，避免按长度规则误伤西文作者。
+- OpenAlex、Semantic Scholar 和 arXiv 的 display name 解析增加中文拼音姓氏感知，提升中文作者的 CSL 输出顺序。
+- 中文元数据合并在 CrossRef 已有可靠作者顺序时保留其顺序，仅追加中文源中缺失的作者。
+- Word 插件本地服务限制到 loopback，改进 HTTP 分片请求读取、typed citation-item 合约、孤儿引用占位和预检结果返回。
+- GB/T 7714 数字样式支持短 ID `gb-t-7714-2015-numeric`，并修正 DOI-only 期刊记录不应被标为在线文献的问题。
+- 万方检索脚本可按中文姓氏切分没有分隔符的作者串；网页元数据提取前会自动检查 site adapter 远程配置。
+
+### 修复
+
+- 修复 DOI 以 `https://doi.org/`、`dx.doi.org` 或 `doi:` 形式入库后无法可靠去重、显示时可能重复拼接 DOI URL 的问题。
+- 修复未保存文献在引用预览中可能共享陈旧 fallback 缓存的问题。
+- 修复 Word 插件样式管理接口在任务窗格中使用相对路径时可能请求到错误地址的问题。
+- 修复 SwiftPM 将 SwiftLibTests fixture 当作未处理资源的警告。
+
 ## v1.4.1 — 2026-05-27
 
 ### 新增

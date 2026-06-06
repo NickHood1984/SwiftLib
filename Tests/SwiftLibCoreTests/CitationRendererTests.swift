@@ -16,6 +16,10 @@ final class CitationRendererTests: XCTestCase {
 
     // MARK: - Fixture
 
+    private static let edgeCaseStyles = CitationFormatter.supportedStyles + [
+        "china-national-standard-gb-t-7714-2015-numeric"
+    ]
+
     /// A well-formed journal article with enough fields to exercise all styles.
     private static func makeJournalArticle() -> Reference {
         Reference(
@@ -191,6 +195,253 @@ final class CitationRendererTests: XCTestCase {
         XCTAssertFalse(entry.isEmpty, "APA Chinese bibliography entry should not be empty")
     }
 
+    func testGBTJournalArticleUsesBareDOIAndSuppressesAccessedDate() {
+        let ref = Reference(
+            id: 9010,
+            title: "Tracking dietary fatty acids in triacylglycerols and phospholipids of zooplankton",
+            authors: [
+                AuthorName(given: "Francine", family: "Mathieu"),
+                AuthorName(given: "Fen", family: "Guo"),
+                AuthorName(given: "Martin J.", family: "Kainz"),
+            ],
+            year: 2022,
+            journal: "Freshwater Biology",
+            volume: "67",
+            issue: "11",
+            pages: "1949-1959",
+            doi: "https://doi.org/10.1111/fwb.13988",
+            referenceType: .journalArticle,
+            accessedDate: "2026-05-25"
+        )
+
+        let entry = CitationRenderer.renderBibliographyEntry(
+            ref,
+            styleID: "china-national-standard-gb-t-7714-2015-numeric"
+        )
+
+        XCTAssertTrue(entry.contains("DOI:10.1111/fwb.13988"), entry)
+        XCTAssertFalse(entry.contains("DOI:https://doi.org/"), entry)
+        XCTAssertFalse(entry.contains("2026-05-25"), entry)
+        XCTAssertFalse(entry.contains("[2026"), entry)
+        XCTAssertTrue(entry.contains("[J]"), entry)
+        XCTAssertFalse(entry.contains("[J/OL]"), entry)
+    }
+
+    func testGBTRendersOtherWithJournalEvidenceAsJournalArticle() {
+        let ref = Reference(
+            id: 9011,
+            title: "洞庭湖春秋季浮游植物群落结构及其与环境因子的关系",
+            authors: [
+                AuthorName(given: "", family: "王昊"),
+                AuthorName(given: "", family: "潘保柱"),
+                AuthorName(given: "", family: "赵耿楠"),
+            ],
+            year: 2021,
+            journal: "长江流域资源与环境",
+            volume: "30",
+            issue: "11",
+            pages: "2659-2667",
+            referenceType: .other,
+            accessedDate: "2026-05-25"
+        )
+
+        let entry = CitationRenderer.renderBibliographyEntry(
+            ref,
+            styleID: "china-national-standard-gb-t-7714-2015-numeric"
+        )
+
+        XCTAssertTrue(entry.contains("[J]"), entry)
+        XCTAssertFalse(entry.contains("[A]"), entry)
+        XCTAssertFalse(entry.contains("[J/OL]"), entry)
+        XCTAssertFalse(entry.contains("2026-05-25"), entry)
+        XCTAssertFalse(entry.contains("[2026"), entry)
+    }
+
+    func testGBTRendersReversedEnglishInitialAuthorsWithFamilyFirst() {
+        let ref = Reference(
+            id: 9012,
+            title: "Fatty acid composition as biomarkers of freshwater microalgae: analysis of 37 strains of microalgae in 22 genera and in seven classes",
+            authors: [
+                AuthorName(given: "Taipale", family: "S"),
+                AuthorName(given: "Strandberg", family: "U"),
+                AuthorName(given: "Peltomaa", family: "E"),
+                AuthorName(given: "Galloway", family: "AWE"),
+            ],
+            year: 2013,
+            journal: "Aquatic Microbial Ecology",
+            volume: "71",
+            issue: "2",
+            pages: "165-178",
+            doi: "10.3354/ame01671",
+            referenceType: .journalArticle,
+            language: "en"
+        )
+
+        let entry = CitationRenderer.renderBibliographyEntry(
+            ref,
+            styleID: "china-national-standard-gb-t-7714-2015-numeric"
+        )
+
+        XCTAssertTrue(entry.contains("TAIPALE S, STRANDBERG U, PELTOMAA E, et al."), entry)
+        XCTAssertFalse(entry.contains("S T"), entry)
+        XCTAssertFalse(entry.contains("U S"), entry)
+        XCTAssertFalse(entry.contains("E P"), entry)
+        XCTAssertTrue(entry.contains("[J]"), entry)
+        XCTAssertTrue(entry.contains("DOI:10.3354/ame01671"), entry)
+    }
+
+    func testGBTNumericInlineCitationDoesNotInjectAuthorNarrative() {
+        let ref = Reference(
+            id: 9013,
+            title: "Consumers and lake warming",
+            authors: [
+                AuthorName(given: "R.", family: "Lau"),
+                AuthorName(given: "O.", family: "Keva"),
+            ],
+            year: 2021,
+            journal: "Ecology Letters",
+            volume: "24",
+            issue: "8",
+            pages: "1600-1610",
+            referenceType: .journalArticle,
+            language: "en"
+        )
+
+        let citation = CitationRenderer.renderInlineCitation(
+            [ref],
+            styleID: "china-national-standard-gb-t-7714-2015-numeric"
+        )
+
+        XCTAssertTrue(citation.contains("1"), citation)
+        XCTAssertFalse(citation.localizedCaseInsensitiveContains("Lau"), citation)
+        XCTAssertFalse(citation.localizedCaseInsensitiveContains("Keva"), citation)
+        XCTAssertFalse(citation.contains("等"), citation)
+        XCTAssertFalse(citation.localizedCaseInsensitiveContains("et al"), citation)
+    }
+
+    // MARK: - Extreme incomplete metadata
+
+    func testExtremeIncompleteReferencesRenderAcrossBuiltinStyles() {
+        let refs: [Reference] = [
+            Reference(
+                id: 9020,
+                title: "",
+                referenceType: .journalArticle
+            ),
+            Reference(
+                id: 9021,
+                title: "Title Only Journal Article",
+                referenceType: .journalArticle
+            ),
+            Reference(
+                id: 9022,
+                title: "DOI Only Metadata",
+                doi: "https://doi.org/10.5555/example.doi",
+                referenceType: .journalArticle
+            ),
+            Reference(
+                id: 9023,
+                title: "URL Only Web Page",
+                url: "https://example.org/research/page",
+                referenceType: .webpage
+            ),
+            Reference(
+                id: 9024,
+                title: "Yearless Authored Article",
+                authors: [AuthorName(given: "Ada", family: "Lovelace")],
+                journal: "Journal of Missing Metadata",
+                referenceType: .journalArticle
+            ),
+            Reference(
+                id: 9025,
+                title: "Publisherless Book",
+                referenceType: .book
+            ),
+            Reference(
+                id: 9026,
+                title: "极简中文记录",
+                referenceType: .other,
+                language: "中文"
+            ),
+            Reference(
+                id: 9027,
+                title: "Numberless Patent",
+                authors: [AuthorName(given: "Nikola", family: "Tesla")],
+                referenceType: .patent
+            ),
+        ]
+
+        for style in Self.edgeCaseStyles {
+            CitationRenderer.invalidate(styleID: style)
+
+            for ref in refs {
+                let bibliography = CitationRenderer.renderBibliographyEntry(ref, styleID: style)
+                assertUsableCitationOutput(
+                    bibliography,
+                    style: style,
+                    refID: ref.id,
+                    context: "bibliography"
+                )
+
+                let inline = CitationRenderer.renderInlineCitation([ref], styleID: style)
+                assertUsableCitationOutput(
+                    inline,
+                    style: style,
+                    refID: ref.id,
+                    context: "inline citation"
+                )
+            }
+        }
+    }
+
+    func testEmptyTitleExportsUntitledInsteadOfBlankCitation() {
+        let ref = Reference(
+            id: 9028,
+            title: "   ",
+            referenceType: .journalArticle
+        )
+
+        let entry = CitationRenderer.renderBibliographyEntry(
+            ref,
+            styleID: "china-national-standard-gb-t-7714-2015-numeric"
+        )
+
+        XCTAssertTrue(entry.contains("Untitled"), entry)
+        XCTAssertFalse(entry.contains("Optional("), entry)
+        XCTAssertFalse(entry.contains("undefined"), entry)
+    }
+
+    func testDOIOnlyIncompleteReferenceUsesBareDOIInGBT() {
+        let ref = Reference(
+            id: 9029,
+            title: "DOI-only incomplete journal article",
+            doi: "https://doi.org/10.1234/abc.def",
+            referenceType: .journalArticle,
+            accessedDate: "2026-06-04"
+        )
+
+        let entry = CitationRenderer.renderBibliographyEntry(
+            ref,
+            styleID: "china-national-standard-gb-t-7714-2015-numeric"
+        )
+
+        XCTAssertTrue(entry.contains("DOI:10.1234/abc.def"), entry)
+        XCTAssertFalse(entry.contains("DOI:https://doi.org/"), entry)
+    }
+
+    func testUnsavedBibliographyEntriesDoNotShareStaleFallbackCache() {
+        CitationRenderer.invalidateAll()
+        let first = Reference(title: "First Unsaved Draft")
+        let second = Reference(title: "Second Unsaved Draft")
+
+        let firstEntry = CitationRenderer.renderBibliographyEntry(first, styleID: "apa")
+        let secondEntry = CitationRenderer.renderBibliographyEntry(second, styleID: "apa")
+
+        XCTAssertTrue(firstEntry.contains("First Unsaved Draft"), firstEntry)
+        XCTAssertTrue(secondEntry.contains("Second Unsaved Draft"), secondEntry)
+        XCTAssertNotEqual(firstEntry, secondEntry)
+    }
+
     // MARK: - Cache consistency
 
     func testCacheReturnsSameResultOnRepeatedCalls() {
@@ -227,5 +478,31 @@ final class CitationRendererTests: XCTestCase {
         let viaManager = CSLManager.shared.formatBibliography(ref, style: "apa")
         XCTAssertEqual(direct, viaManager,
                        "CSLManager.formatBibliography must route through CitationRenderer")
+    }
+
+    private func assertUsableCitationOutput(
+        _ output: String,
+        style: String,
+        refID: Int64?,
+        context: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertFalse(
+            trimmed.isEmpty,
+            "\(context) should not be empty for style \(style), ref \(refID.map(String.init) ?? "nil")",
+            file: file,
+            line: line
+        )
+
+        for fragment in ["Optional(", "undefined", "NaN"] {
+            XCTAssertFalse(
+                trimmed.contains(fragment),
+                "\(context) leaked invalid fragment '\(fragment)' for style \(style), ref \(refID.map(String.init) ?? "nil"): \(trimmed)",
+                file: file,
+                line: line
+            )
+        }
     }
 }

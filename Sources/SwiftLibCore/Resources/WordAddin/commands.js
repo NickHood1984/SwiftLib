@@ -422,8 +422,10 @@ async function cmdFetchRenderPayload(styleId, scanCitations, embeddedItems, opti
   const scan = { citations: scanCitations };
   const kind = await cmdCitationKindForStyle(styleId);
   const includeBibliography = options?.includeBibliography !== false;
+  const strictPreflight = options?.strictPreflight === true;
   try {
-    if (typeof SwiftLibCiteproc !== "undefined" && SwiftLibCiteproc.renderDocumentPayload) {
+    const needsLiveServerItems = /(?:^|-)gb-t-7714|china-national-standard-gb-t-7714/.test(styleId || "");
+    if (!strictPreflight && !needsLiveServerItems && typeof SwiftLibCiteproc !== "undefined" && SwiftLibCiteproc.renderDocumentPayload) {
       const clientResult = await SwiftLibCiteproc.renderDocumentPayload(styleId, scan, {
         baseURL: CMD_SERVER,
         citationKind: kind,
@@ -446,6 +448,7 @@ async function cmdFetchRenderPayload(styleId, scanCitations, embeddedItems, opti
   }));
   const reqBody = { style: styleId, citations: reqCitations };
   reqBody.includeBibliography = includeBibliography;
+  reqBody.strictPreflight = strictPreflight;
   if (embeddedItems && Object.keys(embeddedItems).length) reqBody.items = embeddedItems;
   const payload = await cmdFetchJSON("/api/render-document", {
     method: "POST",
@@ -455,6 +458,20 @@ async function cmdFetchRenderPayload(styleId, scanCitations, embeddedItems, opti
   const missing = cmdMissingCitationTextIDs(payload, scanCitations);
   if (missing.length && !payload.error) {
     throw new Error(`渲染结果缺少引文文本：${missing.join(", ")}`);
+  }
+  return payload;
+}
+
+async function cmdRunStrictCitationPreflight(style, citationID, refIds, citationItems) {
+  const payload = await cmdFetchRenderPayload(
+    style,
+    [{ citationID, ids: refIds, position: 0, citationItems: citationItems || null }],
+    {},
+    { includeBibliography: false, strictPreflight: true }
+  );
+  if (payload?.error) throw new Error(payload.error);
+  if (payload?.preflight?.blocked) {
+    throw new Error(payload.preflight.message || "当前 CSL 样式无法可靠生成该引文。");
   }
   return payload;
 }
@@ -1048,6 +1065,8 @@ async function cmdUpsertCitationFromRibbon(refIds, styleId, citationItems) {
   const isNoteStyle = citationKind === "note";
 
   try {
+    await cmdRunStrictCitationPreflight(style, citationID, refIds, citationItems);
+
     if (isNoteStyle) {
       // CSL note style → insert as a real Word footnote.  Pre-render text so the
       // footnote body shows real citation text instead of "[…]".
@@ -1407,6 +1426,8 @@ async function cmdUpdateCitationFromRibbon(citationID, refIds, styleId, citation
 
   cmdRuntimeLocks.upsertCitation = true;
   try {
+    await cmdRunStrictCitationPreflight(style, citationID, refIds, citationItems);
+
     await Word.run(async (ctx) => {
       const controls = ctx.document.contentControls;
       controls.load("items");

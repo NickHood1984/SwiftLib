@@ -136,8 +136,19 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
             ?? parsed.firstAuthor
             ?? MetadataResolution.extractLikelyAuthorName(from: cleanedFileName)
 
+        // Author names stored in Han characters are the most reliable signal that a
+        // record is a Chinese-source work — even when its title/journal were earlier
+        // overwritten with English by a CrossRef import. Without this, such records
+        // are misrouted back to CrossRef on refresh, which re-Latinizes them (a loop).
+        let authorsHaveHan = reference.authors.contains { author in
+            MetadataResolution.containsHanCharacters(author.family)
+                || MetadataResolution.containsHanCharacters(author.given)
+        }
+
         let languageHint: MetadataLanguageHint
-        if MetadataResolution.containsHanCharacters(title) || MetadataResolution.containsHanCharacters(cleanedFileName) {
+        if MetadataResolution.containsHanCharacters(title)
+            || MetadataResolution.containsHanCharacters(cleanedFileName)
+            || authorsHaveHan {
             languageHint = .chinese
         } else if let title, !title.isEmpty {
             languageHint = .nonChinese
