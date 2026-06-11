@@ -34,18 +34,29 @@ public actor HostRateLimiter {
     public init() {}
 
     /// Wait until the next request to `host` is allowed.
+    ///
+    /// IMPORTANT (actor reentrancy): the dispatch slot must be reserved
+    /// *before* suspending on `Task.sleep`. Actors are reentrant across
+    /// suspension points, so if we updated `lastDispatchAt` only after the
+    /// sleep, every concurrent caller would read the same stale timestamp,
+    /// sleep for the same duration, and then fire simultaneously — collapsing
+    /// the rate limit exactly when it matters most (batch import / batch
+    /// refresh). Reserving the slot up front makes concurrent callers queue
+    /// at `interval` spacing: caller N is scheduled at `last + N * interval`.
     public func acquire(host: String) async {
         let host = host.lowercased()
         let interval = intervalNanos[host] ?? defaultIntervalNanos
         let now = DispatchTime.now().uptimeNanoseconds
-        let earliest = (lastDispatchAt[host] ?? 0) &+ interval
-        if earliest > now {
-            let sleepFor = earliest - now
+        let scheduled = max(now, (lastDispatchAt[host] ?? 0) &+ interval)
+        // Reserve our slot before any suspension point (see note above).
+        lastDispatchAt[host] = scheduled
+        if scheduled > now {
             // Task.sleep may throw on cancellation – we ignore that and let
-            // the calling request surface the cancellation.
-            try? await Task.sleep(nanoseconds: sleepFor)
+            // the calling request surface the cancellation. The reserved slot
+            // is intentionally kept: being slightly conservative after a
+            // cancellation is safer than under-spacing the next request.
+            try? await Task.sleep(nanoseconds: scheduled - now)
         }
-        lastDispatchAt[host] = DispatchTime.now().uptimeNanoseconds
     }
 
     /// Override the minimum inter-request interval for a host.

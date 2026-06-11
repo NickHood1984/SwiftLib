@@ -76,6 +76,55 @@ extension MetadataResolution {
         )
     }
 
+    /// Multi-field score for a structured Chinese-source candidate (Wanfang/VIP
+    /// browser search results arrive with structured title/authors/journal/year,
+    /// unlike CNKI's free metaText).
+    ///
+    /// Uses the same weighting as `buildCNKICandidate` — title 0.60, first
+    /// author 0.25, exact year 0.10 (±1 → 0.04), journal 0.05 — so candidates
+    /// from all three Chinese channels are ranked on a comparable scale.
+    /// Replaces the old `max(titleScore, 0.45)` floor that inflated weakly
+    /// related Wanfang/VIP results above honestly-scored CNKI candidates.
+    public static func scoreStructuredChineseCandidate(
+        seed: MetadataResolutionSeed,
+        title: String,
+        authors: [AuthorName],
+        journal: String?,
+        year: Int?
+    ) -> Double {
+        let titleScore = titleSimilarity(seed.title ?? seed.fileName, title)
+        var score = titleScore * 0.60
+        if authorMatches(seed.firstAuthor, authors: authors) {
+            score += 0.25
+        }
+        if let seedYear = seed.year, let year {
+            if seedYear == year {
+                score += 0.10
+            } else if abs(seedYear - year) == 1 {
+                score += 0.04
+            }
+        }
+        if journalMatches(seed.journal, candidateJournal: journal) {
+            score += 0.05
+        }
+        if containsHanCharacters(title) == seed.shouldSearchCNKI {
+            score += 0.02
+        }
+        return min(score, 1)
+    }
+
+    /// Author conversion for structured Chinese-source results: Han names must
+    /// become family-only `AuthorName`s (matching the CNKI extraction path).
+    /// `AuthorName.parse` is Western-name oriented and splits a spaced Han name
+    /// like "张 三" into given="张" family="三", which corrupts CSL output.
+    public static func structuredChineseAuthor(from rawName: String) -> AuthorName {
+        let normalized = normalizeWhitespaceAndWidth(rawName)
+        guard containsHanCharacters(normalized) else {
+            return AuthorName.parse(normalized)
+        }
+        return AuthorName(given: "", family: normalized.replacingOccurrences(of: " ", with: ""))
+    }
+
     public static func preferredAutomaticCandidate(from candidates: [MetadataCandidate]) -> MetadataCandidate? {
         let sorted = candidates.sorted { $0.score > $1.score }
         guard let first = sorted.first, first.score >= candidateThreshold else { return nil }

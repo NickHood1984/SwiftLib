@@ -78,14 +78,22 @@ public enum ChineseMetadataConsensus {
             }
         }
 
-        // Authors: prefer source with most complete Chinese author names
-        let authorSets = sorted.map { ($0.reference.authors, $0.source) }
-        if let bestAuthors = authorSets.max(by: { lhs, rhs in
-            let lhsChinese = lhs.0.filter { MetadataResolution.containsHanCharacters($0.displayName) }.count
-            let rhsChinese = rhs.0.filter { MetadataResolution.containsHanCharacters($0.displayName) }.count
-            return lhsChinese < rhsChinese
-        }) {
-            consensus.authors = bestAuthors.0
+        // Authors: prefer the source with the most complete Chinese author names.
+        //
+        // Two guards matter here:
+        // 1. Only override the highest-priority default when some source
+        //    actually HAS Han author names — `max(by:)` returns the LAST
+        //    maximal element, so with all-zero counts the old code handed
+        //    author ordering to the LOWEST-priority source (e.g. OpenAlex
+        //    displacing CNKI/CrossRef).
+        // 2. Break ties by source priority: take the FIRST source among those
+        //    tied at the maximum Han-name count.
+        let hanAuthorCounts = sorted.map { contrib in
+            contrib.reference.authors.filter { MetadataResolution.containsHanCharacters($0.displayName) }.count
+        }
+        if let maxHanCount = hanAuthorCounts.max(), maxHanCount > 0,
+           let winnerIndex = hanAuthorCounts.firstIndex(of: maxHanCount) {
+            consensus.authors = sorted[winnerIndex].reference.authors
         }
 
         // Structured fields: fill from highest-priority source

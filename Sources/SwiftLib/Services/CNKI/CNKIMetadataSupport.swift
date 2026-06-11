@@ -89,29 +89,44 @@ extension CNKIMetadataProvider {
 @MainActor
 final class HTMLLoadDelegate: NSObject, WKNavigationDelegate {
     var continuation: CheckedContinuation<Void, Error>?
+    private var timeoutTask: Task<Void, Never>?
 
-    func load(html: String, in webView: WKWebView, baseURL: URL) async throws {
+    func load(html: String, in webView: WKWebView, baseURL: URL, timeout: TimeInterval = 15) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             self.continuation = continuation
+            // Offscreen loadHTMLString occasionally never reaches didFinish
+            // (e.g. content-process churn); without a deadline that strands the
+            // caller — and the whole metadata pipeline — forever.
+            timeoutTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                self?.finish(throwing: CNKIMetadataProvider.CNKIError.timedOut)
+            }
             webView.loadHTMLString(html, baseURL: baseURL)
         }
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    private func finish(throwing error: Error? = nil) {
+        timeoutTask?.cancel()
+        timeoutTask = nil
         let continuation = continuation
         self.continuation = nil
-        continuation?.resume()
+        if let error {
+            continuation?.resume(throwing: error)
+        } else {
+            continuation?.resume()
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        finish()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        let continuation = continuation
-        self.continuation = nil
-        continuation?.resume(throwing: error)
+        finish(throwing: error)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        let continuation = continuation
-        self.continuation = nil
-        continuation?.resume(throwing: error)
+        finish(throwing: error)
     }
 }

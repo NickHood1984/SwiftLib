@@ -45,6 +45,20 @@ extension CNKIMetadataProvider {
                     return candidates
                 }
                 verificationOperation = nil
+                // Verification completed but the sheet didn't pre-extract candidates.
+                // The direct HTTP POST (performGridSearch) uses URLSession, whose TLS
+                // fingerprint differs from WKWebView — CNKI's anti-bot rejects it even
+                // with the freshly set cookies. Use the hidden WKWebView path instead,
+                // which now has the anti-bot cookies written by the verification sheet
+                // (both share WKWebsiteDataStore.default()).
+                switch await searchViaHiddenWebViewBootstrap(seed: seed) {
+                case .candidates(let candidates):
+                    return candidates
+                case .noResult:
+                    return []
+                case .blockedByVerification:
+                    break
+                }
                 continue
             }
         }

@@ -36,6 +36,18 @@ public actor ParallelSourceFetcher {
         }
     }
 
+    // MARK: - Per-source soft deadline
+
+    /// Maximum time any single source may delay the combined result.
+    ///
+    /// Without this, the task group waits for the SLOWEST source: a 429-retry
+    /// chain against Semantic Scholar (3s/6s/12s backoff × 10s timeouts) can
+    /// stall a refresh for 30–40s even though CrossRef answered in under a
+    /// second. When the deadline fires we cancel the stragglers and merge
+    /// whatever already arrived — losing at worst some enrichment fields,
+    /// never the primary bibliographic record.
+    public static let defaultSourceDeadline: TimeInterval = 15
+
     // MARK: - DOI-based parallel fetch
 
     /// Fetch from all sources in parallel when DOI is available.
@@ -47,7 +59,8 @@ public actor ParallelSourceFetcher {
     public func fetchByDOI(
         _ doi: String,
         forceRefresh: Bool = false,
-        includeCrossRef: Bool = true
+        includeCrossRef: Bool = true,
+        sourceDeadline: TimeInterval = ParallelSourceFetcher.defaultSourceDeadline
     ) async -> FetchResult {
         // Use withTaskGroup instead of async let: async let inside an actor crashes
         // on swift_task_dealloc when the parent task is cancelled externally.
@@ -55,22 +68,37 @@ public actor ParallelSourceFetcher {
             case crossRef(Reference?)
             case openAlex((Reference, MetadataFetcher.OpenAlexEnrichment)?)
             case s2(MetadataFetcher.S2PaperResult?)
+            case deadline
         }
         var crossRef: Reference?
         var openAlexPair: (Reference, MetadataFetcher.OpenAlexEnrichment)?
         var s2Paper: MetadataFetcher.S2PaperResult?
 
         await withTaskGroup(of: DOIFetchOutput.self) { group in
+            var expected = 2
             if includeCrossRef {
+                expected += 1
                 group.addTask { .crossRef(try? await MetadataFetcher.fetchFromDOI(doi, forceRefresh: forceRefresh)) }
             }
             group.addTask { .openAlex(await MetadataFetcher.fetchFullFromOpenAlex(doi: doi)) }
             group.addTask { .s2(await MetadataFetcher.fetchFromSemanticScholar(doi: doi)) }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(max(sourceDeadline, 1) * 1_000_000_000))
+                return .deadline
+            }
+            var received = 0
             for await output in group {
                 switch output {
-                case .crossRef(let r): crossRef = r
-                case .openAlex(let r): openAlexPair = r
-                case .s2(let r): s2Paper = r
+                case .deadline:
+                    // Stragglers past the deadline: cancel and proceed with
+                    // whatever already arrived.
+                    group.cancelAll()
+                case .crossRef(let r): crossRef = r; received += 1
+                case .openAlex(let r): openAlexPair = r; received += 1
+                case .s2(let r): s2Paper = r; received += 1
+                }
+                if received == expected {
+                    group.cancelAll() // all real sources done — stop the deadline timer
                 }
             }
         }
@@ -97,13 +125,15 @@ public actor ParallelSourceFetcher {
     public func fetchByTitle(
         _ title: String,
         forceRefresh: Bool = false,
-        includeCrossRef: Bool = true
+        includeCrossRef: Bool = true,
+        sourceDeadline: TimeInterval = ParallelSourceFetcher.defaultSourceDeadline
     ) async -> FetchResult {
         // Use withTaskGroup instead of async let: async let inside an actor crashes
         // on swift_task_dealloc when the parent task is cancelled externally.
         enum TitleFetchOutput: @unchecked Sendable {
             case openAlex((Reference, MetadataFetcher.OpenAlexEnrichment)?)
             case s2(MetadataFetcher.S2PaperResult?)
+            case deadline
         }
         var openAlexPair: (Reference, MetadataFetcher.OpenAlexEnrichment)?
         var s2Paper: MetadataFetcher.S2PaperResult?
@@ -111,20 +141,37 @@ public actor ParallelSourceFetcher {
         await withTaskGroup(of: TitleFetchOutput.self) { group in
             group.addTask { .openAlex(await MetadataFetcher.fetchFullFromOpenAlex(title: title)) }
             group.addTask { .s2(await MetadataFetcher.searchSemanticScholar(title: title)) }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(max(sourceDeadline, 1) * 1_000_000_000))
+                return .deadline
+            }
+            var received = 0
             for await output in group {
                 switch output {
-                case .openAlex(let r): openAlexPair = r
-                case .s2(let r): s2Paper = r
+                case .deadline:
+                    group.cancelAll()
+                case .openAlex(let r): openAlexPair = r; received += 1
+                case .s2(let r): s2Paper = r; received += 1
+                }
+                if received == 2 {
+                    group.cancelAll() // both sources done — stop the deadline timer
                 }
             }
         }
 
         var results: [SourceResult] = []
         var discoveredDOI: String?
+        var discoveredDOIScore = 0.0
 
         if let (ref, enrichment) = openAlexPair {
             results.append(SourceResult(source: .openAlex, reference: ref, enrichment: enrichment))
-            if let doi = ref.doi, !doi.isEmpty { discoveredDOI = doi }
+            if let doi = ref.doi, !doi.isEmpty {
+                discoveredDOI = doi
+                // fetchFullFromOpenAlex already gated this row by title
+                // similarity; recompute the exact score so DOI conflicts
+                // between sources can be resolved by match strength.
+                discoveredDOIScore = MetadataResolution.titleSimilarity(title, ref.title)
+            }
         }
         if let paper = s2Paper {
             // Verify title similarity before accepting S2 result
@@ -132,8 +179,12 @@ public actor ParallelSourceFetcher {
             if score >= 0.55 {
                 let ref = MetadataFetcher.referenceFromS2(paper)
                 results.append(SourceResult(source: .semanticScholar, reference: ref, s2Paper: paper))
-                if discoveredDOI == nil, let doi = paper.externalIds?.doi, !doi.isEmpty {
+                if let doi = paper.externalIds?.doi, !doi.isEmpty,
+                   discoveredDOI == nil || score > discoveredDOIScore {
+                    // On DOI disagreement, trust the source whose title matches
+                    // the query more strongly.
                     discoveredDOI = doi
+                    discoveredDOIScore = score
                 }
             }
         }
@@ -141,11 +192,40 @@ public actor ParallelSourceFetcher {
         // If we discovered a DOI from title search, follow up with CrossRef
         if includeCrossRef, let doi = discoveredDOI {
             if let crossRef = try? await MetadataFetcher.fetchFromDOI(doi, forceRefresh: forceRefresh) {
-                results.append(SourceResult(source: .crossRef, reference: crossRef))
+                // The DOI came from a title search, so verify it: CrossRef is
+                // authoritative for what a DOI actually refers to. If its
+                // record clearly doesn't match the query title, the discovered
+                // DOI was wrong — without this gate the mismatched CrossRef
+                // record would win FieldLevelMerger's top priority and
+                // overwrite title/authors with a different paper entirely.
+                let crossRefScore = MetadataResolution.titleSimilarity(title, crossRef.title)
+                if crossRefScore >= 0.55 {
+                    results.append(SourceResult(source: .crossRef, reference: crossRef))
+                } else {
+                    // Disproven DOI: drop it from the combined result and scrub
+                    // it from any source reference that carried it, so the
+                    // merge cannot propagate the wrong identifier.
+                    discoveredDOI = nil
+                    results = Self.scrubbingDisprovenDOI(doi, from: results)
+                }
             }
         }
 
         return FetchResult(sources: results, discoveredDOI: discoveredDOI)
+    }
+
+    /// Remove a DOI that CrossRef has disproven (its record doesn't match the
+    /// query title) from every source reference that carried it.
+    /// Pure helper — extracted for unit testing.
+    static func scrubbingDisprovenDOI(_ doi: String, from results: [SourceResult]) -> [SourceResult] {
+        let badDOI = doi.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        return results.map { sourceResult in
+            var scrubbed = sourceResult
+            if scrubbed.reference.doi?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) == badDOI {
+                scrubbed.reference.doi = nil
+            }
+            return scrubbed
+        }
     }
 
     // MARK: - Identifier-based fetch

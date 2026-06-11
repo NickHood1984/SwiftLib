@@ -193,14 +193,30 @@ extension CNKIMetadataProvider {
             "requestVerification title=\(title) url=\(url.absoluteString) message=\(message)"
         )
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            verificationContinuation = continuation
-            verificationSession = VerificationSession(
-                url: url,
-                title: title,
-                message: message,
-                continueLabel: continueLabel
-            )
+        // The continuation is resumed only by user action in the verification
+        // panel. It MUST also react to task cancellation: refreshReference
+        // races the whole pipeline against a timeout via withTaskGroup, and
+        // the group cannot exit until every child finishes — a continuation
+        // that ignores cancellation would keep the refresh (and its progress
+        // toast) suspended forever after the timeout fired.
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CNKIError.verificationCancelled)
+                    return
+                }
+                verificationContinuation = continuation
+                verificationSession = VerificationSession(
+                    url: url,
+                    title: title,
+                    message: message,
+                    continueLabel: continueLabel
+                )
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelVerification()
+            }
         }
     }
 

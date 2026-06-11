@@ -25,11 +25,15 @@ extension ContentView {
     }
 
     func refreshSingleReferenceMetadata(_ reference: Reference) {
+        refreshTask?.cancel()
         viewModel.isImporting = true
         viewModel.importProgress = "正在刷新元数据…"
 
-        Task { @MainActor in
+        let task = Task { @MainActor in
             let result = await metadataResolver.refreshReference(reference, allowCandidateSelection: true)
+            // The cancel button already reset the toast; don't overwrite it
+            // with a stale result from the cancelled refresh.
+            guard !Task.isCancelled else { return }
             switch result {
             case .refreshed(let refreshed):
                 saveRefreshedReference(refreshed, message: "已刷新：\(refreshed.title)")
@@ -60,6 +64,8 @@ extension ContentView {
                 viewModel.errorMessage = message
             }
         }
+
+        refreshTask = task
     }
 
     func refreshBatchMetadata(for references: [Reference]) {

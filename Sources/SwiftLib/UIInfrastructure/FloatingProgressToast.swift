@@ -7,7 +7,7 @@ struct FloatingProgressToast: View {
     var onCancel: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: SLDesign.Spacing.lg) {
             if isSpinning {
                 NeonBreathingLoader(diameter: 20)
                     .frame(width: 20, height: 20)
@@ -18,14 +18,14 @@ struct FloatingProgressToast: View {
             }
 
             Text(message)
-                .font(.caption.weight(.medium))
+                .font(.slCaption)
                 .foregroundStyle(.primary)
                 .lineLimit(1)
 
             if isSpinning, let onCancel {
                 Divider()
                     .frame(height: 12)
-                    .padding(.horizontal, 2)
+                    .padding(.horizontal, SLDesign.Spacing.tiny)
                 Button(action: onCancel) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 12))
@@ -36,14 +36,18 @@ struct FloatingProgressToast: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 7)
+        .padding(.vertical, SLDesign.Spacing.md)
         .background {
             Capsule(style: .continuous)
                 .fill(backgroundColor)
-                .shadow(color: isSpinning ? Color.black.opacity(0.16) : .black.opacity(0.12), radius: 10, y: 4)
-                .shadow(color: isSpinning ? Color.orange.opacity(0.08) : .clear, radius: 18, y: 0)
         }
-        .padding(.top, 10)
+        .overlay {
+            Capsule(style: .continuous)
+                .strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
+        .shadow(color: isSpinning ? Color.orange.opacity(0.08) : .clear, radius: 18, y: 0)
+        .padding(.top, SLDesign.Spacing.lg)
     }
 
     private var backgroundColor: Color {

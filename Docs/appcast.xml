@@ -3,6 +3,23 @@
     <channel>
         <title>SwiftLib</title>
         <item>
+            <title>1.5.1</title>
+            <pubDate>Thu, 11 Jun 2026 11:56:50 +0800</pubDate>
+            <link>https://github.com/NickHood1984/SwiftLib</link>
+            <sparkle:fullReleaseNotesLink>https://github.com/NickHood1984/SwiftLib/releases/tag/v1.5.1</sparkle:fullReleaseNotesLink>
+            <sparkle:version>1.5.1</sparkle:version>
+            <sparkle:shortVersionString>1.5.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <sparkle:releaseNotesLink>https://NickHood1984.github.io/SwiftLib/releases/SwiftLib-1.5.1.md</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.5.1/SwiftLib-1.5.1.dmg" length="25402917" type="application/octet-stream" sparkle:edSignature="MG6hKCWhGNitsUhkWnUhSTLRUYueeOiaIdtEb4gTS2ozQpHubk7GgSyxZtcE0C/3lQlT3taEa1jTYucpnCgQCA=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.5.1/SwiftLib1.5.1-1.5.0.delta" sparkle:deltaFrom="1.5.0" length="1530994" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977616" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="otCIRxjeZtbWwr17fjLYPtLvLerCntWGEIeRmCb8JJzIs/a42jlc/Ch+ALKqDurboZzCDbfkW8s3B8ps0tpcCA=="/>
+                <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.5.1/SwiftLib1.5.1-1.4.1.delta" sparkle:deltaFrom="1.4.1" length="1995814" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977616" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="2ID0+L53DEQOTUL7T9onUkjeMPdx9kPvW26GUHt2w4AGoMYCo26lUZubRKjFr2bIgDrQJOXQyhn7SQa+S7W2Dw=="/>
+                <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.5.1/SwiftLib1.5.1-1.4.0.delta" sparkle:deltaFrom="1.4.0" length="2398190" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977616" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="iFuS4W4iD18rqFMMShZqR3IsokgyZd92qgN6I0FAXyNHSGENVdt1JJ167UmCExZPaMHeBnfeZDvztVRG67zIAw=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>1.5.0</title>
             <pubDate>Sat, 06 Jun 2026 14:18:43 +0800</pubDate>
             <link>https://github.com/NickHood1984/SwiftLib</link>
@@ -25,18 +42,6 @@
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <sparkle:releaseNotesLink>https://NickHood1984.github.io/SwiftLib/releases/SwiftLib-1.4.1.md</sparkle:releaseNotesLink>
             <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.4.1/SwiftLib-1.4.1.dmg" length="25741030" type="application/octet-stream" sparkle:edSignature="BNMDbNRx2sbk8vBLSz3fm7bZorBW1MJFg+t8MedqDsTbYrTr9OrfZxNSqEEtjk1/gOd4YUhvmC8cZ7MGQPjtBQ=="/>
-        </item>
-        <item>
-            <title>1.4.0</title>
-            <pubDate>Mon, 18 May 2026 14:39:22 +0800</pubDate>
-            <link>https://github.com/NickHood1984/SwiftLib</link>
-            <sparkle:fullReleaseNotesLink>https://github.com/NickHood1984/SwiftLib/releases/tag/v1.4.0</sparkle:fullReleaseNotesLink>
-            <sparkle:version>1.4.0</sparkle:version>
-            <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <sparkle:releaseNotesLink>https://NickHood1984.github.io/SwiftLib/releases/SwiftLib-1.4.0.md</sparkle:releaseNotesLink>
-            <enclosure url="https://github.com/NickHood1984/SwiftLib/releases/download/v1.4.0/SwiftLib-1.4.0.dmg" length="24631865" type="application/octet-stream" sparkle:edSignature="dpVTRKHGh5MW2MpXfLlkAQJlcJRTQ/8o5zNQ9Dn+pNRlvPLSZerC7oq7Aw9W1kyrF8n/iq4Rq9YHLcPjQvXcBg=="/>
         </item>
     </channel>
 </rss>

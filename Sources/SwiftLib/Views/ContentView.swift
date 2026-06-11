@@ -6,6 +6,7 @@ struct ContentView: View {
     @Environment(\.openWindow) var openWindow
     @StateObject var viewModel: LibraryViewModel
     @StateObject var cnkiMetadataProvider = CNKIMetadataProvider()
+    @ObservedObject var baiduScholarEngine = BaiduScholarWebEngine.shared
     @AppStorage("hasPromptedCLIInstallation") private var hasPromptedCLIInstallation = false
     @State private var showCLIInstallPrompt = false
     @State private var cliInstallResult: CLIInstallResult?
@@ -358,10 +359,14 @@ struct ContentView: View {
         .onChange(of: cnkiMetadataProvider.verificationSession) { _, session in
             presentCNKIVerificationIfNeeded(session)
         }
+        .onChange(of: baiduScholarEngine.verificationSession) { _, session in
+            presentBaiduVerificationIfNeeded(session)
+        }
         .onDisappear {
             workspaceLayoutAutosaveTask?.cancel()
             saveCurrentWorkspaceLayoutSnapshot()
             MetadataVerificationPanels.cnki.dismiss()
+            MetadataVerificationPanels.baidu.dismiss()
         }
         .alert("安装命令行工具", isPresented: $showCLIInstallPrompt) {
             Button("安装") {
@@ -435,13 +440,12 @@ struct ContentView: View {
     private var cslMessageOverlay: some View {
         if let msg = cslImportMessage {
             Text(msg)
-                .font(.callout)
+                .font(.slBodyMedium)
                 .foregroundStyle(.primary)
-                .padding(10)
-                .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.1), radius: 6, y: 3)
-                .padding(.bottom, 20)
+                .padding(.horizontal, SLDesign.Spacing.xl)
+                .padding(.vertical, SLDesign.Spacing.lg)
+                .slOverlaySurface()
+                .padding(.bottom, SLDesign.Spacing.xxxl)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
@@ -449,15 +453,15 @@ struct ContentView: View {
     @ViewBuilder
     private var pendingQueueNoticeOverlay: some View {
         if let notice = pendingQueueNotice {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: SLDesign.Spacing.lg) {
+                HStack(alignment: .top, spacing: SLDesign.Spacing.lg) {
                     Image(systemName: "tray.full.fill")
                         .foregroundStyle(.orange)
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: SLDesign.Spacing.xs) {
                         Text(notice.title)
-                            .font(.headline)
+                            .font(.slSubheadline)
                         Text(notice.message)
-                            .font(.callout)
+                            .font(.slBody)
                             .foregroundStyle(.primary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -487,11 +491,9 @@ struct ContentView: View {
             }
             .padding(14)
             .frame(maxWidth: 360, alignment: .leading)
-            .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
-            .padding(.trailing, 20)
-            .padding(.bottom, 20)
+            .slOverlaySurface()
+            .padding(.trailing, SLDesign.Spacing.xxxl)
+            .padding(.bottom, SLDesign.Spacing.xxxl)
             .transition(.move(edge: .trailing).combined(with: .opacity))
         }
     }
@@ -513,6 +515,23 @@ struct ContentView: View {
 
     private func syncVerificationPanels() {
         presentCNKIVerificationIfNeeded(cnkiMetadataProvider.verificationSession)
+        presentBaiduVerificationIfNeeded(baiduScholarEngine.verificationSession)
+    }
+
+    private func presentBaiduVerificationIfNeeded(_ session: BaiduScholarWebEngine.VerificationSession?) {
+        guard let session else {
+            MetadataVerificationPanels.baidu.dismiss()
+            return
+        }
+
+        MetadataVerificationPanels.baidu.present(title: session.title, onClose: {
+            baiduScholarEngine.cancelVerification()
+        }) {
+            BaiduScholarVerificationSheet(
+                provider: baiduScholarEngine,
+                session: session
+            )
+        }
     }
 
     private func presentCNKIVerificationIfNeeded(_ session: CNKIMetadataProvider.VerificationSession?) {

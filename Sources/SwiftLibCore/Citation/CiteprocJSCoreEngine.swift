@@ -378,6 +378,26 @@ public final class CiteprocJSCoreEngine {
     // MARK: - Helpers
 
     private func resetProcessorState() throws {
+        // Fast path: citeproc-js's documented `restoreProcessorState([])`
+        // clears the citation registry and disambiguation state WITHOUT
+        // re-parsing the style + locale XML. Re-instantiating `CSL.Engine`
+        // here used to cost hundreds of milliseconds per render for large
+        // styles (APA/GB-T 7714) — and this method runs on every preview
+        // render, so it dominated citation rendering latency in the app.
+        let restoreScript = """
+        try {
+            __swiftlib_engine.restoreProcessorState([]);
+            "ok";
+        } catch(e) {
+            "error:" + e.message;
+        }
+        """
+        if jsContext.evaluateScript(restoreScript)?.toString() == "ok" {
+            return
+        }
+
+        // Fallback: full engine rebuild (only reached if restore fails,
+        // e.g. the engine reference was clobbered by an earlier JS error).
         let resetScript = """
         try {
             __swiftlib_engine = new CSL.Engine(__swiftlib_sys, __swiftlib_style);

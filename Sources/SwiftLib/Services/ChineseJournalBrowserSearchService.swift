@@ -98,7 +98,20 @@ final class ChineseJournalBrowserSearchEngine: NSObject, WKNavigationDelegate {
         channel: ChineseJournalBrowserSearchService.Channel,
         seed: MetadataResolutionSeed
     ) async -> ChineseJournalBrowserSearchService.SearchOutcome {
+        // Serialize overlapping searches instead of bailing out: batch refresh
+        // runs up to 3 references concurrently, and returning `.noResult` here
+        // silently dropped the Wanfang/VIP fallback for every caller but the
+        // first — those references then failed with "未找到候选" even though
+        // the channel was merely busy. Each in-flight search is bounded by the
+        // 30s page-load timeout, so the wait below is bounded too.
+        var waitedNanos: UInt64 = 0
+        let maxWaitNanos: UInt64 = 65_000_000_000 // ~2 queued searches
+        while pendingContinuation != nil, waitedNanos < maxWaitNanos {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            waitedNanos += 250_000_000
+        }
         guard pendingContinuation == nil else { return .noResult }
+
         let query = Self.queryString(for: seed)
         guard !query.isEmpty else { return .noResult }
 
@@ -400,8 +413,23 @@ final class ChineseJournalBrowserSearchEngine: NSObject, WKNavigationDelegate {
         seed: MetadataResolutionSeed,
         pageURL: String?
     ) -> MetadataCandidate {
-        let expectedTitle = seed.title ?? raw.title
-        let titleScore = MetadataResolution.titleSimilarity(expectedTitle, raw.title)
+        // Han names must not go through the Western-oriented AuthorName.parse —
+        // it splits "张 三" into given/family and corrupts CSL output.
+        let authors = (raw.authors ?? []).map(MetadataResolution.structuredChineseAuthor(from:))
+
+        // Honest multi-field score (title/author/year/journal), on the same
+        // scale as CNKI candidates. The previous `max(titleScore, 0.45)` floor
+        // let weakly related Wanfang/VIP rows outrank well-matched CNKI
+        // candidates in the merged confirmation list and showed users a
+        // misleading "45%" for junk results.
+        let score = MetadataResolution.scoreStructuredChineseCandidate(
+            seed: seed,
+            title: raw.title,
+            authors: authors,
+            journal: raw.journal?.swiftlib_nilIfBlank,
+            year: raw.year
+        )
+
         let matchedBy = [
             "title",
             raw.authors?.isEmpty == false ? "author" : nil,
@@ -413,11 +441,11 @@ final class ChineseJournalBrowserSearchEngine: NSObject, WKNavigationDelegate {
         return MetadataCandidate(
             source: channel.source,
             title: raw.title,
-            authors: (raw.authors ?? []).map { AuthorName.parse($0) },
+            authors: authors,
             journal: raw.journal?.swiftlib_nilIfBlank,
             year: raw.year,
             detailURL: raw.url?.swiftlib_nilIfBlank ?? pageURL ?? "",
-            score: max(titleScore, 0.45),
+            score: score,
             snippet: raw.abstract?.swiftlib_nilIfBlank,
             workKind: .journalArticle,
             referenceType: .journalArticle,

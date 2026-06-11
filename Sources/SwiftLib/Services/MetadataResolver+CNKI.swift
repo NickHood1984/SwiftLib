@@ -269,11 +269,68 @@ extension MetadataResolver {
             candidateEnvelopes.append(browserEnvelope)
         }
 
+        // 最后一道回退：万方/维普都没有产出候选时，尝试百度学术聚合检索。
+        // （v1.3.0 引入的百度回退在 v1.4.0 重构中丢失了调用链，这里重新接回。）
+        if candidateEnvelopes.isEmpty,
+           let baiduEnvelope = await baiduScholarFallbackEnvelope(seed: seed, fallback: fallback) {
+            candidateEnvelopes.append(baiduEnvelope)
+        }
+
         if let mergedEnvelope = Self.mergedChineseBrowserCandidateEnvelopes(candidateEnvelopes) {
             return .candidate(mergedEnvelope)
         }
 
         return nil
+    }
+
+    /// 百度学术兜底检索：返回单候选 envelope，统一走人工确认（百度是聚合页，
+    /// 证据质量低于知网/万方/维普详情页，不做自动验证）。
+    private func baiduScholarFallbackEnvelope(
+        seed: MetadataResolutionSeed,
+        fallback: Reference?
+    ) async -> CandidateEnvelope? {
+        guard let title = seed.title?.swiftlib_nilIfBlank else { return nil }
+
+        let outcome = await BaiduScholarService.searchOutcome(title: title, author: seed.firstAuthor)
+        guard case .reference(let reference) = outcome else {
+            resolverTrace("baiduScholarFallbackEnvelope → 百度学术无结果或受阻")
+            return nil
+        }
+
+        let score = MetadataResolution.scoreStructuredChineseCandidate(
+            seed: seed,
+            title: reference.title,
+            authors: reference.authors,
+            journal: reference.journal,
+            year: reference.year
+        )
+        resolverTrace("baiduScholarFallbackEnvelope → 百度学术候选 title=\"\(reference.title)\" score=\(String(format: "%.3f", score))")
+
+        let candidate = MetadataCandidate(
+            source: .baiduScholar,
+            title: reference.title,
+            authors: reference.authors,
+            journal: reference.journal,
+            year: reference.year,
+            detailURL: reference.url ?? "",
+            score: score,
+            snippet: reference.abstract,
+            workKind: .journalArticle,
+            referenceType: .journalArticle,
+            matchedBy: [
+                "title",
+                reference.authors.isEmpty ? nil : "author",
+                reference.year == nil ? nil : "year",
+                reference.journal?.swiftlib_nilIfBlank == nil ? nil : "journal",
+            ].compactMap { $0 }
+        )
+        return CandidateEnvelope(
+            seed: seed,
+            fallbackReference: fallback,
+            currentReference: fallback,
+            candidates: [candidate],
+            message: "知网与万方/维普均无结果，已从百度学术检索到候选，请确认后导入。"
+        )
     }
 
     private func resolveChineseJournalBrowserFallbackEnvelope(

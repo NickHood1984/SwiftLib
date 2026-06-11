@@ -206,6 +206,60 @@ final class ChineseMetadataConsensusTests: XCTestCase {
         XCTAssertEqual(result?.metadataSource, .cnki)
     }
 
+    // MARK: - Author selection regressions
+
+    /// 全部来源都没有中文作者名时，不得用低优先级源（OpenAlex）的作者列表
+    /// 覆盖最高优先级来源的作者顺序（旧实现 max(by:) 取最后一个极大元素，
+    /// 全 0 并列时恰好把作者顺序交给了优先级最低的源）。
+    func testAuthorsNotOverriddenByLowestPrioritySourceWhenNoHanNames() {
+        let seed = MetadataResolutionSeed(fileName: "paper", title: "Some English Paper")
+
+        let crossRef = contribution(
+            source: .crossRef,
+            title: "Some English Paper",
+            authors: [
+                AuthorName(given: "Alice", family: "First"),
+                AuthorName(given: "Bob", family: "Second"),
+            ],
+            seedTitle: "Some English Paper"
+        )
+        let openAlex = contribution(
+            source: .openAlex,
+            title: "Some English Paper",
+            authors: [
+                AuthorName(given: "Bob", family: "Second"),
+                AuthorName(given: "Alice", family: "First"),
+            ],
+            seedTitle: "Some English Paper"
+        )
+
+        let result = ChineseMetadataConsensus.buildConsensus(seed: seed, contributions: [crossRef, openAlex])
+
+        XCTAssertEqual(result?.authors.first?.family, "First", "无中文作者时应保留最高优先级源（CrossRef）的作者顺序")
+    }
+
+    /// 中文作者数并列时按来源优先级取舍（CNKI 优先于维普）。
+    func testAuthorsTieBrokenBySourcePriority() {
+        let seed = MetadataResolutionSeed(fileName: "论文", title: "某中文论文")
+
+        let cnki = contribution(
+            source: .cnki,
+            title: "某中文论文",
+            authors: [AuthorName(given: "", family: "张三"), AuthorName(given: "", family: "李四")],
+            seedTitle: "某中文论文"
+        )
+        let vip = contribution(
+            source: .vip,
+            title: "某中文论文",
+            authors: [AuthorName(given: "", family: "李四"), AuthorName(given: "", family: "张三")],
+            seedTitle: "某中文论文"
+        )
+
+        let result = ChineseMetadataConsensus.buildConsensus(seed: seed, contributions: [vip, cnki])
+
+        XCTAssertEqual(result?.authors.first?.family, "张三", "中文作者数并列时应取优先级更高的 CNKI 的顺序")
+    }
+
     // MARK: - makeContributions priority
 
     func testMakeContributionsAssignsPriorityOrderCNKIFirst() {

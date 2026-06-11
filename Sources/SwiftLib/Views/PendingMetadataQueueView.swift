@@ -89,8 +89,7 @@ struct PendingMetadataQueueView: View {
                 .background(Color.primary.opacity(0.05), in: Capsule())
             Spacer(minLength: 0)
         }
-        .padding(.leading, 78)
-        .padding(.trailing, 18)
+        .padding(.horizontal, 18)
         .padding(.top, 16)
         .padding(.bottom, 10)
     }
@@ -404,10 +403,12 @@ private struct CandidateCard: View {
             }
 
             // 类型
-            let typeStr = candidate.referenceType?.rawValue
-                ?? (candidate.workKind == .unknown ? "" : candidate.workKind.referenceType.rawValue)
-            if !typeStr.isEmpty {
-                Text(typeStr).font(.caption).foregroundStyle(.tertiary)
+            let refType = candidate.referenceType
+                ?? (candidate.workKind == .unknown ? nil : candidate.workKind.referenceType)
+            if let refType {
+                Text(Self.chineseTypeLabel(for: refType))
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
 
             // 摘要
@@ -418,7 +419,9 @@ private struct CandidateCard: View {
                     .lineLimit(3)
             }
 
-            // 信息评估 + 使用按钮
+            // 信息评估 + 使用按钮。
+            // 只保留一条状态结论（齐/缺什么）和一条匹配依据——
+            // 候选已具备的字段在上方的作者/期刊/摘要里都看得到，不再罗列。
             HStack(alignment: .bottom, spacing: 8) {
                 if let assessment {
                     VStack(alignment: .leading, spacing: 2) {
@@ -429,13 +432,8 @@ private struct CandidateCard: View {
                         )
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(assessment.canImportDirectly ? .green : .orange)
-                        if !assessment.presentFields.isEmpty {
-                            Text("已有：\(assessment.presentFields.joined(separator: " / "))")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
                         if !candidate.matchedBy.isEmpty {
-                            Text("匹配: \(candidate.matchedBy.joined(separator: " / "))")
+                            Text("匹配依据：\(Self.chineseMatchedByLabels(candidate.matchedBy).joined(separator: " · "))")
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         }
@@ -462,5 +460,49 @@ private struct CandidateCard: View {
                     lineWidth: 1
                 )
         )
+    }
+
+    // MARK: - 中文标签
+
+    static func chineseTypeLabel(for type: ReferenceType) -> String {
+        switch type {
+        case .journalArticle: return "期刊论文"
+        case .magazineArticle: return "杂志文章"
+        case .newspaperArticle: return "报纸文章"
+        case .preprint: return "预印本"
+        case .book: return "图书"
+        case .bookSection: return "图书章节"
+        case .conferencePaper: return "会议论文"
+        case .thesis: return "学位论文"
+        case .dataset: return "数据集"
+        case .software: return "软件"
+        case .standard: return "标准"
+        case .manuscript: return "手稿"
+        case .interview: return "访谈"
+        case .presentation: return "演示报告"
+        case .blogPost: return "博客文章"
+        case .forumPost: return "论坛帖子"
+        case .legalCase: return "法律案例"
+        case .legislation: return "法律法规"
+        case .webpage: return "网页"
+        case .report: return "报告"
+        case .patent: return "专利"
+        case .other: return "其他"
+        }
+    }
+
+    static func chineseMatchedByLabels(_ matchedBy: [String]) -> [String] {
+        matchedBy.map { key in
+            switch key.lowercased() {
+            case "title": return "题名"
+            case "author": return "作者"
+            case "year": return "年份"
+            case "journal": return "期刊"
+            case "abstract": return "摘要"
+            case "doi": return "DOI"
+            case "identifier": return "标识符"
+            default: return key
+            }
+        }
     }
 }

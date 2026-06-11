@@ -65,7 +65,54 @@ public final class CSLManager {
         try? FileManager.default.createDirectory(at: storageDir, withIntermediateDirectories: true)
     }
 
+    /// Testing / advanced: use an explicit storage directory instead of
+    /// Application Support. Behavior is otherwise identical to `init()`.
+    public init(storageDirectory: URL) {
+        storageDir = storageDirectory
+        try? FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+    }
+
     // MARK: - Import
+
+    /// Build a filesystem-safe filename for a style id.
+    ///
+    /// Real-world CSL style ids are URLs (e.g. `http://www.zotero.org/styles/apa`).
+    /// Using the raw id as a filename embeds `/` separators, so the write lands
+    /// in nonexistent subdirectories and throws — which used to make importing
+    /// virtually every Zotero-repository style fail. The id is flattened to a
+    /// single path component; a stable hash suffix keeps distinct ids from
+    /// colliding after sanitization. Lookup is unaffected: all consumers match
+    /// styles by the `<id>` parsed from file contents, not by filename.
+    static func safeStyleFileName(forStyleId id: String) -> String {
+        let sanitized = String(id.map { ch -> Character in
+            (ch.isLetter || ch.isNumber || ch == "." || ch == "-" || ch == "_") ? ch : "-"
+        })
+        .replacingOccurrences(of: #"-{2,}"#, with: "-", options: .regularExpression)
+        .trimmingCharacters(in: CharacterSet(charactersIn: "-."))
+
+        if sanitized == id { return "\(id).csl" }
+        let stem = sanitized.isEmpty ? "style" : String(sanitized.suffix(80))
+        return "\(stem)-\(Self.stableHash(id)).csl"
+    }
+
+    /// Stable FNV-1a hash (hex) — must not change across launches, unlike `hashValue`.
+    private static func stableHash(_ value: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in value.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+        return String(hash, radix: 16)
+    }
+
+    /// Refresh every cache layer that can hold stale output for a style:
+    /// the local engine/XML caches were already updated by the caller, but the
+    /// citeproc-js engine pool and the rendered-string LRU cache must also be
+    /// dropped — otherwise re-importing a corrected style keeps rendering with
+    /// the old XML until the app restarts.
+    private func invalidateRenderingCaches(forStyleId id: String) {
+        CitationRenderer.invalidate(styleID: id)
+    }
 
     /// Import a .csl file, returns the style title
     @discardableResult
@@ -85,9 +132,9 @@ public final class CSLManager {
             throw CSLError.invalidStructure("missing style title")
         }
 
-        // Save to storage using the style ID as the filename to avoid collisions
+        // Save to storage keyed by style ID (sanitized) to avoid collisions
         // when two CSL files share the same filename but have different style IDs.
-        let fileName = "\(style.id).csl"
+        let fileName = Self.safeStyleFileName(forStyleId: style.id)
         let dest = storageDir.appendingPathComponent(fileName)
         try data.write(to: dest)
 
@@ -97,6 +144,7 @@ public final class CSLManager {
             cachedXmlData[style.id] = data
             invalidateStyleDescriptorCacheLocked()
         }
+        invalidateRenderingCaches(forStyleId: style.id)
 
         return style.title
     }
@@ -116,13 +164,20 @@ public final class CSLManager {
             throw CSLError.invalidStructure("missing style title")
         }
 
-        let dest = storageDir.appendingPathComponent(fileName)
+        // Honor only the last path component of the caller-supplied name and
+        // fall back to the sanitized style id if it is empty or unsafe.
+        let lastComponent = (fileName as NSString).lastPathComponent
+        let safeName = lastComponent.hasSuffix(".csl") && !lastComponent.isEmpty
+            ? lastComponent
+            : Self.safeStyleFileName(forStyleId: style.id)
+        let dest = storageDir.appendingPathComponent(safeName)
         try data.write(to: dest)
         withCacheLock {
             cachedEngines[style.id] = CSLEngine(style: style)
             cachedXmlData[style.id] = data
             invalidateStyleDescriptorCacheLocked()
         }
+        invalidateRenderingCaches(forStyleId: style.id)
 
         return style.title
     }
@@ -138,13 +193,14 @@ public final class CSLManager {
         }
         // Prefer the id embedded in the CSL XML; fall back to the caller-supplied id
         let resolvedId = style.id.isEmpty ? id : style.id
-        let dest = storageDir.appendingPathComponent("\(resolvedId).csl")
+        let dest = storageDir.appendingPathComponent(Self.safeStyleFileName(forStyleId: resolvedId))
         try xmlData.write(to: dest)
         withCacheLock {
             cachedEngines[resolvedId] = CSLEngine(style: style)
             cachedXmlData[resolvedId] = xmlData
             invalidateStyleDescriptorCacheLocked()
         }
+        invalidateRenderingCaches(forStyleId: resolvedId)
         return style.title.isEmpty ? title : style.title
     }
 
@@ -360,6 +416,7 @@ public final class CSLManager {
             }
         }
         invalidateStyleDescriptorCache()
+        invalidateRenderingCaches(forStyleId: id)
     }
 
     private func invalidateStyleDescriptorCache() {

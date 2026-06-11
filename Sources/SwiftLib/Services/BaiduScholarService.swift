@@ -288,14 +288,28 @@ final class BaiduScholarWebEngine: NSObject, WKNavigationDelegate, ObservableObj
     ) async throws {
         guard verificationContinuation == nil else { return }
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            verificationContinuation = continuation
-            verificationSession = VerificationSession(
-                url: url,
-                title: title,
-                message: message,
-                continueLabel: continueLabel
-            )
+        // Must react to task cancellation: the metadata refresh pipeline races
+        // against a timeout via withTaskGroup, and the group cannot exit until
+        // every child finishes. A continuation that only resumes on user action
+        // would keep the refresh suspended forever once the timeout fires.
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                verificationContinuation = continuation
+                verificationSession = VerificationSession(
+                    url: url,
+                    title: title,
+                    message: message,
+                    continueLabel: continueLabel
+                )
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelVerification()
+            }
         }
     }
 

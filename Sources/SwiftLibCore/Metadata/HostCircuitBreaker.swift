@@ -25,6 +25,7 @@ public actor HostCircuitBreaker {
         var openUntil: Date? = nil
         var extendedCooldownSeconds: TimeInterval = 0
         var probeInFlight: Bool = false
+        var probeStartedAt: Date? = nil
     }
 
     private var states: [String: State] = [:]
@@ -32,46 +33,61 @@ public actor HostCircuitBreaker {
     private let failureThreshold: Int
     private let baseCooldown: TimeInterval
     private let maxCooldown: TimeInterval
+    /// If a half-open probe never reports back (e.g. its task was cancelled
+    /// before reaching recordSuccess/recordFailure), allow a replacement probe
+    /// after this long so the breaker can't get stuck rejecting forever.
+    private let probeTimeout: TimeInterval
 
     public init(
         failureThreshold: Int = 5,
         baseCooldown: TimeInterval = 30,
-        maxCooldown: TimeInterval = 600
+        maxCooldown: TimeInterval = 600,
+        probeTimeout: TimeInterval = 60
     ) {
         self.failureThreshold = failureThreshold
         self.baseCooldown = baseCooldown
         self.maxCooldown = maxCooldown
+        self.probeTimeout = probeTimeout
     }
 
     /// Check whether a request to `host` should be allowed.
-    /// When the breaker is open and no probe is in flight, transitions
-    /// to half-open and lets exactly one probe through.
+    ///
+    /// State machine:
+    /// - Closed (no `openUntil`): allow.
+    /// - Open (`openUntil` in the future): reject immediately — this is the
+    ///   whole point of the breaker; callers must not wait out a network
+    ///   timeout against a host that is known to be down.
+    /// - Half-open (`openUntil` reached): allow exactly ONE probe; all other
+    ///   callers keep getting rejected until the probe reports success
+    ///   (breaker closes) or failure (cooldown extends). The `openUntil`
+    ///   marker is intentionally kept in place while the probe is in flight
+    ///   so concurrent callers cannot slip past through the closed path.
     public func check(host: String) -> Decision {
         let host = host.lowercased()
         let now = Date()
         var state = states[host] ?? State()
 
-        if let openUntil = state.openUntil {
-            if openUntil > now {
-                // Still open.
-                if state.probeInFlight {
-                    let retry = openUntil.timeIntervalSince(now)
-                    return .reject(retryAfter: retry)
-                }
-                // Half-open: allow a single probe, but keep the breaker
-                // nominally open until the probe either succeeds or fails.
-                state.probeInFlight = true
-                states[host] = state
-                return .allow
-            } else {
-                // Cooldown expired: enter half-open automatically.
-                state.openUntil = nil
-                state.probeInFlight = true
-                states[host] = state
-                return .allow
-            }
+        guard let openUntil = state.openUntil else { return .allow }
+
+        if openUntil > now {
+            // Still cooling down: short-circuit immediately.
+            return .reject(retryAfter: openUntil.timeIntervalSince(now))
         }
 
+        // Cooldown expired → half-open.
+        if state.probeInFlight {
+            // A probe is already out. Unless it has been silent past the
+            // timeout (cancelled task, etc.), keep rejecting.
+            if let startedAt = state.probeStartedAt,
+               now.timeIntervalSince(startedAt) < probeTimeout {
+                return .reject(retryAfter: probeTimeout - now.timeIntervalSince(startedAt))
+            }
+            // Probe went silent — let this caller take over as the new probe.
+        }
+
+        state.probeInFlight = true
+        state.probeStartedAt = now
+        states[host] = state
         return .allow
     }
 
@@ -85,6 +101,7 @@ public actor HostCircuitBreaker {
         var state = states[host] ?? State()
         state.consecutiveFailures += 1
         state.probeInFlight = false
+        state.probeStartedAt = nil
 
         if state.consecutiveFailures >= failureThreshold {
             // Exponential backoff up to maxCooldown.

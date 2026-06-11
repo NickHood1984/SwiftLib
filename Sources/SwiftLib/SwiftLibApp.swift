@@ -96,6 +96,9 @@ struct SwiftLibApp: App {
             PendingMetadataQueueSceneView()
                 .swiftLibElegantScrollersInSubtree()
         }
+        // 隐藏系统标题栏：窗口顶部不再出现与内容割裂的深色条带，
+        // 标题只保留内容区一处（头部已为红绿灯按钮预留空间）。
+        .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
         .defaultSize(width: 720, height: 520)
 
